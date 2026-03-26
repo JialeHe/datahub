@@ -1,6 +1,7 @@
 import datetime
 import json
 import logging
+import warnings
 from dataclasses import dataclass
 from json import JSONDecodeError
 from typing import (
@@ -157,6 +158,20 @@ class LookerDashboardSource(TestableSource, StatefulIngestionSourceBase):
         super().__init__(config, ctx)
         self.source_config: LookerDashboardSourceConfig = config
         self.reporter: LookerDashboardSourceReport = LookerDashboardSourceReport()
+        # Structured warning — visible in DataHub UI ingestion run report
+        self.reporter.report_warning(
+            title="Source Deprecated",
+            message=(
+                "The 'looker' source is deprecated. "
+                "Migrate to 'looker-v2' for unified extraction from both the Looker API and LookML files."
+            ),
+        )
+        # Python warning — visible in CLI logs
+        warnings.warn(
+            "The 'looker' source is deprecated. Migrate to 'looker-v2'.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.looker_api: LookerAPI = LookerAPI(self.source_config)
         self.user_registry: LookerUserRegistry = LookerUserRegistry(
             self.looker_api, self.reporter
