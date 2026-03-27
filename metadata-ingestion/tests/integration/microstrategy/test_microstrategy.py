@@ -2,7 +2,9 @@ import pytest
 import time_machine
 
 from datahub.ingestion.run.pipeline import Pipeline
+from datahub.ingestion.source.microstrategy.source import MicroStrategySource
 from datahub.testing import mce_helpers
+from tests.test_helpers import test_connection_helpers
 
 FROZEN_TIME = "2024-03-12 14:00:00"
 
@@ -85,9 +87,6 @@ def test_connection_with_valid_credentials():
     """
     Test that connection succeeds with valid credentials (anonymous access).
     """
-    from datahub.ingestion.source.microstrategy.source import MicroStrategySource
-    from tests.test_helpers import test_connection_helpers
-
     report = test_connection_helpers.run_test_connection(
         MicroStrategySource,
         {
@@ -105,9 +104,6 @@ def test_connection_with_invalid_url():
     """
     Test that connection fails with invalid base URL.
     """
-    from datahub.ingestion.source.microstrategy.source import MicroStrategySource
-    from tests.test_helpers import test_connection_helpers
-
     report = test_connection_helpers.run_test_connection(
         MicroStrategySource,
         {

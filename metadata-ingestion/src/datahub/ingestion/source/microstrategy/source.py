@@ -22,6 +22,7 @@ from datahub.emitter.mce_builder import (
     make_chart_urn,
     make_dashboard_urn,
     make_data_platform_urn,
+    make_dataplatform_instance_urn,
     make_dataset_urn_with_platform_instance,
     make_user_urn,
 )
@@ -361,7 +362,9 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
         chart_urns: List[str] = []
         if self.config.include_lineage:
             try:
-                dashboard_def = self.client.get_dashboard_definition(dashboard["id"])
+                dashboard_def = self.client.get_dashboard_definition(
+                    dashboard["id"], project["id"]
+                )
                 visualization_ids = self._extract_visualization_ids(dashboard_def)
 
                 # Create chart URNs for each visualization
@@ -429,7 +432,9 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
             aspect=DataPlatformInstanceClass(
                 platform=make_data_platform_urn(self.platform),
                 instance=(
-                    make_data_platform_urn(self.config.platform_instance)
+                    make_dataplatform_instance_urn(
+                        self.platform, self.config.platform_instance
+                    )
                     if self.config.platform_instance
                     else None
                 ),
@@ -478,6 +483,11 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
             report.get("owner"),
         )
 
+        report_type_raw = report.get("type")
+        report_type_str = (
+            str(report_type_raw) if report_type_raw is not None else "report"
+        )
+
         # Chart info aspect
         chart_info = ChartInfoClass(
             title=report.get("name", report["id"]),
@@ -489,7 +499,7 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 "project_id": project["id"],
                 "project_name": project.get("name", ""),
                 "report_id": report["id"],
-                "report_type": report.get("type", "report"),
+                "report_type": report_type_str,
             },
         )
 
@@ -516,7 +526,9 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
             aspect=DataPlatformInstanceClass(
                 platform=make_data_platform_urn(self.platform),
                 instance=(
-                    make_data_platform_urn(self.config.platform_instance)
+                    make_dataplatform_instance_urn(
+                        self.platform, self.config.platform_instance
+                    )
                     if self.config.platform_instance
                     else None
                 ),
@@ -586,7 +598,9 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
             aspect=DataPlatformInstanceClass(
                 platform=make_data_platform_urn(self.platform),
                 instance=(
-                    make_data_platform_urn(self.config.platform_instance)
+                    make_dataplatform_instance_urn(
+                        self.platform, self.config.platform_instance
+                    )
                     if self.config.platform_instance
                     else None
                 ),
@@ -659,7 +673,9 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
             aspect=DataPlatformInstanceClass(
                 platform=make_data_platform_urn(self.platform),
                 instance=(
-                    make_data_platform_urn(self.config.platform_instance)
+                    make_dataplatform_instance_urn(
+                        self.platform, self.config.platform_instance
+                    )
                     if self.config.platform_instance
                     else None
                 ),

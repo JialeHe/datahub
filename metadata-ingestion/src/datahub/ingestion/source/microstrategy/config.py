@@ -1,6 +1,6 @@
 from typing import Optional
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 
 from datahub.configuration.common import AllowDenyPattern, ConfigModel
 from datahub.configuration.source_common import (
@@ -71,6 +71,27 @@ class MicroStrategyConnectionConfig(ConfigModel):
         if not v.startswith(("http://", "https://")):
             raise ValueError("base_url must start with http:// or https://")
         return config_clean.remove_trailing_slashes(v)
+
+    @model_validator(mode="after")  # type: ignore[misc]
+    def validate_auth_config(self) -> "MicroStrategyConnectionConfig":
+        """Validate authentication configuration consistency."""
+        # Case 1: Anonymous mode - should not have credentials
+        if self.use_anonymous:
+            if self.username or self.password:
+                raise ValueError(
+                    "When use_anonymous=True, username and password should not be provided. "
+                    "Choose either anonymous access OR credentials, not both."
+                )
+
+        # Case 2: Credential mode - must have both username and password
+        else:
+            if not self.username or not self.password:
+                raise ValueError(
+                    "When use_anonymous=False, both username and password are required. "
+                    "Either provide credentials or set use_anonymous=True."
+                )
+
+        return self
 
 
 class MicroStrategyConfig(

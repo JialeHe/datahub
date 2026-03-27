@@ -477,17 +477,25 @@ class MicroStrategyClient:
                     return []
             raise
 
-    def get_dashboard_definition(self, dashboard_id: str) -> Dict[str, Any]:
+    def get_dashboard_definition(
+        self, dashboard_id: str, project_id: str
+    ) -> Dict[str, Any]:
         """
         Get dashboard definition (visualizations and chapters).
 
         Args:
             dashboard_id: Dashboard/Dossier ID
+            project_id: Project ID (sent as X-MSTR-ProjectID; required by the API)
 
         Returns:
             Dashboard definition dictionary
         """
-        return self._request("GET", f"/api/v2/dossiers/{dashboard_id}/definition")
+        original_headers = dict(self.session.headers)
+        self.session.headers.update({"X-MSTR-ProjectID": project_id})
+        try:
+            return self._request("GET", f"/api/v2/dossiers/{dashboard_id}/definition")
+        finally:
+            self.session.headers = original_headers
 
     def get_reports(self, project_id: str) -> List[Dict[str, Any]]:
         """
@@ -639,7 +647,7 @@ class MicroStrategyClient:
         )
 
         # Set project header for search context
-        original_headers = self.session.headers.copy()
+        original_headers = dict(self.session.headers)
         self.session.headers.update({"X-MSTR-ProjectID": project_id})
 
         try:

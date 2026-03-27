@@ -213,6 +213,7 @@ class TestCubeRegistryResolution:
                             "id": "report_1",
                             "name": "Sales Report",
                             "description": "",
+                            "type": 3,
                             "dataSource": {
                                 "id": "cube_123"
                             },  # References cube from Project B
@@ -240,6 +241,7 @@ class TestCubeRegistryResolution:
             assert len(chart_info_workunits) > 0
             chart_info = chart_info_workunits[0].metadata.aspect  # type: ignore
             assert chart_info is not None
+            assert chart_info.customProperties["report_type"] == "3"  # type: ignore
 
             # Check that lineage includes the cube
             assert hasattr(chart_info, "inputs")
@@ -431,6 +433,10 @@ class TestDashboardVisualizationExtraction:
             assert len(dashboard_info.charts) == 3  # type: ignore
             assert all("viz_" in chart_urn for chart_urn in dashboard_info.charts)  # type: ignore
 
+            mock_client.get_dashboard_definition.assert_called_once_with(
+                "dashboard_1", "project_1"
+            )
+
     def test_empty_dashboard_definition_handled_gracefully(self):
         """Test that dashboards with no visualizations don't crash the source."""
         config_dict = {
@@ -483,6 +489,10 @@ class TestDashboardVisualizationExtraction:
             dashboard_info = dashboard_info_workunits[0].metadata.aspect  # type: ignore
             assert dashboard_info is not None
             assert len(dashboard_info.charts) == 0  # type: ignore
+
+            mock_client.get_dashboard_definition.assert_called_once_with(
+                "dashboard_1", "project_1"
+            )
 
 
 class TestCubeSchemaExtraction:
