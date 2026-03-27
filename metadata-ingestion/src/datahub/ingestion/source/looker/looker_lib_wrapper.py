@@ -14,6 +14,7 @@ from looker_sdk.sdk.api40.models import (
     Dashboard,
     DashboardBase,
     DBConnection,
+    DependencyGraph,
     Folder,
     Look,
     LookmlModel,
@@ -269,6 +270,11 @@ class LookerAPI:
                 logger.warning(f"Failure was {e}")
         # Folder ancestors not found
         return []
+
+    def graph_derived_tables_for_model(self, model: str) -> DependencyGraph:
+        return self.client.graph_derived_tables_for_model(
+            model, transport_options=self.transport_options
+        )
 
     def all_connections(self):
         self.client_stats.all_connections_calls += 1

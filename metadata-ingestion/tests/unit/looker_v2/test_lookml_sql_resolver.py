@@ -1,9 +1,11 @@
 """Unit tests for LookMLSQLResolver."""
 
+from typing import Any
+
 from datahub.ingestion.source.looker_v2.lookml_sql_resolver import LookMLSQLResolver
 
 
-def resolver(**kwargs) -> LookMLSQLResolver:
+def resolver(**kwargs: Any) -> LookMLSQLResolver:
     return LookMLSQLResolver(**kwargs)
 
 

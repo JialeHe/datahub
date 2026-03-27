@@ -174,7 +174,7 @@ class RefinementHandler:
         self.project_name = project_name
         self.project_dependencies = project_dependencies or {}
 
-        self._parser = LookMLParser()
+        self._parser = LookMLParser(template_variables={}, constants={})
 
         # All project paths including main
         self._all_project_paths: Dict[str, Path] = {project_name: self.base_folder}

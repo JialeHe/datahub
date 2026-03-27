@@ -6,26 +6,17 @@ Unified source for Looker dashboards, explores, and LookML views.
 
 from __future__ import annotations
 
-import dataclasses
-import re
-from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, Dict, Literal, Optional, Union
 
 import pydantic
-from looker_sdk.sdk.api40.models import DBConnection
 from pydantic import Field, field_validator, model_validator
 
-from datahub.configuration.common import (
-    AllowDenyPattern,
-    ConfigModel,
-    ConfigurationError,
-    HiddenFromDocs,
-)
-from datahub.configuration.source_common import (
-    EnvConfigMixin,
-    PlatformInstanceConfigMixin,
-)
-from datahub.configuration.validate_field_deprecation import pydantic_field_deprecated
+from datahub.configuration.common import AllowDenyPattern, ConfigModel
 from datahub.configuration.validate_field_removal import pydantic_removed_field
+from datahub.ingestion.source.looker.looker_config import (
+    LookerCommonConfig,
+    LookerConnectionDefinition,
+)
 from datahub.ingestion.source.looker.looker_lib_wrapper import LookerAPIConfig
 from datahub.ingestion.source.state.stale_entity_removal_handler import (
     StatefulStaleMetadataRemovalConfig,
@@ -34,207 +25,12 @@ from datahub.ingestion.source.state.stateful_ingestion_base import (
     StatefulIngestionConfigBase,
 )
 
-# ---------------------------------------------------------------------------
-# Owned copies of naming pattern and connection config classes.
-# Not imported from looker/ — standalone module.
-# ---------------------------------------------------------------------------
-
-
-class NamingPattern(ConfigModel):
-    ALLOWED_VARS: ClassVar[List[str]] = []
-    REQUIRE_AT_LEAST_ONE_VAR: ClassVar[bool] = True
-
-    pattern: str
-
-    @classmethod
-    def __get_validators__(cls):
-        yield cls.pydantic_accept_raw_pattern
-        yield cls.validate
-        yield cls.pydantic_validate_pattern
-
-    @classmethod
-    def pydantic_accept_raw_pattern(cls, v):
-        if isinstance(v, (NamingPattern, dict)):
-            return v
-        assert isinstance(v, str), "pattern must be a string"
-        return {"pattern": v}
-
-    @model_validator(mode="before")
-    @classmethod
-    def pydantic_v2_accept_raw_pattern(cls, v):
-        if isinstance(v, str):
-            return {"pattern": v}
-        return v
-
-    @classmethod
-    def pydantic_validate_pattern(cls, v):
-        assert isinstance(v, NamingPattern)
-        assert v.validate_pattern(cls.REQUIRE_AT_LEAST_ONE_VAR)
-        return v
-
-    @classmethod
-    def allowed_docstring(cls) -> str:
-        return f"Allowed variables are {cls.ALLOWED_VARS}"
-
-    def validate_pattern(self, at_least_one: bool) -> bool:
-        variables = re.findall("({[^}{]+})", self.pattern)
-        variables = [v[1:-1] for v in variables]
-        for v in variables:
-            if v not in self.ALLOWED_VARS:
-                raise ValueError(
-                    f"Failed to find {v} in allowed_variables {self.ALLOWED_VARS}"
-                )
-        if at_least_one and len(variables) == 0:
-            raise ValueError(
-                f"Failed to find any variable assigned to pattern {self.pattern}. "
-                f"Must have at least one. {self.allowed_docstring()}"
-            )
-        return True
-
-    def replace_variables(self, values: Union[Dict[str, Optional[str]], object]) -> str:
-        if not isinstance(values, dict):
-            assert dataclasses.is_dataclass(values) and not isinstance(values, type)
-            values = dataclasses.asdict(values)
-        values = {k: v for k, v in values.items() if v is not None}
-        return self.pattern.format(**values)
-
-
-@dataclasses.dataclass
-class NamingPatternMapping:
-    platform: str
-    env: str
-    project: str
-    model: str
-    name: str
-
-
-@dataclasses.dataclass
-class ViewNamingPatternMapping(NamingPatternMapping):
-    file_path: str
-    folder_path: str
-
-
-class LookerNamingPattern(NamingPattern):
-    ALLOWED_VARS = [field.name for field in dataclasses.fields(NamingPatternMapping)]
-
-
-class LookerViewNamingPattern(NamingPattern):
-    ALLOWED_VARS = [
-        field.name for field in dataclasses.fields(ViewNamingPatternMapping)
-    ]
-
-
-class LookerCommonConfig(EnvConfigMixin, PlatformInstanceConfigMixin):
-    explore_naming_pattern: LookerNamingPattern = pydantic.Field(
-        description=f"Pattern for providing dataset names to explores. {LookerNamingPattern.allowed_docstring()}",
-        default=LookerNamingPattern(pattern="{model}.explore.{name}"),
-    )
-    explore_browse_pattern: LookerNamingPattern = pydantic.Field(
-        description=f"Pattern for providing browse paths to explores. {LookerNamingPattern.allowed_docstring()}",
-        default=LookerNamingPattern(pattern="/Explore/{model}"),
-    )
-    view_naming_pattern: LookerViewNamingPattern = Field(
-        LookerViewNamingPattern(pattern="{project}.view.{name}"),
-        description=f"Pattern for providing dataset names to views. {LookerViewNamingPattern.allowed_docstring()}",
-    )
-    view_browse_pattern: LookerViewNamingPattern = Field(
-        LookerViewNamingPattern(pattern="/Develop/{project}/{folder_path}"),
-        description=f"Pattern for providing browse paths to views. {LookerViewNamingPattern.allowed_docstring()}",
-    )
-
-    _deprecate_explore_browse_pattern = pydantic_field_deprecated(
-        "explore_browse_pattern"
-    )
-    _deprecate_view_browse_pattern = pydantic_field_deprecated("view_browse_pattern")
-
-    tag_measures_and_dimensions: bool = Field(
-        True,
-        description="When enabled, attaches tags to measures, dimensions and dimension groups. "
-        "When disabled, adds this information to the description of the column.",
-    )
-    platform_name: HiddenFromDocs[str] = Field(
-        "looker",
-        description="Default platform name.",
-    )
-    extract_column_level_lineage: bool = Field(
-        True,
-        description="When enabled, extracts column-level lineage from Views and Explores",
-    )
-
-
-def _get_bigquery_definition(
-    looker_connection: DBConnection,
-) -> Tuple[str, Optional[str], Optional[str]]:
-    platform = "bigquery"
-    db = looker_connection.host
-    schema = looker_connection.database
-    return platform, db, schema
-
-
-def _get_generic_definition(
-    looker_connection: DBConnection, platform: Optional[str] = None
-) -> Tuple[str, Optional[str], Optional[str]]:
-    if platform is None:
-        dialect_name = looker_connection.dialect_name
-        assert dialect_name is not None
-        platform = re.sub(r"[0-9]+", "", dialect_name.split("_")[0])
-    assert platform is not None, (
-        f"Failed to extract a valid platform from connection {looker_connection}"
-    )
-    db = looker_connection.database
-    schema = looker_connection.schema
-    return platform, db, schema
-
-
-class LookerConnectionDefinition(ConfigModel):
-    """Connection definition mapping a Looker connection to a DataHub platform."""
-
-    platform: str
-    default_db: str
-    default_schema: Optional[str] = None
-    platform_instance: Optional[str] = None
-    platform_env: Optional[str] = Field(
-        default=None,
-        description="The environment that the platform is located in.",
-    )
-
-    @field_validator("platform_env", mode="after")
-    @classmethod
-    def platform_env_must_be_one_of(cls, v: Optional[str]) -> Optional[str]:
-        if v is not None:
-            return EnvConfigMixin.env_must_be_one_of(v)
-        return v
-
-    @field_validator("platform", "default_db", "default_schema", mode="after")
-    @classmethod
-    def lower_everything(cls, v: Optional[str]) -> Optional[str]:
-        if v is not None:
-            return v.lower()
-        return v
-
-    @classmethod
-    def from_looker_connection(
-        cls, looker_connection: DBConnection
-    ) -> "LookerConnectionDefinition":
-        """Create from a Looker SDK DBConnection object."""
-        extractors: Dict[str, Any] = {
-            "^bigquery": _get_bigquery_definition,
-            ".*": _get_generic_definition,
-        }
-
-        if looker_connection.dialect_name is None:
-            raise ConfigurationError(
-                f"Unable to fetch a fully filled out connection for {looker_connection.name}. "
-                "Please check your API permissions."
-            )
-        for extractor_pattern, extracting_function in extractors.items():
-            if re.match(extractor_pattern, looker_connection.dialect_name):
-                (platform, db, schema) = extracting_function(looker_connection)
-                return cls(platform=platform, default_db=db, default_schema=schema)
-        raise ConfigurationError(
-            f"Could not find an appropriate platform for looker_connection: "
-            f"{looker_connection.name} with dialect: {looker_connection.dialect_name}"
-        )
+__all__ = [
+    "LookerCommonConfig",
+    "LookerConnectionDefinition",
+    "LookerV2Config",
+    "LookerV2GitInfo",
+]
 
 
 class LookerV2GitInfo(ConfigModel):

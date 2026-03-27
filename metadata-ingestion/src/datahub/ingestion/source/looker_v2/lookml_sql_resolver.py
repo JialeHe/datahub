@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 class _ConditionExtension(jinja2.ext.Extension):
     """Handle {% condition %} / {% endcondition %} Looker tags by stripping them."""
 
-    tags = frozenset(["condition", "endcondition"])
+    tags = {"condition", "endcondition"}
 
     def parse(self, parser: jinja2.parser.Parser) -> jinja2.nodes.Output:
         lineno = next(parser.stream).lineno
@@ -43,7 +43,7 @@ class _ConditionExtension(jinja2.ext.Extension):
 class _IncrementConditionExtension(jinja2.ext.Extension):
     """Handle {% incrementcondition %} Looker tags by stripping them."""
 
-    tags = frozenset(["incrementcondition", "endincrementcondition"])
+    tags = {"incrementcondition", "endincrementcondition"}
 
     def parse(self, parser: jinja2.parser.Parser) -> jinja2.nodes.Output:
         lineno = next(parser.stream).lineno
