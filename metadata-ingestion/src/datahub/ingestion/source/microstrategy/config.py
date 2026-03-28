@@ -134,6 +134,51 @@ class MicroStrategyConfig(
         description="Regex patterns to filter reports.",
     )
 
+    cube_pattern: AllowDenyPattern = Field(
+        default_factory=AllowDenyPattern.allow_all,
+        description=(
+            "Regex patterns to filter Intelligent Cubes by name after listing. "
+            "Reduces per-cube API calls (schema, warehouse lineage) but not the cube search itself."
+        ),
+    )
+
+    # Scope toggles — set to false to skip entire MicroStrategy API paths (fewer calls)
+    include_folders: bool = Field(
+        default=True,
+        description=(
+            "When false, do not call GET .../projects/{id}/folders or emit folder containers."
+        ),
+    )
+
+    include_dashboards: bool = Field(
+        default=True,
+        description=(
+            "When false, skip dashboard (dossier) search and processing—largest saver on demo envs."
+        ),
+    )
+
+    include_reports: bool = Field(
+        default=True,
+        description="When false, skip report search and chart emission.",
+    )
+
+    include_cubes: bool = Field(
+        default=True,
+        description=(
+            "When false, skip emitting cube datasets. "
+            "Cube search still runs when include_lineage and include_reports are true "
+            "(needed for report→cube lineage resolution)."
+        ),
+    )
+
+    include_datasets: bool = Field(
+        default=True,
+        description=(
+            "When false, skip GET .../projects/{id}/datasets and Library dataset emission. "
+            "Dataset registry is still populated when include_lineage and include_reports are true."
+        ),
+    )
+
     # Feature flags
     include_lineage: bool = Field(
         default=True,
@@ -145,7 +190,7 @@ class MicroStrategyConfig(
     )
 
     include_usage: bool = Field(
-        default=False,
+        default=True,
         description=(
             "Extract usage statistics (view counts, user access). "
             "Requires access to audit logs API. "
@@ -171,6 +216,102 @@ class MicroStrategyConfig(
         ),
     )
 
+    include_cube_view_sql: bool = Field(
+        default=True,
+        description=(
+            "When true, call the cube sqlView API and emit Dataset ViewProperties "
+            "(SQL view definition) for each Intelligent Cube when SQL is returned."
+        ),
+    )
+
+    include_report_definitions: bool = Field(
+        default=False,
+        description=(
+            "When true, call GET /api/v2/reports/{id} for each matched report to fetch its "
+            "full definition. This enables: (1) report→cube lineage via dataSource.id, "
+            "(2) report schema (attributes and metrics used), "
+            "(3) enriched customProperties (filter presence, prompt count). "
+            "OFF by default — 43,991 reports × 1 extra API call each is expensive. "
+            "Enable only for scoped ingestion runs (e.g. with report_pattern filters) "
+            "or when cube→report lineage and report schema are required."
+        ),
+    )
+
+    include_column_lineage: bool = Field(
+        default=True,
+        description=(
+            "Extract column-level lineage from cube SQL. "
+            "Enabled by default."
+            "Requires include_cube_schema to be true. "
+            "Requires include_lineage to be true. "
+            "Requires include_warehouse_lineage to be true. "
+            "Requires warehouse_lineage_platform to be set. "
+            "Requires warehouse_lineage_database to be set. "
+            "Requires warehouse_lineage_schema to be set. "
+        ),
+    )
+
+    include_unloaded_projects: bool = Field(
+        default=False,
+        description=(
+            "Ingest projects that are not loaded on IServer (status != 0). "
+            "When false (default), only projects with status 0 (loaded) are ingested, "
+            "matching typical REST behavior and avoiding ERR001 / unloaded-project failures. "
+            "Set to true to restore pre-change behavior or for special environments."
+        ),
+    )
+
+    cube_search_object_type: int = Field(
+        default=776,
+        description=(
+            "Object type code passed to /api/searches/results when listing cubes. "
+            "776 is used by MicroStrategy Library search for cube-style objects; "
+            "override if your server expects a different type."
+        ),
+    )
+
+    include_warehouse_lineage: bool = Field(
+        default=False,
+        description=(
+            "When true with include_lineage, call the modeling API for each cube and emit "
+            "UpstreamLineage from physical warehouse tables. "
+            "Requires warehouse_lineage_platform (and usually database/schema defaults) "
+            "aligned with how the warehouse is ingested in DataHub."
+        ),
+    )
+
+    warehouse_lineage_platform: Optional[str] = Field(
+        default=None,
+        description=(
+            "DataHub data platform ID for upstream warehouse datasets (e.g. snowflake, mssql). "
+            "Required when include_warehouse_lineage is true."
+        ),
+    )
+
+    warehouse_lineage_database: Optional[str] = Field(
+        default=None,
+        description=(
+            "Default database/catalog name for building dataset URNs when the modeling API "
+            "does not provide a full namespace."
+        ),
+    )
+
+    warehouse_lineage_schema: Optional[str] = Field(
+        default=None,
+        description=(
+            "Default schema name for building dataset URNs when the modeling API "
+            "only returns a table name."
+        ),
+    )
+
+    preflight_dashboard_exists: bool = Field(
+        default=False,
+        description=(
+            "Before fetching each dashboard definition, call GET /api/objects/{id}?type=55. "
+            "Skips the dashboard on 404. Increases API traffic; use when troubleshooting missing objects."
+        ),
+    )
+
     # Stateful ingestion
     stateful_ingestion: Optional[StatefulStaleMetadataRemovalConfig] = Field(
         default=None,
@@ -180,3 +321,11 @@ class MicroStrategyConfig(
             "Recommended for production environments."
         ),
     )
+
+    @model_validator(mode="after")  # type: ignore[misc]
+    def warehouse_lineage_requires_platform(self) -> "MicroStrategyConfig":
+        if self.include_warehouse_lineage and not self.warehouse_lineage_platform:
+            raise ValueError(
+                "warehouse_lineage_platform is required when include_warehouse_lineage is true"
+            )
+        return self

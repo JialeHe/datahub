@@ -1,16 +1,22 @@
 """Unit tests for MicroStrategy source connector."""
 
 import logging
-from typing import Any, Dict, List
+from datetime import datetime
+from typing import Any, Callable, Dict, List, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from datahub.ingestion.api.common import PipelineContext
+from datahub.ingestion.source.microstrategy.client import (
+    MicroStrategyClient,
+    MicroStrategyProjectUnavailableError,
+)
 from datahub.ingestion.source.microstrategy.config import (
     MicroStrategyConfig,
     MicroStrategyConnectionConfig,
 )
+from datahub.ingestion.source.microstrategy.constants import ISERVER_PROJECT_UNAVAILABLE
 from datahub.ingestion.source.microstrategy.source import (
     FolderKey,
     MicroStrategySource,
@@ -19,10 +25,10 @@ from datahub.ingestion.source.microstrategy.source import (
 
 
 def create_search_objects_mock(
-    dashboards: Dict[str, List[Dict[str, Any]]] = None,
-    reports: Dict[str, List[Dict[str, Any]]] = None,
-    cubes: Dict[str, List[Dict[str, Any]]] = None,
-) -> callable:
+    dashboards: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    reports: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    cubes: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+) -> Callable[[str, int], List[Dict[str, Any]]]:
     """
     Helper to create search_objects mock function.
 
@@ -41,12 +47,12 @@ def create_search_objects_mock(
     def search_objects_side_effect(
         project_id: str, object_type: int
     ) -> List[Dict[str, Any]]:
-        # type=39 is cubes, type=3 is reports, type=55 is dashboards
+        # type=776 is cubes (search), type=3 is reports, type=55 is dashboards
         if object_type == 55:  # Dashboards
             return dashboards.get(project_id, [])
         elif object_type == 3:  # Reports
             return reports.get(project_id, [])
-        elif object_type == 39:  # Cubes
+        elif object_type == 776:  # Cubes
             return cubes.get(project_id, [])
         return []
 
@@ -63,22 +69,49 @@ class TestMicroStrategyConfigValidation:
 
     def test_base_url_validation_accepts_http(self):
         """Test that http:// URLs are accepted."""
-        config = MicroStrategyConnectionConfig(base_url="http://localhost:8080")
+        config = MicroStrategyConnectionConfig(
+            base_url="http://localhost:8080", use_anonymous=True
+        )
         assert config.base_url == "http://localhost:8080"
 
     def test_base_url_validation_accepts_https(self):
         """Test that https:// URLs are accepted."""
         config = MicroStrategyConnectionConfig(
-            base_url="https://demo.microstrategy.com"
+            base_url="https://demo.microstrategy.com", use_anonymous=True
         )
         assert config.base_url == "https://demo.microstrategy.com"
 
     def test_base_url_trailing_slashes_removed(self):
         """Test that trailing slashes are removed from base_url."""
         config = MicroStrategyConnectionConfig(
-            base_url="https://demo.microstrategy.com///"
+            base_url="https://demo.microstrategy.com///", use_anonymous=True
         )
         assert config.base_url == "https://demo.microstrategy.com"
+
+    def test_include_warehouse_lineage_requires_platform(self):
+        with pytest.raises(ValueError, match="warehouse_lineage_platform"):
+            MicroStrategyConfig.parse_obj(
+                {
+                    "connection": {
+                        "base_url": "https://demo.microstrategy.com",
+                        "use_anonymous": True,
+                    },
+                    "include_warehouse_lineage": True,
+                }
+            )
+
+    def test_include_warehouse_lineage_accepts_platform(self):
+        cfg = MicroStrategyConfig.parse_obj(
+            {
+                "connection": {
+                    "base_url": "https://demo.microstrategy.com",
+                    "use_anonymous": True,
+                },
+                "include_warehouse_lineage": True,
+                "warehouse_lineage_platform": "snowflake",
+            }
+        )
+        assert cfg.warehouse_lineage_platform == "snowflake"
 
 
 class TestContainerKeyURNGeneration:
@@ -132,7 +165,10 @@ class TestProjectFiltering:
     def test_project_pattern_filters_projects(self):
         """Test that project patterns correctly filter projects."""
         config_dict = {
-            "connection": {"base_url": "https://demo.microstrategy.com"},
+            "connection": {
+                "base_url": "https://demo.microstrategy.com",
+                "use_anonymous": True,
+            },
             "project_pattern": {
                 "allow": ["^Production.*"],
                 "deny": [".*Test$"],
@@ -145,15 +181,16 @@ class TestProjectFiltering:
             "datahub.ingestion.source.microstrategy.source.MicroStrategyClient"
         ) as mock_client_class:
             mock_client = MagicMock()
+            mock_client.get_datasets.return_value = []
             mock_client_class.return_value = mock_client
             mock_client.__enter__ = MagicMock(return_value=mock_client)
             mock_client.__exit__ = MagicMock(return_value=False)
 
             mock_client.get_projects.return_value = [
-                {"id": "1", "name": "Production Main"},
-                {"id": "2", "name": "Production Test"},  # Should be filtered by deny
-                {"id": "3", "name": "Dev Project"},  # Should be filtered by allow
-                {"id": "4", "name": "Production Analytics"},
+                {"id": "1", "name": "Production Main", "status": 0},
+                {"id": "2", "name": "Production Test", "status": 0},  # filtered by deny
+                {"id": "3", "name": "Dev Project", "status": 0},  # filtered by allow
+                {"id": "4", "name": "Production Analytics", "status": 0},
             ]
             mock_client.get_folders.return_value = []
             mock_client.search_objects.side_effect = create_search_objects_mock()
@@ -181,7 +218,10 @@ class TestCubeRegistryResolution:
     def test_cube_registry_resolves_cross_project_references(self):
         """Test that cubes from different projects can be resolved for lineage."""
         config_dict = {
-            "connection": {"base_url": "https://demo.microstrategy.com"},
+            "connection": {
+                "base_url": "https://demo.microstrategy.com",
+                "use_anonymous": True,
+            },
             "include_lineage": True,
         }
         config = MicroStrategyConfig.parse_obj(config_dict)
@@ -191,14 +231,15 @@ class TestCubeRegistryResolution:
             "datahub.ingestion.source.microstrategy.source.MicroStrategyClient"
         ) as mock_client_class:
             mock_client = MagicMock()
+            mock_client.get_datasets.return_value = []
             mock_client_class.return_value = mock_client
             mock_client.__enter__ = MagicMock(return_value=mock_client)
             mock_client.__exit__ = MagicMock(return_value=False)
 
             # Project A has a report that references cube from Project B
             mock_client.get_projects.return_value = [
-                {"id": "project_a", "name": "Project A"},
-                {"id": "project_b", "name": "Project B"},
+                {"id": "project_a", "name": "Project A", "status": 0},
+                {"id": "project_b", "name": "Project B", "status": 0},
             ]
 
             mock_client.search_objects.side_effect = create_search_objects_mock(
@@ -214,6 +255,7 @@ class TestCubeRegistryResolution:
                             "name": "Sales Report",
                             "description": "",
                             "type": 3,
+                            "subtype": 3,
                             "dataSource": {
                                 "id": "cube_123"
                             },  # References cube from Project B
@@ -255,7 +297,10 @@ class TestOwnershipExtraction:
     def test_ownership_handles_string_owner(self):
         """Test that ownership aspect is created when owner is a string."""
         config_dict = {
-            "connection": {"base_url": "https://demo.microstrategy.com"},
+            "connection": {
+                "base_url": "https://demo.microstrategy.com",
+                "use_anonymous": True,
+            },
             "include_ownership": True,
         }
         config = MicroStrategyConfig.parse_obj(config_dict)
@@ -265,12 +310,13 @@ class TestOwnershipExtraction:
             "datahub.ingestion.source.microstrategy.source.MicroStrategyClient"
         ) as mock_client_class:
             mock_client = MagicMock()
+            mock_client.get_datasets.return_value = []
             mock_client_class.return_value = mock_client
             mock_client.__enter__ = MagicMock(return_value=mock_client)
             mock_client.__exit__ = MagicMock(return_value=False)
 
             mock_client.get_projects.return_value = [
-                {"id": "project_1", "name": "Test Project"}
+                {"id": "project_1", "name": "Test Project", "status": 0}
             ]
             mock_client.search_objects.side_effect = create_search_objects_mock(
                 dashboards={
@@ -306,7 +352,10 @@ class TestOwnershipExtraction:
     def test_ownership_handles_dict_owner(self):
         """Test that ownership aspect is created when owner is a dict with username."""
         config_dict = {
-            "connection": {"base_url": "https://demo.microstrategy.com"},
+            "connection": {
+                "base_url": "https://demo.microstrategy.com",
+                "use_anonymous": True,
+            },
             "include_ownership": True,
         }
         config = MicroStrategyConfig.parse_obj(config_dict)
@@ -316,12 +365,13 @@ class TestOwnershipExtraction:
             "datahub.ingestion.source.microstrategy.source.MicroStrategyClient"
         ) as mock_client_class:
             mock_client = MagicMock()
+            mock_client.get_datasets.return_value = []
             mock_client_class.return_value = mock_client
             mock_client.__enter__ = MagicMock(return_value=mock_client)
             mock_client.__exit__ = MagicMock(return_value=False)
 
             mock_client.get_projects.return_value = [
-                {"id": "project_1", "name": "Test Project"}
+                {"id": "project_1", "name": "Test Project", "status": 0}
             ]
             mock_client.search_objects.side_effect = create_search_objects_mock(
                 dashboards={
@@ -364,7 +414,10 @@ class TestDashboardVisualizationExtraction:
     def test_visualization_ids_extracted_from_dashboard_chapters(self):
         """Test that visualization IDs are correctly extracted from dashboard definition."""
         config_dict = {
-            "connection": {"base_url": "https://demo.microstrategy.com"},
+            "connection": {
+                "base_url": "https://demo.microstrategy.com",
+                "use_anonymous": True,
+            },
             "include_lineage": True,
         }
         config = MicroStrategyConfig.parse_obj(config_dict)
@@ -374,12 +427,13 @@ class TestDashboardVisualizationExtraction:
             "datahub.ingestion.source.microstrategy.source.MicroStrategyClient"
         ) as mock_client_class:
             mock_client = MagicMock()
+            mock_client.get_datasets.return_value = []
             mock_client_class.return_value = mock_client
             mock_client.__enter__ = MagicMock(return_value=mock_client)
             mock_client.__exit__ = MagicMock(return_value=False)
 
             mock_client.get_projects.return_value = [
-                {"id": "project_1", "name": "Test Project"}
+                {"id": "project_1", "name": "Test Project", "status": 0}
             ]
             mock_client.search_objects.side_effect = create_search_objects_mock(
                 dashboards={
@@ -388,25 +442,34 @@ class TestDashboardVisualizationExtraction:
                             "id": "dashboard_1",
                             "name": "Test Dashboard",
                             "description": "",
+                            "subtype": 14336,
                         }
                     ]
                 }
             )
 
-            # Mock dashboard definition with chapters and visualizations
-            mock_client.get_dashboard_definition.return_value = {
+            # Modern dossier: chapters → pages → visualizations
+            mock_client.get_dossier_definition.return_value = {
                 "chapters": [
                     {
                         "name": "Chapter 1",
-                        "visualizations": [
-                            {"key": "viz_1", "type": "chart"},
-                            {"key": "viz_2", "type": "grid"},
+                        "pages": [
+                            {
+                                "visualizations": [
+                                    {"key": "viz_1", "type": "chart"},
+                                    {"key": "viz_2", "type": "grid"},
+                                ],
+                            }
                         ],
                     },
                     {
                         "name": "Chapter 2",
-                        "visualizations": [
-                            {"key": "viz_3", "type": "map"},
+                        "pages": [
+                            {
+                                "visualizations": [
+                                    {"key": "viz_3", "type": "map"},
+                                ],
+                            }
                         ],
                     },
                 ]
@@ -433,14 +496,17 @@ class TestDashboardVisualizationExtraction:
             assert len(dashboard_info.charts) == 3  # type: ignore
             assert all("viz_" in chart_urn for chart_urn in dashboard_info.charts)  # type: ignore
 
-            mock_client.get_dashboard_definition.assert_called_once_with(
+            mock_client.get_dossier_definition.assert_called_once_with(
                 "dashboard_1", "project_1"
             )
 
     def test_empty_dashboard_definition_handled_gracefully(self):
         """Test that dashboards with no visualizations don't crash the source."""
         config_dict = {
-            "connection": {"base_url": "https://demo.microstrategy.com"},
+            "connection": {
+                "base_url": "https://demo.microstrategy.com",
+                "use_anonymous": True,
+            },
             "include_lineage": True,
         }
         config = MicroStrategyConfig.parse_obj(config_dict)
@@ -450,12 +516,13 @@ class TestDashboardVisualizationExtraction:
             "datahub.ingestion.source.microstrategy.source.MicroStrategyClient"
         ) as mock_client_class:
             mock_client = MagicMock()
+            mock_client.get_datasets.return_value = []
             mock_client_class.return_value = mock_client
             mock_client.__enter__ = MagicMock(return_value=mock_client)
             mock_client.__exit__ = MagicMock(return_value=False)
 
             mock_client.get_projects.return_value = [
-                {"id": "project_1", "name": "Test Project"}
+                {"id": "project_1", "name": "Test Project", "status": 0}
             ]
             mock_client.search_objects.side_effect = create_search_objects_mock(
                 dashboards={
@@ -464,13 +531,13 @@ class TestDashboardVisualizationExtraction:
                             "id": "dashboard_1",
                             "name": "Empty Dashboard",
                             "description": "",
+                            "subtype": 14336,
                         }
                     ]
                 }
             )
 
-            # Empty dashboard definition
-            mock_client.get_dashboard_definition.return_value = {"chapters": []}
+            mock_client.get_dossier_definition.return_value = {"chapters": []}
 
             mock_client.get_folders.return_value = []
 
@@ -490,7 +557,7 @@ class TestDashboardVisualizationExtraction:
             assert dashboard_info is not None
             assert len(dashboard_info.charts) == 0  # type: ignore
 
-            mock_client.get_dashboard_definition.assert_called_once_with(
+            mock_client.get_dossier_definition.assert_called_once_with(
                 "dashboard_1", "project_1"
             )
 
@@ -501,7 +568,10 @@ class TestCubeSchemaExtraction:
     def test_cube_schema_includes_attributes_and_metrics(self):
         """Test that cube schema correctly extracts attributes and metrics."""
         config_dict = {
-            "connection": {"base_url": "https://demo.microstrategy.com"},
+            "connection": {
+                "base_url": "https://demo.microstrategy.com",
+                "use_anonymous": True,
+            },
             "include_cube_schema": True,
         }
         config = MicroStrategyConfig.parse_obj(config_dict)
@@ -511,12 +581,13 @@ class TestCubeSchemaExtraction:
             "datahub.ingestion.source.microstrategy.source.MicroStrategyClient"
         ) as mock_client_class:
             mock_client = MagicMock()
+            mock_client.get_datasets.return_value = []
             mock_client_class.return_value = mock_client
             mock_client.__enter__ = MagicMock(return_value=mock_client)
             mock_client.__exit__ = MagicMock(return_value=False)
 
             mock_client.get_projects.return_value = [
-                {"id": "project_1", "name": "Test Project"}
+                {"id": "project_1", "name": "Test Project", "status": 0}
             ]
             mock_client.search_objects.side_effect = create_search_objects_mock(
                 cubes={
@@ -530,25 +601,52 @@ class TestCubeSchemaExtraction:
                 }
             )
 
-            # Mock cube schema with attributes and metrics
+            # Schema lives under definition.availableObjects (MSTR REST cube payload)
             mock_client.get_cube_schema.return_value = {
-                "attributes": [
-                    {"id": "attr_1", "name": "Region", "description": "Sales region"},
-                    {
-                        "id": "attr_2",
-                        "name": "Product",
-                        "description": "Product name",
-                    },
-                ],
-                "metrics": [
-                    {
-                        "id": "metric_1",
-                        "name": "Revenue",
-                        "description": "Total revenue",
-                    },
-                    {"id": "metric_2", "name": "Units", "description": "Units sold"},
-                ],
+                "definition": {
+                    "availableObjects": {
+                        "attributes": [
+                            {
+                                "id": "attr_1",
+                                "name": "Region",
+                                "description": "Sales region",
+                                "forms": [
+                                    {
+                                        "name": "ID",
+                                        "dataType": "varChar",
+                                        "baseFormCategory": "DESC",
+                                    }
+                                ],
+                            },
+                            {
+                                "id": "attr_2",
+                                "name": "Product",
+                                "description": "Product name",
+                                "forms": [
+                                    {
+                                        "name": "ID",
+                                        "dataType": "varChar",
+                                        "baseFormCategory": "DESC",
+                                    }
+                                ],
+                            },
+                        ],
+                        "metrics": [
+                            {
+                                "id": "metric_1",
+                                "name": "Revenue",
+                                "description": "Total revenue",
+                            },
+                            {
+                                "id": "metric_2",
+                                "name": "Units",
+                                "description": "Units sold",
+                            },
+                        ],
+                    }
+                }
             }
+            mock_client.get_cube_sql_view.return_value = 'SELECT 1 FROM "S"."T"'
 
             mock_client.get_folders.return_value = []
 
@@ -576,18 +674,30 @@ class TestCubeSchemaExtraction:
             assert "Revenue" in field_paths
             assert "Units" in field_paths
 
+            view_workunits = [
+                wu
+                for wu in workunits
+                if hasattr(wu.metadata, "aspect")
+                and wu.metadata.aspect.__class__.__name__ == "ViewPropertiesClass"
+            ]
+            assert len(view_workunits) == 1
+            assert "FROM" in view_workunits[0].metadata.aspect.viewLogic  # type: ignore
+
             # Verify native data types
             field_types = {
                 field.fieldPath: field.nativeDataType
                 for field in schema_metadata.fields  # type: ignore
             }
-            assert field_types["Region"] == "attribute"
+            assert field_types["Region"] == "attribute:DESC"
             assert field_types["Revenue"] == "metric"
 
     def test_cube_schema_extraction_failure_continues_ingestion(self):
         """Test that cube schema extraction failure doesn't stop ingestion."""
         config_dict = {
-            "connection": {"base_url": "https://demo.microstrategy.com"},
+            "connection": {
+                "base_url": "https://demo.microstrategy.com",
+                "use_anonymous": True,
+            },
             "include_cube_schema": True,
         }
         config = MicroStrategyConfig.parse_obj(config_dict)
@@ -597,12 +707,13 @@ class TestCubeSchemaExtraction:
             "datahub.ingestion.source.microstrategy.source.MicroStrategyClient"
         ) as mock_client_class:
             mock_client = MagicMock()
+            mock_client.get_datasets.return_value = []
             mock_client_class.return_value = mock_client
             mock_client.__enter__ = MagicMock(return_value=mock_client)
             mock_client.__exit__ = MagicMock(return_value=False)
 
             mock_client.get_projects.return_value = [
-                {"id": "project_1", "name": "Test Project"}
+                {"id": "project_1", "name": "Test Project", "status": 0}
             ]
             mock_client.search_objects.side_effect = create_search_objects_mock(
                 cubes={
@@ -616,6 +727,7 @@ class TestCubeSchemaExtraction:
             mock_client.get_cube_schema.side_effect = Exception(
                 "Permission denied to cube schema"
             )
+            mock_client.get_cube_sql_view.return_value = ""
 
             mock_client.get_folders.return_value = []
 
@@ -650,7 +762,8 @@ class TestURLConstruction:
         """Test that dashboard URLs are correctly constructed."""
         config_dict = {
             "connection": {
-                "base_url": "https://demo.microstrategy.com/MicroStrategyLibrary"
+                "base_url": "https://demo.microstrategy.com/MicroStrategyLibrary",
+                "use_anonymous": True,
             },
         }
         config = MicroStrategyConfig.parse_obj(config_dict)
@@ -668,7 +781,8 @@ class TestURLConstruction:
         """Test that report URLs are correctly constructed."""
         config_dict = {
             "connection": {
-                "base_url": "https://demo.microstrategy.com/MicroStrategyLibrary"
+                "base_url": "https://demo.microstrategy.com/MicroStrategyLibrary",
+                "use_anonymous": True,
             },
         }
         config = MicroStrategyConfig.parse_obj(config_dict)
@@ -686,7 +800,8 @@ class TestURLConstruction:
         """Test that trailing slashes in base_url don't create malformed URLs."""
         config_dict = {
             "connection": {
-                "base_url": "https://demo.microstrategy.com/MicroStrategyLibrary///"
+                "base_url": "https://demo.microstrategy.com/MicroStrategyLibrary///",
+                "use_anonymous": True,
             },
         }
         config = MicroStrategyConfig.parse_obj(config_dict)
@@ -707,7 +822,10 @@ class TestAuditStampParsing:
     def test_audit_stamps_parse_iso_timestamps(self):
         """Test that ISO timestamps are correctly parsed to audit stamps."""
         config_dict = {
-            "connection": {"base_url": "https://demo.microstrategy.com"},
+            "connection": {
+                "base_url": "https://demo.microstrategy.com",
+                "use_anonymous": True,
+            },
         }
         config = MicroStrategyConfig.parse_obj(config_dict)
         ctx = PipelineContext(run_id="test-run")
@@ -731,7 +849,10 @@ class TestAuditStampParsing:
     def test_audit_stamps_handle_missing_timestamps(self):
         """Test that missing timestamps don't crash audit stamp creation."""
         config_dict = {
-            "connection": {"base_url": "https://demo.microstrategy.com"},
+            "connection": {
+                "base_url": "https://demo.microstrategy.com",
+                "use_anonymous": True,
+            },
         }
         config = MicroStrategyConfig.parse_obj(config_dict)
         ctx = PipelineContext(run_id="test-run")
@@ -747,7 +868,10 @@ class TestAuditStampParsing:
     def test_audit_stamps_handle_invalid_timestamps(self, caplog):
         """Test that invalid timestamps are handled gracefully with logging."""
         config_dict = {
-            "connection": {"base_url": "https://demo.microstrategy.com"},
+            "connection": {
+                "base_url": "https://demo.microstrategy.com",
+                "use_anonymous": True,
+            },
         }
         config = MicroStrategyConfig.parse_obj(config_dict)
         ctx = PipelineContext(run_id="test-run")
@@ -777,7 +901,10 @@ class TestErrorHandling:
     def test_project_extraction_failure_continues_to_next_project(self):
         """Test that failure to extract one project doesn't stop ingestion."""
         config_dict = {
-            "connection": {"base_url": "https://demo.microstrategy.com"},
+            "connection": {
+                "base_url": "https://demo.microstrategy.com",
+                "use_anonymous": True,
+            },
         }
         config = MicroStrategyConfig.parse_obj(config_dict)
         ctx = PipelineContext(run_id="test-run")
@@ -786,16 +913,19 @@ class TestErrorHandling:
             "datahub.ingestion.source.microstrategy.source.MicroStrategyClient"
         ) as mock_client_class:
             mock_client = MagicMock()
+            mock_client.get_datasets.return_value = []
             mock_client_class.return_value = mock_client
             mock_client.__enter__ = MagicMock(return_value=mock_client)
             mock_client.__exit__ = MagicMock(return_value=False)
 
             mock_client.get_projects.return_value = [
-                {"id": "project_1", "name": "Project 1"},
-                {"id": "project_2", "name": "Project 2"},
+                {"id": "project_1", "name": "Project 1", "status": 0},
+                {"id": "project_2", "name": "Project 2", "status": 0},
             ]
 
-            def search_objects_with_error(project_id: str, object_type: int):
+            def search_objects_with_error(
+                project_id: str, object_type: int
+            ) -> List[Dict[str, Any]]:
                 if project_id == "project_1" and object_type == 55:  # Dashboards
                     raise Exception("Permission denied")
                 if project_id == "project_2" and object_type == 55:
@@ -828,3 +958,258 @@ class TestErrorHandling:
                 and wu.metadata.aspect.__class__.__name__ == "DashboardInfoClass"
             ]
             assert len(dashboard_info_workunits) == 1
+
+
+class TestLoadedProjectFiltering:
+    """Projects with status != 0 are skipped unless include_unloaded_projects is set."""
+
+    def test_skips_unloaded_projects_by_default(self):
+        config_dict = {
+            "connection": {
+                "base_url": "https://demo.microstrategy.com",
+                "use_anonymous": True,
+            },
+        }
+        config = MicroStrategyConfig.parse_obj(config_dict)
+        ctx = PipelineContext(run_id="test-run")
+
+        with patch(
+            "datahub.ingestion.source.microstrategy.source.MicroStrategyClient"
+        ) as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.get_datasets.return_value = []
+            mock_client_class.return_value = mock_client
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+
+            mock_client.get_projects.return_value = [
+                {"id": "loaded", "name": "Loaded", "status": 0},
+                {"id": "idle", "name": "Idle", "status": 2},
+            ]
+            mock_client.get_folders.return_value = []
+            mock_client.search_objects.side_effect = create_search_objects_mock()
+
+            source = MicroStrategySource(config, ctx)
+            list(source.get_workunits())
+
+            mock_client.get_folders.assert_called_once_with("loaded")
+
+    def test_include_unloaded_projects_processes_all_matching(self):
+        config_dict = {
+            "connection": {
+                "base_url": "https://demo.microstrategy.com",
+                "use_anonymous": True,
+            },
+            "include_unloaded_projects": True,
+        }
+        config = MicroStrategyConfig.parse_obj(config_dict)
+        ctx = PipelineContext(run_id="test-run")
+
+        with patch(
+            "datahub.ingestion.source.microstrategy.source.MicroStrategyClient"
+        ) as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.get_datasets.return_value = []
+            mock_client_class.return_value = mock_client
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+
+            mock_client.get_projects.return_value = [
+                {"id": "loaded", "name": "Loaded", "status": 0},
+                {"id": "idle", "name": "Idle", "status": 2},
+            ]
+            mock_client.get_folders.return_value = []
+            mock_client.search_objects.side_effect = create_search_objects_mock()
+
+            source = MicroStrategySource(config, ctx)
+            list(source.get_workunits())
+
+            assert mock_client.get_folders.call_count == 2
+
+
+class TestMicroStrategyClientErrors:
+    def test_request_raises_project_unavailable_on_iserver_body(self):
+        cfg = MicroStrategyConnectionConfig(
+            base_url="https://mstr.example.com",
+            use_anonymous=True,
+        )
+        client = MicroStrategyClient(cfg)
+        client.auth_token = "tok"
+        client.token_created_at = datetime.now()
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = b"{}"
+        mock_resp.json.return_value = {
+            "iServerCode": ISERVER_PROJECT_UNAVAILABLE,
+            "message": "Project not loaded",
+            "ticketId": "abc",
+        }
+
+        with (
+            patch.object(client.session, "request", return_value=mock_resp),
+            pytest.raises(MicroStrategyProjectUnavailableError) as excinfo,
+        ):
+            client._request("GET", "/api/projects")
+
+        assert excinfo.value.i_server_code == ISERVER_PROJECT_UNAVAILABLE
+        assert excinfo.value.ticket_id == "abc"
+
+    def test_get_dashboard_definition_empty_on_classcast_500(self):
+        cfg = MicroStrategyConnectionConfig(
+            base_url="https://mstr.example.com",
+            use_anonymous=True,
+        )
+        client = MicroStrategyClient(cfg)
+        client.auth_token = "tok"
+        client.token_created_at = datetime.now()
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 500
+        mock_resp.content = b"{}"
+        mock_resp.json.return_value = {"message": "Cannot be cast to DossierBean"}
+
+        with patch.object(client.session, "request", return_value=mock_resp):
+            assert client.get_dashboard_definition("d1", "p1") == {}
+
+
+class TestWarehouseLineageEmission:
+    def test_model_cube_physical_tables_emit_upstream_lineage(self):
+        config_dict = {
+            "connection": {
+                "base_url": "https://demo.microstrategy.com",
+                "use_anonymous": True,
+            },
+            "include_lineage": True,
+            "include_warehouse_lineage": True,
+            "warehouse_lineage_platform": "snowflake",
+            "warehouse_lineage_database": "db",
+            "warehouse_lineage_schema": "public",
+        }
+        config = MicroStrategyConfig.parse_obj(config_dict)
+        ctx = PipelineContext(run_id="test-run")
+
+        with patch(
+            "datahub.ingestion.source.microstrategy.source.MicroStrategyClient"
+        ) as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.get_datasets.return_value = []
+            mock_client_class.return_value = mock_client
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+
+            mock_client.get_projects.return_value = [
+                {"id": "project_1", "name": "P1", "status": 0}
+            ]
+            mock_client.search_objects.side_effect = create_search_objects_mock(
+                cubes={
+                    "project_1": [
+                        {"id": "cube_1", "name": "Cube", "description": ""},
+                    ]
+                }
+            )
+            mock_client.get_folders.return_value = []
+            mock_client.get_cube_sql_view.return_value = (
+                'SELECT a FROM "analytics"."fact_sales" x'
+            )
+
+            source = MicroStrategySource(config, ctx)
+            workunits = list(source.get_workunits())
+
+            upstream_wus = [
+                wu
+                for wu in workunits
+                if hasattr(wu.metadata, "aspect")
+                and wu.metadata.aspect.__class__.__name__ == "UpstreamLineageClass"
+            ]
+            assert len(upstream_wus) == 1
+            lineage = upstream_wus[0].metadata.aspect  # type: ignore[union-attr]
+            assert len(lineage.upstreams) == 1  # type: ignore[union-attr]
+            assert "snowflake" in lineage.upstreams[0].dataset  # type: ignore[union-attr]
+
+
+class TestApiCallReduction:
+    def test_cube_search_once_per_project(self) -> None:
+        config_dict = {
+            "connection": {
+                "base_url": "https://demo.microstrategy.com",
+                "use_anonymous": True,
+            },
+        }
+        config = MicroStrategyConfig.parse_obj(config_dict)
+        ctx = PipelineContext(run_id="test-run")
+
+        with patch(
+            "datahub.ingestion.source.microstrategy.source.MicroStrategyClient"
+        ) as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.get_datasets.return_value = []
+            mock_client_class.return_value = mock_client
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+
+            mock_client.get_projects.return_value = [
+                {"id": "project_1", "name": "P1", "status": 0},
+            ]
+            mock_client.get_folders.return_value = []
+            mock_client.search_objects.side_effect = create_search_objects_mock(
+                cubes={
+                    "project_1": [
+                        {"id": "cube_1", "name": "Cube", "description": ""},
+                    ],
+                },
+            )
+
+            source = MicroStrategySource(config, ctx)
+            list(source.get_workunits())
+
+            cube_calls = [
+                c
+                for c in mock_client.search_objects.call_args_list
+                if (len(c.args) > 1 and c.args[1] == 776)
+                or c.kwargs.get("object_type") == 776
+            ]
+            assert len(cube_calls) == 1
+
+    def test_include_dashboards_false_skips_type_55_search(self) -> None:
+        config_dict = {
+            "connection": {
+                "base_url": "https://demo.microstrategy.com",
+                "use_anonymous": True,
+            },
+            "include_dashboards": False,
+        }
+        config = MicroStrategyConfig.parse_obj(config_dict)
+        ctx = PipelineContext(run_id="test-run")
+
+        with patch(
+            "datahub.ingestion.source.microstrategy.source.MicroStrategyClient"
+        ) as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.get_datasets.return_value = []
+            mock_client_class.return_value = mock_client
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+
+            mock_client.get_projects.return_value = [
+                {"id": "project_1", "name": "P1", "status": 0},
+            ]
+            mock_client.get_folders.return_value = []
+            mock_client.search_objects.side_effect = create_search_objects_mock(
+                cubes={
+                    "project_1": [
+                        {"id": "cube_1", "name": "Cube", "description": ""},
+                    ],
+                },
+            )
+
+            source = MicroStrategySource(config, ctx)
+            list(source.get_workunits())
+
+            dashboard_calls = [
+                c
+                for c in mock_client.search_objects.call_args_list
+                if (len(c.args) > 1 and c.args[1] == 55)
+                or c.kwargs.get("object_type") == 55
+            ]
+            assert dashboard_calls == []

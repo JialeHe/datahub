@@ -37,6 +37,34 @@ This plugin extracts the following metadata from MicroStrategy:
 - **Lineage** showing data flow from cubes/datasets to dashboards and reports
 - **Ownership** information (creators and owners)
 
+#### Concept Mapping
+
+This ingestion source maps the following MicroStrategy concepts to DataHub entities:
+
+| Source Concept | DataHub Concept | Notes |
+| -------------- | --------------- | ----- |
+| `"MicroStrategy"` | [Data Platform](../../metamodel/entities/dataPlatform.md) | |
+| Project | [Container](../../metamodel/entities/container.md) | SubType `"Project"` |
+| Folder | [Container](../../metamodel/entities/container.md) | SubType `"Folder"` |
+| Dashboard (Dossier) | [Dashboard](../../metamodel/entities/dashboard.md) | |
+| Report | [Chart](../../metamodel/entities/chart.md) | Reports are represented as Chart entities |
+| Intelligent Cube | [Dataset](../../metamodel/entities/dataset.md) | SubType `"Cube"` |
+| Dataset | [Dataset](../../metamodel/entities/dataset.md) | |
+| User (Owner) | [User (a.k.a CorpUser)](../../metamodel/entities/corpuser.md) | Optionally Extracted via `include_ownership` |
+
+#### Lineage
+
+When `include_lineage` is enabled, the connector extracts:
+
+- **Dashboard → Report**: Dashboards link to their constituent reports via `DashboardInfo.charts` array
+- **Report → Dataset/Cube**: Reports link to their data sources via `ChartInfo.inputs` array
+
+Optional **warehouse (physical table) lineage** for Intelligent Cubes: set `include_warehouse_lineage: true` and configure `warehouse_lineage_platform` (and usually `warehouse_lineage_database` / `warehouse_lineage_schema`) so dataset URNs match your warehouse ingestion. The connector calls `GET /api/model/cubes/{id}` and emits `upstreamLineage` on the cube dataset from `physicalTables`.
+
+**Project availability**: By default only projects with `status: 0` (loaded on IServer) are ingested. Set `include_unloaded_projects: true` to include idle/unloaded projects (may hit IServer ERR001-style errors).
+
+Cubes are discovered via search with `cube_search_object_type` (default `776`). The REST client also recognizes MicroStrategy JSON `iServerCode` for unloaded projects and treats legacy **ClassCast**-style HTTP 500 responses as empty definitions for dossiers/cubes when appropriate.
+
 ## Prerequisites
 
 ### MicroStrategy Environment
@@ -276,6 +304,8 @@ Column-level lineage from cubes to dashboard visualizations is not currently sup
 - Reduce the scope using pattern filters (`project_pattern`, `dashboard_pattern`)
 - Check MicroStrategy API performance and rate limiting
 - Monitor network latency between DataHub and MicroStrategy
+
+**Note**: Large MicroStrategy environments (>2,000 entities) may take 45-60+ minutes for initial ingestion. This is normal due to API pagination and rate limiting. Consider using incremental ingestion with `stateful_ingestion` for subsequent runs.
 
 ### HTTP 500 Errors from MicroStrategy API
 
