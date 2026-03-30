@@ -516,15 +516,20 @@ class RedshiftSource(StatefulIngestionSourceBase, TestableSource):
                 env=self.config.env,
             )
 
-            yield from gen_schema_container(
-                schema=schema.name,
-                database=database,
-                schema_container_key=schema_container_key,
-                database_container_key=database_container_key,
-                domain_config=self.config.domain,
-                domain_registry=self.domain_registry,
-                sub_types=[DatasetSubTypes.SCHEMA],
-            )
+            if (
+                self.config.include_tables
+                or self.config.include_views
+                or self.config.is_profiling_enabled()
+            ):
+                yield from gen_schema_container(
+                    schema=schema.name,
+                    database=database,
+                    schema_container_key=schema_container_key,
+                    database_container_key=database_container_key,
+                    domain_config=self.config.domain,
+                    domain_registry=self.domain_registry,
+                    sub_types=[DatasetSubTypes.SCHEMA],
+                )
 
             schema_columns: Dict[str, Dict[str, List[RedshiftColumn]]] = {}
             schema_columns[schema.name] = self.data_dictionary.get_columns_for_schema(
