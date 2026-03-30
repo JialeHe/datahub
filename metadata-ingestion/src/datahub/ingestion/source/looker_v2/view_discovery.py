@@ -77,8 +77,11 @@ class ViewDiscovery:
     # Regex to extract include statements from model files
     INCLUDE_PATTERN = re.compile(r'include:\s*"([^"]+)"', re.MULTILINE)
 
-    # Regex to extract view names from view files
-    VIEW_NAME_PATTERN = re.compile(r"view:\s*\+?(\w+)\s*\{", re.MULTILINE)
+    # Regex to extract base view names (not refinements which use view: +name)
+    VIEW_NAME_PATTERN = re.compile(r"view:\s*(\w+)\s*\{", re.MULTILINE)
+
+    # Regex to extract refinement view names (view: +name)
+    REFINEMENT_VIEW_NAME_PATTERN = re.compile(r"view:\s*\+(\w+)\s*\{", re.MULTILINE)
 
     # Regex to extract explore from: references
     EXPLORE_FROM_PATTERN = re.compile(r"from:\s*(\w+)", re.MULTILINE)
@@ -288,14 +291,22 @@ class ViewDiscovery:
         return resolved
 
     def _parse_view_names(self, file_path: str) -> List[str]:
-        """Parse view names from a view file."""
+        """Parse view names from a view file.
+
+        Returns only base view definitions (view: name), not refinements
+        (view: +name). Refinements share a name with their base view, so
+        if both files were included, the base file should win the file mapping.
+        """
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 content = f.read()
 
-            # Find all view definitions (including refinements with +)
-            matches = self.VIEW_NAME_PATTERN.findall(content)
-            return matches
+            base_views = self.VIEW_NAME_PATTERN.findall(content)
+            # Also include refinement-only files so that views defined only
+            # via refinement (no base file in this project) are still discovered.
+            if not base_views:
+                return self.REFINEMENT_VIEW_NAME_PATTERN.findall(content)
+            return base_views
         except OSError as e:
             logger.warning(f"Failed to parse view file {file_path}: {e}")
             return []

@@ -392,7 +392,15 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
                 for tag_mce in LookerUtil.get_tag_mces():
                     yield from auto_workunit(mcps_from_mce(tag_mce))
 
-            # Stage 7: Extract usage statistics
+            # Stage 7: Emit Looker user ID → email platform resource
+            with self._stage_timer("user_id_mapping"):
+                yield from auto_workunit(
+                    self.user_registry.to_platform_resource(
+                        self.config.platform_instance
+                    )
+                )
+
+            # Stage 8: Extract usage statistics
             if self.config.extract_usage_history:
                 with self._stage_timer("usage_extraction"):
                     yield from self._extract_usage_stats()
