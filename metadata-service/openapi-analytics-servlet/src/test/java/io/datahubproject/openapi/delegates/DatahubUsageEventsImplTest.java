@@ -26,6 +26,8 @@ public class DatahubUsageEventsImplTest extends AbstractTestNGSpringContextTests
 
   @MockitoBean private ConfigurationProvider configurationProvider;
 
+  @MockitoBean private io.datahubproject.openapi.config.TracingInterceptor tracingInterceptor;
+
   @Test
   public void initTest() {
     assertNotNull(analyticsController);

@@ -50,7 +50,6 @@ import com.linkedin.gms.factory.config.ConfigurationProvider;
 import com.linkedin.gms.factory.entity.versioning.EntityVersioningServiceFactory;
 import com.linkedin.metadata.aspect.batch.AspectsBatch;
 import com.linkedin.metadata.aspect.batch.MCPItem;
-import com.linkedin.metadata.entity.EntityService;
 import com.linkedin.metadata.entity.EntityServiceImpl;
 import com.linkedin.metadata.entity.IngestResult;
 import com.linkedin.metadata.entity.UpdateAspectResult;
@@ -128,12 +127,13 @@ import org.testng.annotations.Test;
 public class EntityControllerTest extends AbstractTestNGSpringContextTests {
   @Autowired private EntityController entityController;
   @Autowired private MockMvc mockMvc;
-  @Autowired private SearchService mockSearchService;
-  @Autowired private EntityService<?> mockEntityService;
-  @Autowired private TimeseriesAspectService mockTimeseriesAspectService;
   @Autowired private EntityRegistry entityRegistry;
   @Autowired private OperationContext opContext;
   @MockitoBean private ConfigurationProvider configurationProvider;
+  @MockitoBean private EntityServiceImpl mockEntityService;
+  @MockitoBean private SearchService mockSearchService;
+  @MockitoBean private TimeseriesAspectService mockTimeseriesAspectService;
+  @MockitoBean private SystemTelemetryContext systemTelemetryContext;
 
   @Captor private ArgumentCaptor<AspectsBatch> batchCaptor;
 
@@ -457,10 +457,6 @@ public class EntityControllerTest extends AbstractTestNGSpringContextTests {
 
   @TestConfiguration
   public static class EntityControllerTestConfig {
-    @MockitoBean public EntityServiceImpl entityService;
-    @MockitoBean public SearchService searchService;
-    @MockitoBean public TimeseriesAspectService timeseriesAspectService;
-    @MockitoBean public SystemTelemetryContext systemTelemetryContext;
 
     @Bean
     public ObjectMapper objectMapper() {
@@ -496,11 +492,6 @@ public class EntityControllerTest extends AbstractTestNGSpringContextTests {
       AuthenticationContext.setAuthentication(authentication);
 
       return authorizerChain;
-    }
-
-    @Bean
-    public TimeseriesAspectService timeseriesAspectService() {
-      return timeseriesAspectService;
     }
   }
 

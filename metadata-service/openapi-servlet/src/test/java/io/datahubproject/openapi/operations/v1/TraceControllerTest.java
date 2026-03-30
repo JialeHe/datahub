@@ -62,11 +62,11 @@ public class TraceControllerTest extends AbstractTestNGSpringContextTests {
           .searchStorage(TraceStorageStatus.ok(TraceWriteStatus.ACTIVE_STATE))
           .build();
 
+  @MockitoBean private TraceService mockTraceService;
+
   @Autowired private TraceController traceController;
 
   @Autowired private MockMvc mockMvc;
-
-  @Autowired private TraceService mockTraceService;
 
   @Test
   public void initTest() {
@@ -232,7 +232,6 @@ public class TraceControllerTest extends AbstractTestNGSpringContextTests {
 
   @TestConfiguration
   public static class TraceControllerTestConfig {
-    @MockitoBean public TraceService traceService;
 
     @Bean
     public ObjectMapper objectMapper() {

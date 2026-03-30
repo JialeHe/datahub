@@ -75,11 +75,12 @@ import org.testng.annotations.Test;
 public class ExternalEventsControllerTest extends AbstractTestNGSpringContextTests {
   @Autowired private ExternalEventsController externalEventsController;
   @Autowired private MockMvc mockMvc;
-  @Autowired private ExternalEventsService mockEventsService;
   @Autowired private AuthorizerChain mockAuthorizerChain;
   @Autowired private OperationContext opContext;
-  @Autowired private DataHubUsageService mockDataHubUsageService;
   @MockitoBean private ConfigurationProvider configurationProvider;
+  @MockitoBean private ExternalEventsService mockEventsService;
+  @MockitoBean private SystemTelemetryContext systemTelemetryContext;
+  @MockitoBean private DataHubUsageService mockDataHubUsageService;
   @Autowired private ObjectMapper objectMapper;
 
   private static final String ACTOR_URN = "urn:li:corpuser:testuser";
@@ -711,10 +712,6 @@ public class ExternalEventsControllerTest extends AbstractTestNGSpringContextTes
 
   @TestConfiguration
   public static class ExternalEventsControllerTestConfig {
-    @MockitoBean public ExternalEventsService eventsService;
-    @MockitoBean public AuthorizerChain authorizerChain;
-    @MockitoBean public SystemTelemetryContext systemTelemetryContext;
-    @MockitoBean public DataHubUsageService dataHubUsageService;
 
     @Bean
     public ObjectMapper objectMapper() {

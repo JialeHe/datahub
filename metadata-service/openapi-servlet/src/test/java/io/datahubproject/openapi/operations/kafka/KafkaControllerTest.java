@@ -60,19 +60,19 @@ public class KafkaControllerTest extends AbstractTestNGSpringContextTests {
   private static final String TOPIC_2 = "MetadataChangeLog_v1";
   private static final String TOPIC_3 = "MetadataChangeLog_Timeseries_v1";
 
-  @Autowired private KafkaController kafkaController;
+  @MockitoBean private MCPTraceReader mockMcpTraceReader;
 
-  @Autowired private MockMvc mockMvc;
-
-  @Autowired private MCPTraceReader mockMcpTraceReader;
-
-  @Autowired
+  @MockitoBean
   @Qualifier("mclVersionedTraceReader")
   private MCLTraceReader mockMclTraceReader;
 
-  @Autowired
+  @MockitoBean
   @Qualifier("mclTimeseriesTraceReader")
   private MCLTraceReader mockMclTimeseriesTraceReader;
+
+  @Autowired private KafkaController kafkaController;
+
+  @Autowired private MockMvc mockMvc;
 
   @Autowired private AuthorizerChain authorizerChain;
 
@@ -385,15 +385,6 @@ public class KafkaControllerTest extends AbstractTestNGSpringContextTests {
 
   @TestConfiguration
   public static class KafkaControllerTestConfig {
-    @MockitoBean public MCPTraceReader mcpTraceReader;
-
-    @MockitoBean
-    @Qualifier("mclVersionedTraceReader")
-    public MCLTraceReader mclTraceReader;
-
-    @MockitoBean
-    @Qualifier("mclTimeseriesTraceReader")
-    public MCLTraceReader mclTimeseriesTraceReader;
 
     @Bean
     public ObjectMapper objectMapper() {

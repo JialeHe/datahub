@@ -62,6 +62,10 @@ import org.testng.annotations.Test;
 @AutoConfigureWebMvc
 @AutoConfigureMockMvc
 public class RelationshipControllerTest extends AbstractTestNGSpringContextTests {
+  @MockitoBean private ConfigurationProvider configurationProvider;
+  @MockitoBean private EntityRegistry entityRegistry;
+  @MockitoBean private SystemTelemetryContext systemTelemetryContext;
+
   @Autowired private RelationshipController relationshipController;
   @Autowired private MockMvc mockMvc;
   @Autowired private GraphService mockGraphService;
@@ -74,9 +78,6 @@ public class RelationshipControllerTest extends AbstractTestNGSpringContextTests
 
   @TestConfiguration
   public static class RelationshipControllerTestConfig {
-    @MockitoBean private ConfigurationProvider configurationProvider;
-    @MockitoBean private EntityRegistry entityRegistry;
-    @MockitoBean private SystemTelemetryContext systemTelemetryContext;
 
     @Bean
     public ObjectMapper objectMapper() {

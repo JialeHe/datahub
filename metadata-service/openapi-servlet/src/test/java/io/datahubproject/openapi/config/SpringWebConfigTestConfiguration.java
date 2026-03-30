@@ -11,13 +11,11 @@ import org.springdoc.core.properties.SpringDocConfigProperties;
 import org.springdoc.core.providers.ObjectMapperProvider;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
-import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.web.servlet.config.annotation.EnableWebMvc;
 
 @EnableWebMvc
 @TestConfiguration
 public class SpringWebConfigTestConfiguration {
-  @MockitoBean TracingInterceptor tracingInterceptor;
 
   @Bean
   public OperationContext systemOperationContext() {

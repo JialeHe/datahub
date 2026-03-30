@@ -95,21 +95,18 @@ public class ElasticsearchControllerTest extends AbstractTestNGSpringContextTest
   private static final Urn TEST_URN_2 =
       UrnUtils.getUrn("urn:li:dataset:(urn:li:dataPlatform:snowflake,test.table,PROD)");
 
+  @MockitoBean private SystemMetadataService mockSystemMetadataService;
+  @MockitoBean private TimeseriesAspectService mockTimeseriesAspectService;
+  @MockitoBean private EntitySearchService mockSearchService;
+  @MockitoBean private EntityService<?> mockEntityService;
+  @MockitoBean private GraphService graphService;
+  @MockitoBean private ESSearchDAO mockESSearchDAO;
+
   @Autowired private ElasticsearchController elasticsearchController;
 
   @Autowired private MockMvc mockMvc;
 
-  @Autowired private SystemMetadataService mockSystemMetadataService;
-
-  @Autowired private TimeseriesAspectService mockTimeseriesAspectService;
-
-  @Autowired private EntitySearchService mockSearchService;
-
-  @Autowired private EntityService<?> mockEntityService;
-
   @Autowired private AuthorizerChain authorizerChain;
-
-  @Autowired private ESSearchDAO mockESSearchDAO;
 
   @BeforeMethod
   public void setupMocks() {
@@ -770,12 +767,6 @@ public class ElasticsearchControllerTest extends AbstractTestNGSpringContextTest
 
   @TestConfiguration
   public static class ElasticsearchControllerTestConfig {
-    @MockitoBean public SystemMetadataService systemMetadataService;
-    @MockitoBean public TimeseriesAspectService timeseriesAspectService;
-    @MockitoBean public EntitySearchService searchService;
-    @MockitoBean public EntityService<?> entityService;
-    @MockitoBean public GraphService graphService;
-    @MockitoBean public ESSearchDAO mockESSearchDAO;
 
     @Bean
     public ObjectMapper objectMapper() {
@@ -823,12 +814,6 @@ public class ElasticsearchControllerTest extends AbstractTestNGSpringContextTest
       AuthenticationContext.setAuthentication(authentication);
 
       return authorizerChain;
-    }
-
-    @Bean
-    @Primary
-    public GraphService graphService() {
-      return graphService;
     }
   }
 }

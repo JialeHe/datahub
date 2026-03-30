@@ -80,11 +80,11 @@ public class ConsistencyControllerTest extends AbstractTestNGSpringContextTests 
   private static final Urn TEST_URN_1 = UrnUtils.getUrn("urn:li:assertion:test-123");
   private static final Urn TEST_URN_2 = UrnUtils.getUrn("urn:li:assertion:test-456");
 
+  @MockitoBean private ConsistencyService mockConsistencyService;
+
   @Autowired private ConsistencyController consistencyController;
 
   @Autowired private MockMvc mockMvc;
-
-  @Autowired private ConsistencyService mockConsistencyService;
 
   @Autowired private AuthorizerChain authorizerChain;
 
@@ -1224,7 +1224,6 @@ public class ConsistencyControllerTest extends AbstractTestNGSpringContextTests 
 
   @TestConfiguration
   public static class ConsistencyControllerTestConfig {
-    @MockitoBean public ConsistencyService consistencyService;
 
     @Bean
     public ObjectMapper objectMapper() {
