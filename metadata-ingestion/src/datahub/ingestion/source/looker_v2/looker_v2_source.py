@@ -115,7 +115,7 @@ from datahub.metadata.schema_classes import (
     SchemaMetadataClass,
     StringTypeClass,
 )
-from datahub.metadata.urns import CorpUserUrn
+from datahub.metadata.urns import CorpUserUrn, TagUrn
 from datahub.sdk.chart import Chart
 from datahub.sdk.container import Container
 from datahub.sdk.dashboard import Dashboard
@@ -1439,6 +1439,10 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
         upstream_view_urns = self._get_explore_upstream_view_urns(explore, model_name)
         if upstream_view_urns:
             dataset.set_upstreams(upstream_view_urns)
+
+        # Apply explore-level tags (from LookML `tags` property on explore)
+        if explore.tags:
+            dataset.set_tags([TagUrn(tag) for tag in explore.tags])
 
         extra_mcps: List[MetadataChangeProposalWrapper] = []
 
