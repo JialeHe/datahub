@@ -141,6 +141,7 @@ _REQUIRED_API_PERMISSIONS: FrozenSet[str] = frozenset(
 
 
 def _platform_names_have_2_parts(platform: str) -> bool:
+    """Return True for platforms whose fully-qualified names use only 2 parts (db.table)."""
     return platform in {"hive", "mysql", "athena"}
 
 
@@ -150,7 +151,26 @@ def _generate_fully_qualified_name(
     reporter: LookerV2SourceReport,
     view_name: str,
 ) -> str:
-    """Returns a fully qualified dataset name resolved through a connection definition."""
+    """Expand a sql_table_name to a fully qualified name using the connection defaults.
+
+    Looker sql_table_name values may have 1, 2, or 3 dot-separated parts. This
+    function fills in missing db/schema segments from the connection definition and
+    normalises the result to lowercase.
+
+    - 3-part names: returned as-is (or 2-part for 2-part platforms).
+    - 2-part names: db prefix added for 3-part platforms.
+    - 1-part names: db + schema prefix added (or just db for 2-part platforms).
+    - 4+ parts: a warning is emitted and the name is returned lowercased unchanged.
+
+    Args:
+        sql_table_name: Raw table name from LookML (e.g. "my_table" or "db.schema.tbl").
+        connection_def: Connection definition providing default_db and default_schema.
+        reporter: Used to emit warnings when the name is malformed.
+        view_name: View name for warning context only.
+
+    Returns:
+        Lowercase fully qualified table name.
+    """
     parts = len(sql_table_name.split("."))
 
     if parts == 3:
@@ -181,7 +201,13 @@ def _generate_fully_qualified_name(
 
 @dataclass
 class DashboardProcessingResult:
-    """Result of processing a single dashboard."""
+    """All output produced while processing a single dashboard.
+
+    Attributes:
+        entities: Dashboard and chart entities ready for emission.
+        extra_mcps: Additional MCPs (InputFields, EmbedUrl, etc.) not in entity.as_mcps().
+        dashboard_usage: Usage tracking payload for the usage stats stage, or None.
+    """
 
     entities: List[Entity]
     extra_mcps: List[MetadataChangeProposalWrapper]
@@ -193,7 +219,13 @@ class DashboardProcessingResult:
 
 @dataclass
 class ViewProcessingResult:
-    """Result of processing a single view."""
+    """All output produced while processing a single LookML view.
+
+    Attributes:
+        entities: View Dataset entities (may include refinement chain nodes).
+        lineage_extracted: True if at least one upstream lineage edge was resolved.
+        is_unreachable: True for views not referenced by any explore.
+    """
 
     entities: List[Entity]
     view_id: LookerViewId
@@ -301,7 +333,11 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
 
     @property
     def _dashboard_chart_platform_instance(self) -> Optional[str]:
-        """Return platform_instance for dashboard/chart URNs only when configured."""
+        """Return the platform_instance for dashboard/chart URNs.
+
+        Only non-None when include_platform_instance_in_urns is True, because most
+        deployments migrating from V1 did not have platform_instance set in dashboard URNs.
+        """
         if self.config.include_platform_instance_in_urns:
             return self.config.platform_instance
         return None
@@ -418,7 +454,7 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
             self._cleanup_temp_dirs()
 
     def _stage_timer(self, stage_name: str) -> Any:
-        """Context manager to time a stage."""
+        """Context manager that records wall-clock duration for a named pipeline stage."""
         from contextlib import contextmanager
 
         @contextmanager
@@ -731,7 +767,11 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
         )
 
     def _get_explore_view_names(self) -> FrozenSet[str]:
-        """Get all view names referenced by explores via API (parallel fetch)."""
+        """Fetch all explore details in parallel and collect the referenced view names.
+
+        Results are cached in _explore_cache to avoid duplicate API calls during
+        the explore-processing stage.
+        """
         explore_pairs: List[Tuple[str, str]] = [
             (model.name, explore_basic.name)
             for model in self._model_registry.values()
@@ -1988,7 +2028,11 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
     def _get_connection_for_view(
         self, view_name: str
     ) -> Optional[LookerConnectionDefinition]:
-        """Find the connection definition for a view by looking up which explore references it."""
+        """Find the Looker connection for a view by scanning the explore cache.
+
+        The connection is needed to qualify table names for lineage (db, schema defaults).
+        Returns None if no explore references this view or the connection is not mapped.
+        """
         # Search explores that reference this view
         for (_model_name, _explore_name), explore in self._explore_cache.items():
             # Check if this explore's base view matches
@@ -2015,9 +2059,16 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
     def _resolve_view_upstream_lineage(
         self, dataset: Dataset, parsed_view: ParsedView
     ) -> bool:
-        """Resolve and add upstream lineage for a view entity.
+        """Resolve upstream lineage for a view and attach it to the dataset entity.
 
-        Returns True if lineage was successfully added.
+        Resolution priority for derived table views:
+        1. PDT graph API edges (most accurate, avoids SQL regex).
+        2. SQL regex parsing of derived_table.sql (fallback).
+
+        Also resolves ${view.SQL_TABLE_NAME} cross-view references in derived SQL.
+
+        Returns:
+            True if at least one upstream was attached; False otherwise.
         """
         conn_def = self._get_connection_for_view(parsed_view.name)
         if not conn_def:
@@ -2479,7 +2530,12 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
         return entities, merged_view
 
     def _generate_view_name(self, view_name: str, file_path: str, project: str) -> str:
-        """Generate view dataset name using naming pattern."""
+        """Build the dataset name for a view using the configured view_naming_pattern.
+
+        Converts the absolute file_path to a relative path within its owning project
+        before substituting into the naming pattern, so URNs are stable regardless of
+        where git repos are cloned.
+        """
         # Convert absolute file path to relative path within the project
         relative_path = file_path
         if self.config.base_folder and file_path:

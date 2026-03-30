@@ -87,7 +87,7 @@ class ParsedView:
 
     @property
     def has_sql_source(self) -> bool:
-        """Check if view has a SQL source for lineage."""
+        """Return True if the view has at least one SQL source for lineage extraction."""
         return bool(self.sql_table_name or self.derived_table_sql)
 
 
@@ -266,9 +266,16 @@ class LookMLParser:
 
     @staticmethod
     def extract_table_refs_from_sql(sql: str) -> List[str]:
-        """Extract table references from SQL for lineage (static version).
+        """Extract FROM/JOIN table references from SQL for lineage.
 
-        Filters out Looker template references like ${TABLE}.
+        Strips backtick/quote/bracket delimiters and filters out Looker template
+        expressions (${TABLE}, ${...}) that are not real table names.
+
+        Args:
+            sql: A raw or already-resolved SQL string.
+
+        Returns:
+            Sorted list of unique table reference strings (e.g. "db.schema.table").
         """
         if not sql:
             return []
@@ -351,19 +358,31 @@ def parse_views_from_files(
     environment: str = "prod",
     resolve_extends: bool = True,
 ) -> Dict[str, ParsedView]:
-    """
-    Parse multiple view files and return a dictionary of views.
+    """Parse multiple LookML view files into a view dictionary.
+
+    Convenience wrapper around LookMLParser that handles multi-file projects.
+    Refinements are stored with a "+" prefix key (e.g. "+my_view") so they do
+    not overwrite their base views in the returned mapping.
 
     Args:
-        file_paths: List of file paths to parse
-        project_name: Name of the project
-        template_variables: Liquid template variables for SQL resolution
-        constants: LookML @{constant} values for SQL resolution
-        environment: Looker environment ("prod" or "dev") for if-comments
-        resolve_extends: Whether to resolve extends chains after parsing
+        file_paths: Absolute paths to .view.lkml files to parse.
+        project_name: LookML project name, used to populate ParsedView.project_name.
+        template_variables: Liquid variables for {{ variable }} substitution in SQL.
+        constants: LookML @{constant} values, e.g. from manifest.lkml.
+        environment: Controls -- if prod -- / -- if dev -- comment directives.
+        resolve_extends: When True, walk the extends chain and inherit parent fields.
 
     Returns:
-        Dictionary mapping view name to ParsedView
+        Dictionary mapping view name (or "+view_name" for refinements) to ParsedView.
+
+    Example:
+        >>> views = parse_views_from_files(
+        ...     ["/path/to/my_view.view.lkml"],
+        ...     project_name="my_project",
+        ...     constants={"schema": "prod_schema"},
+        ... )
+        >>> views["my_view"].sql_table_name
+        'prod_schema.my_table'
     """
     parser = LookMLParser(
         template_variables=template_variables or {},

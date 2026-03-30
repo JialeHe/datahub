@@ -252,7 +252,10 @@ class ManifestParser:
             return None
 
     def consume_temp_dirs(self) -> List[str]:
-        """Return temp dirs created during parsing and clear the internal list."""
+        """Return and clear the list of temp dirs created during remote dependency cloning.
+
+        The caller is responsible for cleaning up the returned directories.
+        """
         dirs = list(self._temp_dirs)
         self._temp_dirs = []
         return dirs
@@ -272,17 +275,22 @@ def parse_manifest_constants(
     base_folder: str,
     project_dependencies: Optional[Dict[str, str]] = None,
 ) -> Dict[str, str]:
-    """
-    Parse manifest.lkml and return constants.
+    """Extract LookML constants from manifest.lkml without full dependency resolution.
 
-    A simplified helper for just extracting constants.
+    Useful when only @{constant} substitution is needed and remote dependency cloning
+    is not required. Cleans up any temporary directories before returning.
 
     Args:
-        base_folder: Path to the LookML project
-        project_dependencies: Pre-configured project dependencies
+        base_folder: Path to the root LookML project directory.
+        project_dependencies: Optional map of project name to local path for local deps.
 
     Returns:
-        Dictionary mapping constant name to value
+        Dictionary mapping constant name to its string value.
+
+    Example:
+        >>> constants = parse_manifest_constants("/path/to/my_lookml_project")
+        >>> constants.get("my_schema")
+        'prod_schema'
     """
     parser = ManifestParser(
         base_folder=base_folder,

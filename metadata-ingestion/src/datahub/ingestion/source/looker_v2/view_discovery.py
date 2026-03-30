@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ViewFile:
-    """Represents a LookML view file."""
+    """A LookML view file and the view names it defines."""
 
     file_path: str
     project_name: str
@@ -32,7 +32,12 @@ class ViewFile:
 
 @dataclass
 class ModelIncludes:
-    """Represents includes from a model file."""
+    """Include directives parsed from a single LookML model file.
+
+    Attributes:
+        include_patterns: Raw include strings (may contain wildcards or cross-project paths).
+        resolved_files: Absolute paths of files that matched the include patterns.
+    """
 
     model_name: str
     model_file: str
@@ -42,24 +47,25 @@ class ModelIncludes:
 
 @dataclass
 class ViewDiscoveryResult:
-    """Result of view discovery process."""
+    """Output of a ViewDiscovery.discover() run.
 
-    # Views referenced by explores (use API for metadata)
+    Attributes:
+        reachable_views: Views referenced by at least one explore. Metadata should
+            be fetched via Looker API for these views.
+        unreachable_views: Views included by a model but not referenced by any explore.
+            These require LookML file parsing to extract metadata.
+        orphaned_files: View files not included by any model. These are skipped with
+            a warning because they cannot be linked to a project connection.
+        view_to_file: Maps view name to its source file path.
+        view_to_project: Maps view name to the project that owns it.
+        model_includes: Parsed include data keyed by model name.
+    """
+
     reachable_views: Set[str] = field(default_factory=set)
-
-    # Views included by models but not referenced by explores (parse LookML)
     unreachable_views: Set[str] = field(default_factory=set)
-
-    # View files not included by any model (warn and skip)
     orphaned_files: Set[str] = field(default_factory=set)
-
-    # Mapping of view name to file path
     view_to_file: Dict[str, str] = field(default_factory=dict)
-
-    # Mapping of view name to project
     view_to_project: Dict[str, str] = field(default_factory=dict)
-
-    # All model includes
     model_includes: Dict[str, ModelIncludes] = field(default_factory=dict)
 
 
@@ -352,14 +358,16 @@ class ViewDiscovery:
 def extract_explore_views_from_api(
     explores: List[Tuple[str, str, LookmlModelExplore]],
 ) -> FrozenSet[str]:
-    """
-    Extract view names referenced by explores from API response.
+    """Collect all view names referenced by a list of explore objects.
+
+    Includes both the explore's base view (view_name / name) and all joined views
+    (join.from_ or join.name). Used to distinguish reachable from unreachable views.
 
     Args:
-        explores: List of (project, model, explore) tuples from API
+        explores: List of (project_name, model_name, explore) tuples from the API.
 
     Returns:
-        Frozenset of view names referenced by explores
+        Frozenset of unique view names referenced across all provided explores.
     """
     view_names: Set[str] = set()
 

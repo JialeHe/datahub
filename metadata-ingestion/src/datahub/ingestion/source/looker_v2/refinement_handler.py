@@ -25,24 +25,36 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class FieldAttribution:
-    """Tracks which file/project contributed a field."""
+    """Tracks which file and project contributed a specific field.
+
+    Attributes:
+        operation: One of "added" (first definition) or "modified" (overridden by refinement).
+        field_type: One of "dimension", "measure", or "dimension_group".
+    """
 
     field_name: str
     source_file: str
     source_project: str
     is_refinement: bool
-    operation: str  # "added" | "modified" | "inherited"
-    field_type: str  # "dimension" | "measure" | "dimension_group"
+    operation: str
+    field_type: str
 
 
 @dataclass
 class RefinementNode:
-    """Represents a single refinement in a chain."""
+    """Represents a single node in a view refinement chain.
+
+    The first node (order=0) is the base view definition. Subsequent nodes are
+    successive +view refinements applied in project order.
+
+    Attributes:
+        order: Position in the chain. 0 = base view; 1+ = refinement layers.
+    """
 
     view_name: str
     file_path: str
     project_name: str
-    order: int  # Position in refinement chain (0 = base)
+    order: int
 
     # Fields added or modified by this refinement
     added_dimensions: List[ParsedDimension] = field(default_factory=list)
@@ -57,14 +69,14 @@ class RefinementNode:
 
     @property
     def urn_suffix(self) -> str:
-        """Generate URN suffix for this refinement node."""
+        """URN-safe identifier for this node (e.g. "my_view+ref2" for the third node)."""
         if self.order == 0:
             return self.view_name
         return f"{self.view_name}+ref{self.order}"
 
     @property
     def display_name(self) -> str:
-        """Human-readable name for this refinement."""
+        """Human-readable label showing whether this is the base view or a refinement."""
         if self.order == 0:
             return f"{self.view_name} (base)"
         return f"+{self.view_name} ({self.project_name})"
@@ -78,18 +90,18 @@ class RefinementChain:
     nodes: List[RefinementNode] = field(default_factory=list)
 
     def add_node(self, node: RefinementNode) -> None:
-        """Add a refinement node to the chain."""
+        """Append a node, automatically assigning its position in the chain."""
         node.order = len(self.nodes)
         self.nodes.append(node)
 
     @property
     def base(self) -> Optional[RefinementNode]:
-        """Get the base (non-refined) view."""
+        """The base (non-refined) view node, or None if the chain is empty."""
         return self.nodes[0] if self.nodes else None
 
     @property
     def refinements(self) -> List[RefinementNode]:
-        """Get all refinement nodes (excluding base)."""
+        """All nodes beyond the base view (i.e. the +view refinement layers)."""
         return self.nodes[1:] if len(self.nodes) > 1 else []
 
     def get_all_fields(self) -> Dict[str, FieldAttribution]:

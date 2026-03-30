@@ -111,7 +111,12 @@ class LookerV2SourceReport(LookerDashboardSourceReport):
     _upstream_api_latency_count: int = field(default=0, repr=False)
 
     def record_api_call_latency(self, start_time: float, end_time: float) -> None:
-        """Record latency for an upstream API call."""
+        """Update rolling min/max/sum/count latency stats for an upstream API call.
+
+        Args:
+            start_time: Unix timestamp when the call started (e.g. from time.time()).
+            end_time: Unix timestamp when the call completed.
+        """
         latency = end_time - start_time
         if (
             self._upstream_api_latency_min is None
@@ -127,7 +132,7 @@ class LookerV2SourceReport(LookerDashboardSourceReport):
         self._upstream_api_latency_count += 1
 
     def report_orphaned_file(self, file_path: str) -> None:
-        """Report an orphaned view file not included by any model."""
+        """Record an orphaned view file and emit a pipeline warning."""
         self.orphaned_view_files.append(file_path)
         self.orphaned_view_files_count += 1
         self.report_warning(
@@ -137,7 +142,7 @@ class LookerV2SourceReport(LookerDashboardSourceReport):
         )
 
     def report_lineage_failure(self, view_name: str, error: str) -> None:
-        """Report a lineage extraction failure."""
+        """Record a lineage extraction failure for a specific view."""
         self.lineage_failures.append(f"{view_name}: {error}")
 
     def report_field_splitting(
@@ -147,7 +152,7 @@ class LookerV2SourceReport(LookerDashboardSourceReport):
         chunks_succeeded: int,
         chunks_failed: int,
     ) -> None:
-        """Report field splitting statistics for a view."""
+        """Accumulate field-splitting counters for a view that hit the API field limit."""
         self.field_splitting_used += 1
         self.field_chunks_processed += chunks_processed
         self.field_chunks_succeeded += chunks_succeeded
@@ -160,7 +165,7 @@ class LookerV2SourceReport(LookerDashboardSourceReport):
         fields_added: int = 0,
         fields_modified: int = 0,
     ) -> None:
-        """Report a view refinement."""
+        """Record that a refinement was discovered and applied for a view."""
         self.refinements_discovered += 1
         self.refinements_applied += 1
         self.refinements_by_project[project] = (
@@ -170,7 +175,7 @@ class LookerV2SourceReport(LookerDashboardSourceReport):
         self.fields_modified_by_refinement += fields_modified
 
     def compute_stats(self) -> None:
-        """Compute derived statistics."""
+        """Compute derived statistics and emit stage timing / latency summaries."""
         super().compute_stats()
 
         if self.stage_timings_seconds:

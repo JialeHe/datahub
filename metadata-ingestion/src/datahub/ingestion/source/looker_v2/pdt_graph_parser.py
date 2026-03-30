@@ -42,7 +42,18 @@ _DIGRAPH_NAME_PATTERN = re.compile(r"digraph\s+(\S+)\s*\{")
 
 @dataclass
 class PDTDependencyEdge:
-    """A dependency edge from the PDT graph."""
+    """A single directed dependency edge from Looker's PDT graph.
+
+    Represents a dependency from a PDT view to either another PDT view
+    (is_database_table=False) or a raw warehouse table (is_database_table=True).
+
+    Attributes:
+        view_name: The dependent PDT view.
+        model_name: The LookML model that contains the dependent view.
+        upstream_name: The name of the upstream node (PDT view or table).
+        upstream_model: The model owning the upstream view, or None for raw tables.
+        is_database_table: True when the upstream is a warehouse table, not a PDT.
+    """
 
     view_name: str
     model_name: str
@@ -64,7 +75,26 @@ def _parse_quoted_node(node: str) -> tuple[str, Optional[str]]:
 
 
 def parse_pdt_graph(graph_text: str) -> List[PDTDependencyEdge]:
-    """Parse DOT graph text into structured dependency edges."""
+    """Parse DOT graph text from Looker's graph_derived_tables_for_model API.
+
+    Detects Format 1 (angle-bracket nodes) or Format 2 (quoted model/view paths)
+    automatically and returns all dependency edges found.
+
+    Args:
+        graph_text: Raw DOT format string returned by the Looker API.
+
+    Returns:
+        List of dependency edges. Empty list if the input is blank or unparseable.
+
+    Example:
+        >>> edges = parse_pdt_graph(
+        ...     'digraph my_model { subgraph { <view_a> -> <view_b> } }'
+        ... )
+        >>> edges[0].view_name
+        'view_a'
+        >>> edges[0].upstream_name
+        'view_b'
+    """
     if not graph_text or not graph_text.strip():
         return []
 
