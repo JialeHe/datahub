@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from datahub.emitter.mcp import MetadataChangeProposalWrapper
 from datahub.ingestion.api.workunit import MetadataWorkUnit
+from datahub.ingestion.source.ge_profiling_config import GEProfilingConfig
 from datahub.ingestion.source.redshift.config import RedshiftConfig
 from datahub.ingestion.source.redshift.profile import RedshiftProfiler
 from datahub.ingestion.source.redshift.redshift_schema import (
@@ -34,7 +35,7 @@ def make_profiler(
         database="test_db",
         include_tables=include_tables,
         platform_instance=platform_instance,
-        profiling={"enabled": profiling_enabled},
+        profiling=GEProfilingConfig(enabled=profiling_enabled),
     )
     report = RedshiftReport()
     return RedshiftProfiler(config=config, report=report, state_handler=None)
@@ -66,6 +67,7 @@ def collect_aspect_names(workunits: list[MetadataWorkUnit]) -> list[str]:
         wu.metadata.aspectName
         for wu in workunits
         if isinstance(wu.metadata, MetadataChangeProposalWrapper)
+        and wu.metadata.aspectName is not None
     ]
 
 
