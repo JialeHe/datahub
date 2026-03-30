@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, FrozenSet, List, Optional, Set, Tuple
 
+from looker_sdk.sdk.api40.models import LookmlModelExplore
+
 logger = logging.getLogger(__name__)
 
 
@@ -348,7 +350,7 @@ class ViewDiscovery:
 
 
 def extract_explore_views_from_api(
-    explores: List[Tuple[str, str, object]],
+    explores: List[Tuple[str, str, LookmlModelExplore]],
 ) -> FrozenSet[str]:
     """
     Extract view names referenced by explores from API response.
@@ -363,17 +365,17 @@ def extract_explore_views_from_api(
 
     for _project, _model, explore in explores:
         # Get the main view (from: or view_name: or explore name)
-        if hasattr(explore, "view_name") and explore.view_name:
+        if explore.view_name:
             view_names.add(explore.view_name)
-        elif hasattr(explore, "name") and explore.name:
+        elif explore.name:
             view_names.add(explore.name)
 
         # Get joined views
-        if hasattr(explore, "joins") and explore.joins:
+        if explore.joins:
             for join in explore.joins:
-                if hasattr(join, "from_") and join.from_:
+                if join.from_:
                     view_names.add(join.from_)
-                elif hasattr(join, "name") and join.name:
+                elif join.name:
                     view_names.add(join.name)
 
     return frozenset(view_names)

@@ -190,7 +190,10 @@ class LookMLSQLResolver:
             template = _JINJA2_ENV.from_string(preprocessed)
             return template.render(self.template_variables)
         except Exception as e:
-            logger.debug(f"LookMLSQLResolver failed to render template: {e}")
+            logger.warning(
+                f"LookMLSQLResolver failed to render template, "
+                f"returning unresolved SQL which may produce incorrect lineage: {e}"
+            )
             return sql
 
     def resolve_dict_values(self, d: Dict[str, Any], keys: List[str]) -> Dict[str, Any]:

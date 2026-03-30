@@ -216,7 +216,7 @@ class ManifestParser:
 
             return manifest
 
-        except Exception as e:
+        except (OSError, ValueError, KeyError) as e:
             logger.warning(f"Failed to parse manifest {manifest_file}: {e}")
             return None
 
@@ -245,7 +245,10 @@ class ManifestParser:
             return checkout_dir
 
         except Exception as e:
-            logger.warning(f"Failed to clone remote dependency '{remote.name}': {e}")
+            logger.warning(
+                f"Failed to clone remote dependency '{remote.name}': {e}. "
+                "Views from this dependency will be missing from lineage."
+            )
             return None
 
     def consume_temp_dirs(self) -> List[str]:

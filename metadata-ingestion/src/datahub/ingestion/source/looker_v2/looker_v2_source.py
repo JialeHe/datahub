@@ -28,6 +28,7 @@ from looker_sdk.sdk.api40.models import (
     Look,
     LookmlModel,
     LookmlModelExplore,
+    LookmlModelExploreField,
     LookWithQuery,
     Query,
 )
@@ -537,28 +538,43 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
         temp_dir = tempfile.mkdtemp(prefix="looker_v2_main_")
         self._temp_dirs.append(temp_dir)
 
-        git_clone = GitClone(str(temp_dir))
-        checkout_dir = git_clone.clone(
-            ssh_key=git_info.deploy_key,  # Already SecretStr
-            repo_url=git_info.repo,
-            branch=git_info.branch,
-        )
-        self.config.base_folder = str(checkout_dir)
-        logger.info(f"Cloned main project to {checkout_dir}")
+        try:
+            git_clone = GitClone(str(temp_dir))
+            checkout_dir = git_clone.clone(
+                ssh_key=git_info.deploy_key,  # Already SecretStr
+                repo_url=git_info.repo,
+                branch=git_info.branch,
+            )
+            self.config.base_folder = str(checkout_dir)
+            logger.info(f"Cloned main project to {checkout_dir}")
+        except Exception as e:
+            self.reporter.report_failure(
+                title="Git Clone Failed",
+                message="Failed to clone main LookML project from git.",
+                context=f"{git_info.repo}: {e}",
+            )
+            raise
 
-    def _clone_dependency(self, project_name: str, git_info: Any) -> None:
+    def _clone_dependency(self, project_name: str, git_info: LookerV2GitInfo) -> None:
         """Clone a dependency project from git."""
         temp_dir = tempfile.mkdtemp(prefix=f"looker_v2_dep_{project_name}_")
         self._temp_dirs.append(temp_dir)
 
-        git_clone = GitClone(str(temp_dir))
-        checkout_dir = git_clone.clone(
-            ssh_key=getattr(git_info, "deploy_key", None),  # May be SecretStr
-            repo_url=git_info.repo,
-            branch=git_info.branch,
-        )
-        self._resolved_project_paths[project_name] = str(checkout_dir)
-        logger.info(f"Cloned dependency '{project_name}' to {checkout_dir}")
+        try:
+            git_clone = GitClone(str(temp_dir))
+            checkout_dir = git_clone.clone(
+                ssh_key=git_info.deploy_key,
+                repo_url=git_info.repo,
+                branch=git_info.branch,
+            )
+            self._resolved_project_paths[project_name] = str(checkout_dir)
+            logger.info(f"Cloned dependency '{project_name}' to {checkout_dir}")
+        except Exception as e:
+            self.reporter.report_warning(
+                title="Dependency Clone Failed",
+                message="Failed to clone LookML dependency project from git. Views from this dependency will be missing.",
+                context=f"project={project_name}, repo={git_info.repo}: {e}",
+            )
 
     def _cleanup_temp_dirs(self) -> None:
         """Cleanup temporary directories."""
@@ -594,6 +610,11 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
             logger.warning(
                 f"Failed to pre-fetch folders (will fall back to on-demand): {e}"
             )
+            self.reporter.report_warning(
+                title="Folder Pre-Fetch Failed",
+                message="Could not bulk pre-fetch folders. Falling back to per-dashboard API calls.",
+                context=str(e),
+            )
 
         # Fetch all models
         try:
@@ -603,7 +624,11 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
                     self._model_registry[model.name] = model
                     self.reporter.models_discovered += 1
         except SDKError as e:
-            logger.warning(f"Failed to fetch models: {e}")
+            self.reporter.report_failure(
+                title="Model Fetch Failed",
+                message="Could not fetch LookML models from Looker API. No explores, views, or lineage will be extracted.",
+                context=str(e),
+            )
 
     def _auto_discover_connections(self) -> None:
         """Auto-discover connection_to_platform_map from Looker API."""
@@ -629,9 +654,9 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
                     f"platform='{connection_def.platform}', "
                     f"db='{connection_def.default_db}'"
                 )
-            except (ConfigurationError, Exception) as e:
+            except ConfigurationError as e:
                 failed_connections.append(conn.name)
-                logger.debug(f"Could not auto-discover connection '{conn.name}': {e}")
+                logger.warning(f"Could not auto-discover connection '{conn.name}': {e}")
 
         if failed_connections:
             self.reporter.report_warning(
@@ -870,6 +895,11 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
             )
         except SDKError as e:
             logger.warning(f"Failed to fetch dashboard {dashboard_id}: {e}")
+            self.reporter.report_warning(
+                title="Dashboard Fetch Failed",
+                message="Could not fetch dashboard from Looker API.",
+                context=f"dashboard_id={dashboard_id}: {e}",
+            )
             return None
 
         if not api_dashboard:
@@ -1249,7 +1279,12 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
         try:
             return list(self.looker_api.folder_ancestors(folder_id=folder_id))
         except SDKError as e:
-            logger.debug(f"Failed to fetch folder ancestors for {folder_id}: {e}")
+            logger.warning(f"Failed to fetch folder ancestors for {folder_id}: {e}")
+            self.reporter.report_warning(
+                title="Folder Ancestors Fetch Failed",
+                message="Could not fetch folder ancestors. Folder container hierarchy may be incomplete.",
+                context=f"folder_id={folder_id}: {e}",
+            )
             return []
 
     def _get_folder_container(self, folder: Union[FolderBase, Folder]) -> List[Entity]:
@@ -1661,23 +1696,23 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
 
         return input_field_classes
 
-    def _api_field_to_view_field(self, api_field: Any) -> ViewField:
+    def _api_field_to_view_field(self, api_field: LookmlModelExploreField) -> ViewField:
         """Convert a LookML API explore field to a ViewField."""
         field_type = ViewFieldType.DIMENSION
-        if hasattr(api_field, "category") and api_field.category == "measure":
+        if api_field.category == "measure":
             field_type = ViewFieldType.MEASURE
-        elif hasattr(api_field, "dimension_group") and api_field.dimension_group:
+        elif api_field.dimension_group:
             field_type = ViewFieldType.DIMENSION_GROUP
 
         return ViewField(
             name=api_field.name or "",
-            label=getattr(api_field, "label_short", None),
-            description=getattr(api_field, "description", "") or "",
-            type=getattr(api_field, "type", "") or "",
+            label=api_field.label_short,
+            description=api_field.description or "",
+            type=api_field.type or "",
             field_type=field_type,
-            is_primary_key=getattr(api_field, "primary_key", False) or False,
-            tags=list(api_field.tags) if getattr(api_field, "tags", None) else [],
-            group_label=getattr(api_field, "field_group_label", None),
+            is_primary_key=api_field.primary_key or False,
+            tags=list(api_field.tags) if api_field.tags else [],
+            group_label=api_field.field_group_label,
         )
 
     def _extract_chart_input_fields(
@@ -2016,6 +2051,11 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
                         f"Failed to resolve lineage for view '{parsed_view.name}' "
                         f"table '{table_name}': {e}"
                     )
+                    self.reporter.report_warning(
+                        title="Lineage Resolution Failed",
+                        message="Could not resolve upstream table for view.",
+                        context=f"view={parsed_view.name}, table={table_name}: {e}",
+                    )
 
         elif parsed_view.derived_table_sql:
             # Prefer PDT graph API data over SQL regex when available
@@ -2043,6 +2083,11 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
                             logger.warning(
                                 f"Failed to resolve PDT graph lineage for view "
                                 f"'{parsed_view.name}' table '{edge.upstream_name}': {e}"
+                            )
+                            self.reporter.report_warning(
+                                title="PDT Lineage Resolution Failed",
+                                message="Could not resolve PDT upstream table from graph API.",
+                                context=f"view={parsed_view.name}, upstream={edge.upstream_name}: {e}",
                             )
                     else:
                         # PDT-to-PDT: reference another Looker view
@@ -2077,6 +2122,11 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
                         logger.warning(
                             f"Failed to resolve lineage for view '{parsed_view.name}' "
                             f"derived table ref '{table_ref}': {e}"
+                        )
+                        self.reporter.report_warning(
+                            title="Derived Table Lineage Resolution Failed",
+                            message="Could not resolve derived table upstream reference.",
+                            context=f"view={parsed_view.name}, ref={table_ref}: {e}",
                         )
                 self.reporter.lineage_via_file_parse += 1
 

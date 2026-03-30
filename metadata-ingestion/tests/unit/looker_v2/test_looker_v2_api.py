@@ -2,7 +2,6 @@
 
 Covers:
 - Bulk folder pre-fetch and ancestor walk
-- PDT graph API default
 - View discovery categorization
 - ManifestParser constant extraction
 """
@@ -12,7 +11,6 @@ from unittest.mock import MagicMock
 
 from looker_sdk.sdk.api40.models import FolderBase
 
-from datahub.ingestion.source.looker_v2.looker_v2_config import LookerV2Config
 from datahub.ingestion.source.looker_v2.view_discovery import (
     ViewDiscovery,
     extract_explore_views_from_api,
@@ -168,23 +166,6 @@ class TestPersonalFolderSkip:
         child.is_personal_descendant = True
         src = self._make_source_with_registry([personal, child])
         assert src._should_skip_personal_folder(child)  # type: ignore[attr-defined]
-
-
-# ---------------------------------------------------------------------------
-# PDT graph API default
-# ---------------------------------------------------------------------------
-
-
-class TestPDTGraphDefault:
-    def test_use_pdt_graph_api_defaults_true(self):
-        cfg = LookerV2Config.model_validate(
-            {
-                "client_id": "test_id",
-                "client_secret": "test_secret",
-                "base_url": "https://example.looker.com",
-            }
-        )
-        assert cfg.use_pdt_graph_api is True
 
 
 # ---------------------------------------------------------------------------

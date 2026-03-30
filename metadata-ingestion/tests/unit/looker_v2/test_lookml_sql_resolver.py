@@ -110,10 +110,6 @@ class TestSafePassthrough:
         r = resolver()
         assert r.resolve("") == ""
 
-    def test_none_like_empty_handled(self):
-        r = resolver()
-        assert r.resolve("") == ""
-
 
 class TestResolveDictValues:
     def test_resolves_named_keys(self):

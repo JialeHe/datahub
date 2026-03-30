@@ -183,7 +183,8 @@ class LookerV2SourceReport(LookerDashboardSourceReport):
             ]
             self.info(
                 title="Stage Timings",
-                message=f"Total pipeline time: {total:.2f}s\n" + "\n".join(lines),
+                message="Pipeline stage timing breakdown.",
+                context=f"Total: {total:.2f}s\n" + "\n".join(lines),
             )
 
         if self._upstream_api_latency_count > 0:
@@ -192,7 +193,8 @@ class LookerV2SourceReport(LookerDashboardSourceReport):
             )
             self.info(
                 title="Upstream API Latency",
-                message=(
+                message="Upstream API call latency statistics.",
+                context=(
                     f"min={self._upstream_api_latency_min:.3f}s, "
                     f"max={self._upstream_api_latency_max:.3f}s, "
                     f"avg={avg_latency:.3f}s, "

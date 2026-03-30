@@ -190,7 +190,7 @@ class LookerV2Config(
     )
 
     # ==================== Template Variables ====================
-    liquid_variables: Dict[str, Any] = Field(
+    liquid_variables: Dict[str, Union[str, int, float, bool]] = Field(
         default_factory=dict,
         description="Variables for Liquid template substitution in LookML SQL. "
         "These resolve {{ variable }} syntax in sql_table_name and derived_table.sql.",
