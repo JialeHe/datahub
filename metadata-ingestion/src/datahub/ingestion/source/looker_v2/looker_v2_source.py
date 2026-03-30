@@ -78,6 +78,7 @@ from datahub.ingestion.source.looker_v2 import v2_usage as looker_usage
 from datahub.ingestion.source.looker_v2.looker_v2_config import (
     LookerConnectionDefinition,
     LookerV2Config,
+    LookerV2GitInfo,
 )
 from datahub.ingestion.source.looker_v2.looker_v2_report import LookerV2SourceReport
 from datahub.ingestion.source.looker_v2.lookml_parser import (
@@ -125,6 +126,17 @@ from datahub.utilities.sentinels import Unset, unset
 from datahub.utilities.url_util import remove_port_from_url
 
 logger = logging.getLogger(__name__)
+
+_REQUIRED_API_PERMISSIONS: FrozenSet[str] = frozenset(
+    {
+        "access_data",
+        "explore",
+        "see_lookml",
+        "see_lookml_dashboards",
+        "see_looks",
+        "see_user_dashboards",
+    }
+)
 
 
 def _platform_names_have_2_parts(platform: str) -> bool:
@@ -308,21 +320,12 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
             test_report.basic_connectivity = CapabilityReport(capable=True)
             test_report.capability_report = {}
 
-            BASIC_REQUIRED_PERMISSIONS = {
-                "access_data",
-                "explore",
-                "see_lookml",
-                "see_lookml_dashboards",
-                "see_looks",
-                "see_user_dashboards",
-            }
-
-            if BASIC_REQUIRED_PERMISSIONS.issubset(permissions):
+            if _REQUIRED_API_PERMISSIONS.issubset(permissions):
                 test_report.capability_report[SourceCapability.DESCRIPTIONS] = (
                     CapabilityReport(capable=True)
                 )
             else:
-                missing = BASIC_REQUIRED_PERMISSIONS - permissions
+                missing = _REQUIRED_API_PERMISSIONS - permissions
                 test_report.capability_report[SourceCapability.DESCRIPTIONS] = (
                     CapabilityReport(
                         capable=False,
@@ -438,7 +441,7 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
 
         # Clone dependency repos from config
         for project_name, dep in self.config.project_dependencies.items():
-            if hasattr(dep, "repo"):  # GitInfo
+            if isinstance(dep, LookerV2GitInfo):
                 with self._stage_timer(f"init.clone_dep.{project_name}"):
                     self._clone_dependency(project_name, dep)
             else:
@@ -510,7 +513,7 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
                     self.config.lookml_constants[name] = const.value
 
             # Track temp dirs for cleanup
-            self._temp_dirs.extend(manifest_parser._temp_dirs)
+            self._temp_dirs.extend(manifest_parser.consume_temp_dirs())
 
             logger.info(
                 f"Manifest resolution complete: "
@@ -1816,8 +1819,11 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
                 urn_builder=self._make_dashboard_urn,
                 looker_dashboards=self._dashboards_for_usage,
             )
+            emitted = 0
             for mcp in dashboard_stat_generator.generate_usage_stat_mcps():
                 yield mcp.as_workunit()
+                emitted += 1
+            if emitted > 0:
                 self.reporter.dashboards_with_usage += 1
         except (SDKError, ValueError, KeyError) as e:
             self.reporter.report_warning(
@@ -1848,8 +1854,11 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
                     urn_builder=self._make_chart_urn,
                     looker_looks=unique_looks,
                 )
+                emitted = 0
                 for mcp in chart_stat_generator.generate_usage_stat_mcps():
                     yield mcp.as_workunit()
+                    emitted += 1
+                if emitted > 0:
                     self.reporter.charts_with_usage += 1
             except (SDKError, ValueError, KeyError) as e:
                 self.reporter.report_warning(

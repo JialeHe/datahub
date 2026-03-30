@@ -248,6 +248,12 @@ class ManifestParser:
             logger.warning(f"Failed to clone remote dependency '{remote.name}': {e}")
             return None
 
+    def consume_temp_dirs(self) -> List[str]:
+        """Return temp dirs created during parsing and clear the internal list."""
+        dirs = list(self._temp_dirs)
+        self._temp_dirs = []
+        return dirs
+
     def cleanup(self) -> None:
         """Cleanup temporary directories."""
         import shutil

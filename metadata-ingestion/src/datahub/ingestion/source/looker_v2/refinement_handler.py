@@ -329,7 +329,7 @@ def merge_additive_parameters(
             for i, base_dim in enumerate(merged.dimensions):
                 if base_dim.name == dim.name:
                     # Merge additive tags
-                    merged_tags = list(set(base_dim.tags + dim.tags))
+                    merged_tags = list(dict.fromkeys(base_dim.tags + dim.tags))
                     new_dim = deepcopy(dim)
                     new_dim.tags = merged_tags
                     merged.dimensions[i] = new_dim
@@ -344,7 +344,7 @@ def merge_additive_parameters(
         if measure.name in base_measure_names:
             for i, base_measure in enumerate(merged.measures):
                 if base_measure.name == measure.name:
-                    merged_tags = list(set(base_measure.tags + measure.tags))
+                    merged_tags = list(dict.fromkeys(base_measure.tags + measure.tags))
                     new_measure = deepcopy(measure)
                     new_measure.tags = merged_tags
                     merged.measures[i] = new_measure

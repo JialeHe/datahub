@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import jinja2
 import jinja2.ext
@@ -193,7 +193,7 @@ class LookMLSQLResolver:
             logger.debug(f"LookMLSQLResolver failed to render template: {e}")
             return sql
 
-    def resolve_dict_values(self, d: Dict[str, Any], keys: list) -> Dict[str, Any]:
+    def resolve_dict_values(self, d: Dict[str, Any], keys: List[str]) -> Dict[str, Any]:
         """Resolve template expressions in specific keys of a dict, returning a copy."""
         result = dict(d)
         for key in keys:

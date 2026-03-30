@@ -177,8 +177,14 @@ class TestPersonalFolderSkip:
 
 class TestPDTGraphDefault:
     def test_use_pdt_graph_api_defaults_true(self):
-        # Verify the config default changed to True
-        assert LookerV2Config.__fields__["use_pdt_graph_api"].default is True
+        cfg = LookerV2Config.model_validate(
+            {
+                "client_id": "test_id",
+                "client_secret": "test_secret",
+                "base_url": "https://example.looker.com",
+            }
+        )
+        assert cfg.use_pdt_graph_api is True
 
 
 # ---------------------------------------------------------------------------

@@ -27,11 +27,6 @@ class ViewFile:
     project_name: str
     view_names: List[str] = field(default_factory=list)
 
-    @property
-    def relative_path(self) -> str:
-        """Get the relative path within the project."""
-        return self.file_path
-
 
 @dataclass
 class ModelIncludes:
