@@ -1984,6 +1984,7 @@ datahub = "datahub.entrypoints:main"
 
 [project.entry-points."datahub.ingestion.source.plugins"]
 abs = "datahub.ingestion.source.abs.source:ABSSource"
+aerospike = "datahub.ingestion.source.aerospike:AerospikeSource"
 csv-enricher = "datahub.ingestion.source.csv_enricher:CSVEnricherSource"
 file = "datahub.ingestion.source.file:GenericFileSource"
 datahub = "datahub.ingestion.source.datahub.datahub_source:DataHubSource"

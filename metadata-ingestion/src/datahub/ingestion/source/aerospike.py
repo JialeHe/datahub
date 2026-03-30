@@ -15,7 +15,7 @@ from typing import (
 
 import aerospike
 import aerospike_helpers
-from pydantic import PositiveInt, SecretStr, field_validator
+from pydantic import ConfigDict, PositiveInt, SecretStr, field_validator
 from pydantic.fields import Field
 
 from datahub.configuration.common import AllowDenyPattern
@@ -91,6 +91,8 @@ class AuthMode(Enum):
 class AerospikeConfig(
     PlatformInstanceConfigMixin, EnvConfigMixin, StatefulIngestionConfigBase
 ):
+    model_config = ConfigDict(populate_by_name=True)
+
     # See the Aerospike authentication docs for details and examples.
     hosts: List[tuple] = Field(
         default=[("localhost", 3000)], description="Aerospike hosts list."
@@ -129,16 +131,20 @@ class AerospikeConfig(
     tls_cafile: Optional[str] = Field(
         default=None, description="Path to the CA certificate file."
     )
-    inferSchemaDepth: int = Field(
+    infer_schema_depth: int = Field(
         default=1,
         description="The depth of nested fields to infer schema. If set to `-1`, infer schema at all levels. If set to `0`, does not infer the schema. Default is `1`.",
+        alias="inferSchemaDepth",
     )
-    schemaSamplingSize: Optional[PositiveInt] = Field(
+    schema_sampling_size: Optional[PositiveInt] = Field(
         default=1000,
         description="Number of documents to use when inferring schema. If set to `null`, all documents will be scanned.",
+        alias="schemaSamplingSize",
     )
-    maxSchemaSize: Optional[PositiveInt] = Field(
-        default=300, description="Maximum number of fields to include in the schema."
+    max_schema_size: Optional[PositiveInt] = Field(
+        default=300,
+        description="Maximum number of fields to include in the schema.",
+        alias="maxSchemaSize",
     )
     namespace_pattern: AllowDenyPattern = Field(
         default=AllowDenyPattern.allow_all(),
@@ -211,29 +217,52 @@ _field_type_mapping: Dict[Union[Type, str], Type] = {
 }
 
 
+@dataclass
 class AerospikeSet:
-    def __init__(self, info_string: str):
-        self.ns: str
-        self.set: str
-        self.objects: int
-        self.tombstones: int
-        self.memory_data_bytes: int
-        self.device_data_bytes: int
-        self.truncate_lut: int
-        self.sindexes: int
-        self.index_populating: bool
+    ns: str = ""
+    set: str = ""
+    objects: int = 0
+    tombstones: int = 0
+    # Storage stats vary by Aerospike version: older versions use memory_data_bytes +
+    # device_data_bytes; newer versions use data_used_bytes. None means not reported.
+    memory_data_bytes: Optional[int] = None
+    device_data_bytes: Optional[int] = None
+    data_used_bytes: Optional[int] = None
+    truncate_lut: int = 0
+    sindexes: int = 0
+    index_populating: bool = False
 
-        info_list = info_string.split(":")
-        for item in info_list:
+    _KNOWN_FIELDS = frozenset(
+        {
+            "ns",
+            "set",
+            "objects",
+            "tombstones",
+            "memory_data_bytes",
+            "device_data_bytes",
+            "data_used_bytes",
+            "truncate_lut",
+            "sindexes",
+            "index_populating",
+        }
+    )
+
+    @classmethod
+    def from_info_string(cls, info_string: str) -> "AerospikeSet":
+        kwargs: Dict[str, Any] = {}
+        for item in info_string.split(":"):
             if "=" not in item:
                 continue
             key, value = item.split("=", 1)
+            if key not in cls._KNOWN_FIELDS:
+                continue
             if value.isdigit():
-                setattr(self, key, int(value))
+                kwargs[key] = int(value)
             elif value.lower() in ["true", "false"]:
-                setattr(self, key, value.lower() == "true")
+                kwargs[key] = value.lower() == "true"
             else:
-                setattr(self, key, value)
+                kwargs[key] = value
+        return cls(**kwargs)
 
 
 def construct_schema_aerospike(
@@ -296,11 +325,11 @@ class AerospikeSource(StatefulIngestionSourceBase):
     - Namespaces and associated metadata
     - Sets in each namespace and schemas for each set (via schema inference)
 
-    By default, schema inference samples 1,000 documents from each set. Setting `schemaSamplingSize: null` will scan the entire set.
+    By default, schema inference samples 1,000 documents from each set. Setting `schema_sampling_size: null` will scan the entire set.
 
-    Note that `schemaSamplingSize` has no effect if `inferSchemaDepth` is set to `0`.
+    Note that `schema_sampling_size` has no effect if `infer_schema_depth` is set to `0`.
 
-    Really large schemas will be further truncated to a maximum of 300 schema fields. This is configurable using the `maxSchemaSize` parameter.
+    Really large schemas will be further truncated to a maximum of 300 schema fields. This is configurable using the `max_schema_size` parameter.
 
     """
 
@@ -370,14 +399,12 @@ class AerospikeSource(StatefulIngestionSourceBase):
             set_name:
                 name of set (for logging)
         """
-        try:
-            type_string = PYTHON_TYPE_TO_AEROSPIKE_TYPE[field_type]
-        except KeyError:
+        type_string = PYTHON_TYPE_TO_AEROSPIKE_TYPE.get(field_type)
+        if type_string is None:
             self.report.report_warning(
                 message="unable to map type to metadata schema",
                 context=f"{set_name}: {field_type}",
             )
-            PYTHON_TYPE_TO_AEROSPIKE_TYPE[field_type] = "unknown"
             type_string = "unknown"
 
         return type_string
@@ -501,7 +528,7 @@ class AerospikeSource(StatefulIngestionSourceBase):
         )
 
         schema_metadata: Optional[SchemaMetadata] = None
-        if self.config.inferSchemaDepth != 0:
+        if self.config.infer_schema_depth != 0:
             schema_metadata = self._infer_schema_metadata(
                 as_set=curr_set,
                 dataset_urn=dataset_urn,
@@ -536,7 +563,7 @@ class AerospikeSource(StatefulIngestionSourceBase):
         sets_info = sets_info[: -len(";\n")] if sets_info.endswith(";\n") else sets_info
 
         all_sets: List[AerospikeSet] = [
-            AerospikeSet(item) for item in sets_info.split(";") if item
+            AerospikeSet.from_info_string(item) for item in sets_info.split(";") if item
         ]
         if self.config.ignore_empty_sets:
             all_sets = [
@@ -556,7 +583,7 @@ class AerospikeSource(StatefulIngestionSourceBase):
                 as_set=as_set,
                 delimiter=".",
                 records_per_second=self.config.records_per_second,
-                sample_size=self.config.schemaSamplingSize,
+                sample_size=self.config.schema_sampling_size,
                 socket_timeout_ms=self.config.schema_query_timeout_ms,
             )
         )
@@ -604,12 +631,12 @@ class AerospikeSource(StatefulIngestionSourceBase):
         Limits the size of the schema to the maxSchemaSize and inferSchemaDepth
         """
 
-        if self.config.inferSchemaDepth != -1:
+        if self.config.infer_schema_depth != -1:
             # Infer schema only at the specified depth
             truncated_schema = {
                 k: v
                 for k, v in schema.items()
-                if len(k) <= self.config.inferSchemaDepth
+                if len(k) <= self.config.infer_schema_depth
             }
             if len(truncated_schema) < len(schema):
                 logger.debug(
@@ -619,7 +646,7 @@ class AerospikeSource(StatefulIngestionSourceBase):
                 self.report.report_warning(
                     title="Schema depth limit reached",
                     message="Truncating the collection schema because it has too many nested levels.",
-                    context=f"Schema Depth: {len(schema)}, Configured threshold: {self.config.inferSchemaDepth}",
+                    context=f"Schema Depth: {len(schema)}, Configured threshold: {self.config.infer_schema_depth}",
                 )
                 dataset_properties.customProperties["schema.truncated"] = "True"
                 dataset_properties.customProperties["schema.totalDepth"] = (
@@ -628,7 +655,7 @@ class AerospikeSource(StatefulIngestionSourceBase):
                 schema = truncated_schema
 
         schema_size = len(schema)
-        max_schema_size = self.config.maxSchemaSize
+        max_schema_size = self.config.max_schema_size
         if max_schema_size is not None and schema_size > max_schema_size:
             self.report.report_warning(
                 title="Too many schema fields",
@@ -697,12 +724,12 @@ class AerospikeSource(StatefulIngestionSourceBase):
             if "=" in pair
             for k, v in [pair.split("=", 1)]
         }
-        if xdr["enabled"] != "true":
+        if xdr.get("enabled") != "true":
             return []
-        if xdr["ship-only-specified-sets"] == "false":
-            ignored_sets = xdr["ignored-sets"].split(",")
+        if xdr.get("ship-only-specified-sets") == "false":
+            ignored_sets = xdr.get("ignored-sets", "").split(",")
             return [as_set for as_set in sets if as_set not in ignored_sets]
-        return xdr["shipped-sets"].split(",")
+        return xdr.get("shipped-sets", "").split(",")
 
     def get_report(self) -> AerospikeSourceReport:
         return self.report
