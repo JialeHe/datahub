@@ -242,16 +242,20 @@ looker_common = {
 }
 
 looker_v2_common = {
-    # Looker Python SDK — API 4.0
-    "looker-sdk>=23.0.0,<26.0.0",
-    # LookML parser
-    "lkml>=1.3.4,<2.0.0",
+    # Looker Python SDK — API 4.0; bumped from 23.0 to match constraints.txt (25.20.0)
+    "looker-sdk>=25.0.0,<26.0.0",
+    # LookML parser; bumped from 1.3.4 to match constraints.txt (1.3.7)
+    # This version contains a fix for parsing lists with spaces before commas.
+    # See https://github.com/joshtemple/lkml/issues/73.
+    "lkml>=1.3.7,<2.0.0",
     *sqlglot_lib,
-    # Git cloning for LookML repos
-    "GitPython>2,<4.0.0",
+    # Git cloning for LookML repos; bumped from >2 to match constraints.txt (3.1.46)
+    "GitPython>=3.1.0,<4.0.0",
     # Jinja2 for LookMLSQLResolver (replaces python-liquid transformer pipeline)
-    "jinja2>=3.0.0",
-    "deepmerge>=1.1.1,<3.0.0",
+    # bumped from 3.0.0 to match constraints.txt (3.1.6)
+    "jinja2>=3.1.0,<4.0.0",
+    # deepmerge; bumped from 1.1.1 to match constraints.txt (2.0)
+    "deepmerge>=2.0,<3.0.0",
 }
 
 bigquery_common = {
