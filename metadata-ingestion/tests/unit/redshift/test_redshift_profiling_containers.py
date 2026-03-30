@@ -11,6 +11,7 @@ Verifies two fixes for ING-2018:
 from typing import Dict, List, Optional
 from unittest.mock import patch
 
+from datahub.emitter.mcp import MetadataChangeProposalWrapper
 from datahub.ingestion.api.workunit import MetadataWorkUnit
 from datahub.ingestion.source.redshift.config import RedshiftConfig
 from datahub.ingestion.source.redshift.profile import RedshiftProfiler
@@ -62,7 +63,9 @@ def make_tables(
 
 def collect_aspect_names(workunits: list[MetadataWorkUnit]) -> list[str]:
     return [
-        wu.metadata.aspectName for wu in workunits if hasattr(wu.metadata, "aspectName")
+        wu.metadata.aspectName
+        for wu in workunits
+        if isinstance(wu.metadata, MetadataChangeProposalWrapper)
     ]
 
 
@@ -141,7 +144,9 @@ def test_profiler_container_links_to_correct_schema():
         if hasattr(wu.metadata, "aspectName") and wu.metadata.aspectName == "container"
     ]
     assert len(container_wus) == 1
-    container_aspect = container_wus[0].metadata.aspect
+    mcp = container_wus[0].metadata
+    assert isinstance(mcp, MetadataChangeProposalWrapper)
+    container_aspect = mcp.aspect
     assert isinstance(container_aspect, ContainerClass)
     # The container URN should be a valid container reference (GUID-based)
     assert container_aspect.container.startswith("urn:li:container:")
