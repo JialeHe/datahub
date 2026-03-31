@@ -20,6 +20,9 @@ from datahub.ingestion.source.looker_v2.looker_v2_folder_processor import (
 from datahub.ingestion.source.looker_v2.looker_v2_look_processor import (
     LookerLookProcessor,
 )
+from datahub.ingestion.source.looker_v2.looker_v2_usage_extractor import (
+    LookerUsageExtractor,
+)
 from datahub.ingestion.source.looker_v2.lookml_view_discovery import (
     ViewDiscovery,
     extract_explore_views_from_api,
@@ -313,4 +316,21 @@ class TestLookProcessor:
         look.folder = make_folder("p1", "Personal", is_personal=True)
         proc = self._make_processor([look], skip_personal=True)
         workunits = list(proc.process())
+        assert workunits == []
+
+
+class TestUsageExtractor:
+    def test_empty_dashboards_yields_nothing(self) -> None:
+        config = MagicMock()
+        config.extract_usage_history = True
+        ctx = LookerV2Context(
+            config=config,
+            looker_api=MagicMock(),
+            reporter=MagicMock(),
+            pipeline_ctx=MagicMock(),
+            platform="looker",
+            dashboards_for_usage=[],
+        )
+        extractor = LookerUsageExtractor(ctx, MagicMock())
+        workunits = list(extractor.process())
         assert workunits == []

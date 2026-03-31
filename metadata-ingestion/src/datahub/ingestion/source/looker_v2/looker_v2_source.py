@@ -92,6 +92,9 @@ from datahub.ingestion.source.looker_v2.looker_v2_pdt_graph_parser import (
     parse_pdt_graph,
 )
 from datahub.ingestion.source.looker_v2.looker_v2_report import LookerV2SourceReport
+from datahub.ingestion.source.looker_v2.looker_v2_usage_extractor import (
+    LookerUsageExtractor,
+)
 from datahub.ingestion.source.looker_v2.lookml_manifest_parser import ManifestParser
 from datahub.ingestion.source.looker_v2.lookml_parser import (
     LookMLParser,
@@ -337,6 +340,8 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
             reachable_look_registry=self.reachable_look_registry,
         )
 
+        self._usage_extractor = LookerUsageExtractor(self._ctx, self.user_registry)
+
         # View tracking
         self._view_discovery_result: Optional[ViewDiscoveryResult] = None
         self._parsed_views: Dict[str, ParsedView] = {}
@@ -461,7 +466,7 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
             # Stage 8: Extract usage statistics
             if self.config.extract_usage_history:
                 with self._stage_timer("usage_extraction"):
-                    yield from self._extract_usage_stats()
+                    yield from self._usage_extractor.process()
                 # Free usage data after extraction
                 self._ctx.dashboards_for_usage.clear()
 
