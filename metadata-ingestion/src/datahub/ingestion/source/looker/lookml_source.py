@@ -302,6 +302,7 @@ class LookMLSource(StatefulIngestionSourceBase):
         self.ctx = ctx
         self.reporter = LookMLSourceReport()
         # Structured warning — visible in DataHub UI ingestion run report
+        # TODO: Add link to migration guide
         self.reporter.report_warning(
             title="Source Deprecated",
             message=(

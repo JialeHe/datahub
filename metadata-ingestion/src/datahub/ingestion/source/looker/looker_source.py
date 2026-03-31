@@ -159,6 +159,7 @@ class LookerDashboardSource(TestableSource, StatefulIngestionSourceBase):
         self.source_config: LookerDashboardSourceConfig = config
         self.reporter: LookerDashboardSourceReport = LookerDashboardSourceReport()
         # Structured warning — visible in DataHub UI ingestion run report
+        # TODO: Add link to migration guide
         self.reporter.report_warning(
             title="Source Deprecated",
             message=(
