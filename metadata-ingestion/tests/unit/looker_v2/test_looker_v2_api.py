@@ -138,7 +138,9 @@ class TestFolderAncestorWalk:
 
 
 class TestPersonalFolderSkip:
-    def _make_source_with_registry(self, folders: list, skip_personal: bool = True):
+    def _make_source_with_registry(
+        self, folders: list, skip_personal: bool = True
+    ) -> Any:
         from datahub.ingestion.source.looker_v2.looker_v2_source import LookerV2Source
 
         src = object.__new__(LookerV2Source)

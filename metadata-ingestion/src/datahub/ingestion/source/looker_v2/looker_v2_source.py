@@ -1317,7 +1317,7 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
             return ancestors
         # Fall back to API when registry is empty (e.g., pre-fetch failed)
         try:
-            return list(self.looker_api.folder_ancestors(folder_id=folder_id))
+            return [f for f in self.looker_api.folder_ancestors(folder_id=folder_id)]
         except SDKError as e:
             logger.warning(f"Failed to fetch folder ancestors for {folder_id}: {e}")
             self.reporter.report_warning(
