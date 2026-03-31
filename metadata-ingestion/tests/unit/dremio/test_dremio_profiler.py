@@ -1,4 +1,5 @@
 import time
+from typing import Tuple
 from unittest.mock import MagicMock, Mock
 
 from datahub.ingestion.source.dremio.dremio_config import DremioSourceConfig
@@ -133,7 +134,9 @@ class TestCombineProfileResults:
 class TestProfilingStateHandler:
     """Tests that the ProfilingHandler state integration records timestamps correctly."""
 
-    def _make_profiler_with_state_handler(self):
+    def _make_profiler_with_state_handler(
+        self,
+    ) -> Tuple[DremioProfiler, Mock, Mock]:
         config = DremioSourceConfig(
             hostname="localhost",
             tls=False,
@@ -143,12 +146,13 @@ class TestProfilingStateHandler:
         report = MagicMock()
         api = Mock()
         state_handler = Mock()
-        return DremioProfiler(
+        profiler = DremioProfiler(
             config=config,
             report=report,
             api_operations=api,
             state_handler=state_handler,
         )
+        return profiler, api, state_handler
 
     def _make_dataset(self, name="tbl", columns=None):
         dataset = Mock()
@@ -164,21 +168,19 @@ class TestProfilingStateHandler:
         return dataset
 
     def test_add_to_state_called_after_successful_profile(self):
-        profiler = self._make_profiler_with_state_handler()
+        profiler, api_mock, state_mock = self._make_profiler_with_state_handler()
         dataset = self._make_dataset()
         dataset_urn = (
             "urn:li:dataset:(urn:li:dataPlatform:dremio,dremio.src.schema.tbl,PROD)"
         )
 
-        profiler.api_operations.execute_query.return_value = [
-            {"row_count": 10, "column_count": 1}
-        ]
+        api_mock.execute_query.return_value = [{"row_count": 10, "column_count": 1}]
 
         workunits = list(profiler.get_workunits(dataset, dataset_urn))
 
         assert len(workunits) == 1
-        profiler.state_handler.add_to_state.assert_called_once()
-        urn_arg, ts_arg = profiler.state_handler.add_to_state.call_args[0]
+        state_mock.add_to_state.assert_called_once()
+        urn_arg, ts_arg = state_mock.add_to_state.call_args[0]
         assert urn_arg == dataset_urn
         assert isinstance(ts_arg, int) and ts_arg > 0
 
@@ -190,16 +192,15 @@ class TestProfilingStateHandler:
             authentication_method="PAT",
             password="token",
         )
+        api_mock = Mock()
         profiler = DremioProfiler(
             config=config,
             report=MagicMock(),
-            api_operations=Mock(),
+            api_operations=api_mock,
             state_handler=None,
         )
         dataset = self._make_dataset()
-        profiler.api_operations.execute_query.return_value = [
-            {"row_count": 5, "column_count": 1}
-        ]
+        api_mock.execute_query.return_value = [{"row_count": 5, "column_count": 1}]
 
         workunits = list(
             profiler.get_workunits(
@@ -210,7 +211,7 @@ class TestProfilingStateHandler:
 
     def test_add_to_state_not_called_when_no_columns(self):
         """No profile is emitted for empty-column tables, so state should not be updated."""
-        profiler = self._make_profiler_with_state_handler()
+        profiler, _api_mock, state_mock = self._make_profiler_with_state_handler()
         dataset = self._make_dataset(columns=[])
 
         workunits = list(
@@ -220,13 +221,15 @@ class TestProfilingStateHandler:
         )
 
         assert workunits == []
-        profiler.state_handler.add_to_state.assert_not_called()
+        state_mock.add_to_state.assert_not_called()
 
     # ------------------------------------------------------------------
     # Profiling-skip tests (min_time_between_profiles_hours)
     # ------------------------------------------------------------------
 
-    def _make_profiler_with_updated_since(self, days: float):
+    def _make_profiler_with_updated_since(
+        self, days: float
+    ) -> Tuple[DremioProfiler, Mock, Mock]:
         """Profiler with state handler and profile_if_updated_since_days set."""
         config = DremioSourceConfig(
             hostname="localhost",
@@ -238,43 +241,40 @@ class TestProfilingStateHandler:
         report = MagicMock()
         api = Mock()
         state_handler = Mock()
-        return DremioProfiler(
+        profiler = DremioProfiler(
             config=config,
             report=report,
             api_operations=api,
             state_handler=state_handler,
         )
+        return profiler, api, state_handler
 
     def test_profiling_skipped_when_profiled_within_threshold(self):
         """When last_profiled is within profile_if_updated_since_days, skip it."""
-        profiler = self._make_profiler_with_updated_since(1.0)  # 1 day
+        profiler, _api_mock, state_mock = self._make_profiler_with_updated_since(1.0)
         dataset = self._make_dataset()
         dataset_urn = "urn:li:dataset:(urn:li:dataPlatform:dremio,x,PROD)"
 
         # Profiled 1 hour ago → within 1-day threshold
         last_profiled_ms = round((time.time() - 3600) * 1000)
-        profiler.state_handler.get_last_profiled.return_value = last_profiled_ms
+        state_mock.get_last_profiled.return_value = last_profiled_ms
 
         workunits = list(profiler.get_workunits(dataset, dataset_urn))
 
         assert workunits == []
         # State must be carried forward so the next run retains the original timestamp
-        profiler.state_handler.add_to_state.assert_called_once_with(
-            dataset_urn, last_profiled_ms
-        )
+        state_mock.add_to_state.assert_called_once_with(dataset_urn, last_profiled_ms)
 
     def test_profiling_proceeds_when_past_threshold(self):
         """When last_profiled is older than profile_if_updated_since_days, profile normally."""
-        profiler = self._make_profiler_with_updated_since(1.0)  # 1 day
+        profiler, api_mock, state_mock = self._make_profiler_with_updated_since(1.0)
         dataset = self._make_dataset()
         dataset_urn = "urn:li:dataset:(urn:li:dataPlatform:dremio,x,PROD)"
 
         # Profiled 30 hours ago → outside 1-day threshold
         last_profiled_ms = round((time.time() - 30 * 3600) * 1000)
-        profiler.state_handler.get_last_profiled.return_value = last_profiled_ms
-        profiler.api_operations.execute_query.return_value = [
-            {"row_count": 10, "column_count": 1}
-        ]
+        state_mock.get_last_profiled.return_value = last_profiled_ms
+        api_mock.execute_query.return_value = [{"row_count": 10, "column_count": 1}]
 
         workunits = list(profiler.get_workunits(dataset, dataset_urn))
 
@@ -282,14 +282,12 @@ class TestProfilingStateHandler:
 
     def test_profiling_proceeds_when_never_profiled_before(self):
         """When no previous profile timestamp exists, always profile regardless of threshold."""
-        profiler = self._make_profiler_with_updated_since(1.0)
+        profiler, api_mock, state_mock = self._make_profiler_with_updated_since(1.0)
         dataset = self._make_dataset()
         dataset_urn = "urn:li:dataset:(urn:li:dataPlatform:dremio,x,PROD)"
 
-        profiler.state_handler.get_last_profiled.return_value = None
-        profiler.api_operations.execute_query.return_value = [
-            {"row_count": 5, "column_count": 1}
-        ]
+        state_mock.get_last_profiled.return_value = None
+        api_mock.execute_query.return_value = [{"row_count": 5, "column_count": 1}]
 
         workunits = list(profiler.get_workunits(dataset, dataset_urn))
 
@@ -297,18 +295,14 @@ class TestProfilingStateHandler:
 
     def test_profiling_always_runs_when_threshold_not_configured(self):
         """Without profile_if_updated_since_days, profiling always runs (default behaviour)."""
-        profiler = self._make_profiler_with_state_handler()
+        profiler, api_mock, state_mock = self._make_profiler_with_state_handler()
 
         dataset = self._make_dataset()
         dataset_urn = "urn:li:dataset:(urn:li:dataPlatform:dremio,x,PROD)"
 
         # Simulate profiled very recently (5 minutes ago)
-        profiler.state_handler.get_last_profiled.return_value = round(
-            (time.time() - 300) * 1000
-        )
-        profiler.api_operations.execute_query.return_value = [
-            {"row_count": 5, "column_count": 1}
-        ]
+        state_mock.get_last_profiled.return_value = round((time.time() - 300) * 1000)
+        api_mock.execute_query.return_value = [{"row_count": 5, "column_count": 1}]
 
         workunits = list(profiler.get_workunits(dataset, dataset_urn))
 

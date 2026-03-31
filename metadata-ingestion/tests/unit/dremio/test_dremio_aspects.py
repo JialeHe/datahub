@@ -20,15 +20,13 @@ from datahub.metadata.schema_classes import (
 )
 
 
-def _make_aspects(**kwargs):
-    defaults = dict(
+def _make_aspects() -> DremioAspects:
+    return DremioAspects(
         platform="dremio",
         ui_url="https://dremio.example.com",
         env="PROD",
         ingest_owner=False,
     )
-    defaults.update(kwargs)
-    return DremioAspects(**defaults)
 
 
 def _make_dataset(**kwargs):

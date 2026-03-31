@@ -32,7 +32,7 @@ from datahub.metadata.schema_classes import (
 
 def _make_props_workunit(
     urn: str = "urn:li:dataset:(urn:li:dataPlatform:dremio,x,PROD)",
-):
+) -> MetadataWorkUnit:
     props = DatasetPropertiesClass(name="test", description="Test dataset")
     mcp = MetadataChangeProposalWrapper(entityUrn=urn, aspect=props)
     return MetadataWorkUnit(id="test-wu", mcp=mcp)
@@ -51,6 +51,7 @@ class TestAutoIncrementalProperties:
 
         assert len(output) == 1
         output_mcp = output[0].metadata
+        assert isinstance(output_mcp, MetadataChangeProposalWrapper)
         assert output_mcp.changeType == ChangeTypeClass.PATCH
 
 

@@ -24,7 +24,11 @@ class TestDremioSystemTableFiltering:
         report = Mock(spec=DremioSourceReport)
         filter_obj = DremioFilter(config, report)
 
-        for schema_path, container_name in [([], "information_schema"), ([], "sys")]:
+        system_schemas: List[Tuple[List[str], str]] = [
+            ([], "information_schema"),
+            ([], "sys"),
+        ]
+        for schema_path, container_name in system_schemas:
             assert filter_obj.is_schema_allowed(schema_path, container_name)
 
     def test_schemas_with_system_substrings_not_filtered(self):
