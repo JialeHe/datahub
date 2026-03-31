@@ -4,6 +4,7 @@ import com.linkedin.common.urn.Urn;
 import com.linkedin.mxe.SystemMetadata;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import javax.annotation.Nullable;
 import lombok.extern.slf4j.Slf4j;
@@ -59,6 +60,7 @@ public class CascadeOperationContext implements AutoCloseable {
   private final long startNanos;
   private final long slowThresholdMs;
   private final boolean manageMDC;
+  private final AtomicBoolean closed = new AtomicBoolean(false);
   private final AtomicInteger entitiesProcessed = new AtomicInteger(0);
   private final AtomicInteger errorCount = new AtomicInteger(0);
   private volatile String lastErrorType;
@@ -172,11 +174,15 @@ public class CascadeOperationContext implements AutoCloseable {
   }
 
   /**
-   * Emit metrics and conditional log, then clear MDC. Never throws — metric/logging failures are
+   * Emit metrics and conditional log, then restore MDC. Idempotent — safe to call multiple times;
+   * only the first invocation emits metrics and logs. Never throws — metric/logging failures are
    * caught internally to avoid breaking the cascade operation.
    */
   @Override
   public void close() {
+    if (!closed.compareAndSet(false, true)) {
+      return; // already closed — skip duplicate metric/log emission
+    }
     try {
       long durationNanos = System.nanoTime() - startNanos;
       long durationMs = TimeUnit.NANOSECONDS.toMillis(durationNanos);

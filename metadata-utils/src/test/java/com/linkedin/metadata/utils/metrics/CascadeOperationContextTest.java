@@ -301,4 +301,41 @@ public class CascadeOperationContextTest {
     assertNotNull(errorCounter, "error counter should exist");
     assertEquals(errorCounter.count(), 2.0);
   }
+
+  @Test
+  public void testCloseIsIdempotent() {
+    Urn triggerUrn = UrnUtils.getUrn("urn:li:tag:testTag");
+    String opType = "idempotentTest";
+
+    CascadeOperationContext ctx =
+        CascadeOperationContext.begin(metricUtils, opType, triggerUrn, 10);
+    ctx.recordEntityProcessed();
+    ctx.recordEntityProcessed();
+
+    // First close — should emit metrics
+    ctx.close();
+
+    Counter entitiesCounter =
+        meterRegistry
+            .find("datahub.cascade.entities_processed")
+            .tag("operation_type", opType)
+            .counter();
+    assertNotNull(entitiesCounter);
+    assertEquals(entitiesCounter.count(), 2.0);
+
+    Timer durationTimer =
+        meterRegistry.find("datahub.cascade.duration").tag("operation_type", opType).timer();
+    assertNotNull(durationTimer);
+    assertEquals(durationTimer.count(), 1L);
+
+    // Second close — should be a no-op, metrics unchanged
+    ctx.close();
+
+    assertEquals(
+        entitiesCounter.count(), 2.0, "entities counter should not double after second close");
+    assertEquals(durationTimer.count(), 1L, "duration timer should not record a second sample");
+
+    // MDC should still be cleaned up
+    assertNull(MDC.get("cascade.operation.id"));
+  }
 }
