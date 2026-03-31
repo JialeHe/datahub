@@ -292,12 +292,8 @@ def construct_schema_aerospike(
     if socket_timeout_ms is not None:
         query.socket_timeout = socket_timeout_ms  # type: ignore[attr-defined]
 
-    try:
-        res = query.results()
-        records = [{**record[2], "PK": record[0][2]} for record in res]
-    except Exception as e:
-        logger.error(f"Error querying Aerospike set: {e}")
-        records = []
+    res = query.results()
+    records = [{**record[2], "PK": record[0][2]} for record in res]
     return construct_schema(records, delimiter)
 
 
