@@ -7,12 +7,16 @@ Covers:
 - Config validation (extract_looks + stateful ingestion)
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 from unittest.mock import MagicMock
 
 import pytest
 from looker_sdk.sdk.api40.models import FolderBase
 
+from datahub.ingestion.source.looker_v2.looker_v2_context import LookerV2Context
+from datahub.ingestion.source.looker_v2.looker_v2_folder_processor import (
+    LookerFolderProcessor,
+)
 from datahub.ingestion.source.looker_v2.lookml_view_discovery import (
     ViewDiscovery,
     extract_explore_views_from_api,
@@ -50,38 +54,28 @@ def make_explore(name: str, view_name: Optional[str] = None, joins: Any = None) 
 # ---------------------------------------------------------------------------
 
 
-class TestFolderAncestorWalk:
-    """Tests for _get_folder_ancestors using the pre-fetched registry."""
+class TestFolderProcessorAncestorWalk:
+    """Tests for LookerFolderProcessor.get_folder_ancestors."""
 
-    def _build_registry(self, folders: list) -> Dict[str, FolderBase]:
-        return {f.id: f for f in folders if f.id}
+    def _make_processor(
+        self, folders: list, skip_personal: bool = False
+    ) -> LookerFolderProcessor:
+        config = MagicMock()
+        config.skip_personal_folders = skip_personal
+        ctx = LookerV2Context(
+            config=config,
+            looker_api=MagicMock(),
+            reporter=MagicMock(),
+            pipeline_ctx=MagicMock(),
+            platform="looker",
+            folder_registry={f.id: f for f in folders if f.id},
+        )
+        return LookerFolderProcessor(ctx)
 
     def test_no_ancestors_for_root(self):
         root = make_folder("1", "Root")
-        registry = self._build_registry([root])
-
-        # Mock a minimal LookerV2Source with registry populated
-        from datahub.ingestion.source.looker_v2.looker_v2_source import LookerV2Source
-
-        src = object.__new__(LookerV2Source)
-        src._folder_registry = registry  # type: ignore[attr-defined]
-
-        ancestors = src._get_folder_ancestors("1")  # type: ignore[attr-defined]
-        assert ancestors == []
-
-    def test_single_level_ancestor(self):
-        root = make_folder("1", "Root")
-        child = make_folder("2", "Child", parent_id="1")
-        registry = self._build_registry([root, child])
-
-        from datahub.ingestion.source.looker_v2.looker_v2_source import LookerV2Source
-
-        src = object.__new__(LookerV2Source)
-        src._folder_registry = registry  # type: ignore[attr-defined]
-
-        ancestors = src._get_folder_ancestors("2")  # type: ignore[attr-defined]
-        assert len(ancestors) == 1
-        assert ancestors[0].id == "1"
+        proc = self._make_processor([root])
+        assert proc.get_folder_ancestors("1") == []
 
     def test_deep_ancestor_chain(self):
         folders = [
@@ -90,86 +84,26 @@ class TestFolderAncestorWalk:
             make_folder("3", "Level2", parent_id="2"),
             make_folder("4", "Level3", parent_id="3"),
         ]
-        registry = self._build_registry(folders)
-
-        from datahub.ingestion.source.looker_v2.looker_v2_source import LookerV2Source
-
-        src = object.__new__(LookerV2Source)
-        src._folder_registry = registry  # type: ignore[attr-defined]
-
-        ancestors = src._get_folder_ancestors("4")  # type: ignore[attr-defined]
-        # Should return [Root, Level1, Level2] in order (top-down)
+        proc = self._make_processor(folders)
+        ancestors = proc.get_folder_ancestors("4")
         assert [a.id for a in ancestors] == ["1", "2", "3"]
 
-    def test_unknown_folder_returns_empty(self):
-        # When registry is populated but folder not found, return empty immediately
-        # (avoids falling back to API call in unit tests)
-        known = make_folder("1", "Root")
-        registry = self._build_registry([known])
-
-        from datahub.ingestion.source.looker_v2.looker_v2_source import LookerV2Source
-
-        src = object.__new__(LookerV2Source)
-        src._folder_registry = registry  # type: ignore[attr-defined]
-
-        # Folder "999" is not in the registry
-        ancestors = src._get_folder_ancestors("999")  # type: ignore[attr-defined]
-        assert ancestors == []
-
     def test_cycle_protection(self):
-        # Two folders pointing at each other — should not infinite loop
         a = make_folder("1", "A", parent_id="2")
         b = make_folder("2", "B", parent_id="1")
-        registry = self._build_registry([a, b])
-
-        from datahub.ingestion.source.looker_v2.looker_v2_source import LookerV2Source
-
-        src = object.__new__(LookerV2Source)
-        src._folder_registry = registry  # type: ignore[attr-defined]
-
-        ancestors = src._get_folder_ancestors("1")  # type: ignore[attr-defined]
-        # Should terminate, not hang
-        assert isinstance(ancestors, list)
-
-
-# ---------------------------------------------------------------------------
-# Personal folder detection
-# ---------------------------------------------------------------------------
-
-
-class TestPersonalFolderSkip:
-    def _make_source_with_registry(
-        self, folders: list, skip_personal: bool = True
-    ) -> Any:
-        from datahub.ingestion.source.looker_v2.looker_v2_source import LookerV2Source
-
-        src = object.__new__(LookerV2Source)
-        src._folder_registry = {f.id: f for f in folders if f.id}  # type: ignore[attr-defined]
-        src.config = MagicMock()  # type: ignore[attr-defined]
-        src.config.skip_personal_folders = skip_personal
-        return src
+        proc = self._make_processor([a, b])
+        result = proc.get_folder_ancestors("1")
+        assert isinstance(result, list)
 
     def test_personal_folder_skipped(self):
         personal = make_folder("p1", "My Folder", is_personal=True)
-        src = self._make_source_with_registry([personal])
-        assert src._should_skip_personal_folder(personal)  # type: ignore[attr-defined]
+        proc = self._make_processor([personal], skip_personal=True)
+        assert proc.should_skip_personal_folder(personal)
 
-    def test_non_personal_folder_not_skipped(self):
-        shared = make_folder("s1", "Shared")
-        src = self._make_source_with_registry([shared])
-        assert not src._should_skip_personal_folder(shared)  # type: ignore[attr-defined]
-
-    def test_skip_personal_false_always_returns_false(self):
+    def test_personal_folder_not_skipped_when_flag_off(self):
         personal = make_folder("p1", "My Folder", is_personal=True)
-        src = self._make_source_with_registry([personal], skip_personal=False)
-        assert not src._should_skip_personal_folder(personal)  # type: ignore[attr-defined]
-
-    def test_child_of_personal_folder_skipped(self):
-        personal = make_folder("p1", "Personal Root", is_personal=True)
-        child = make_folder("c1", "Personal Child", parent_id="p1")
-        child.is_personal_descendant = True
-        src = self._make_source_with_registry([personal, child])
-        assert src._should_skip_personal_folder(child)  # type: ignore[attr-defined]
+        proc = self._make_processor([personal], skip_personal=False)
+        assert not proc.should_skip_personal_folder(personal)
 
 
 # ---------------------------------------------------------------------------

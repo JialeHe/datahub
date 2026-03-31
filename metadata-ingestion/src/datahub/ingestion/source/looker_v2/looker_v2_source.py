@@ -26,11 +26,11 @@ from looker_sdk.sdk.api40.models import (
     Folder,
     FolderBase,
     Look,
-    LookmlModel,
     LookmlModelExplore,
     LookmlModelExploreField,
     LookWithQuery,
     Query,
+    WriteQuery,
 )
 
 import datahub.emitter.mce_builder as builder
@@ -81,8 +81,11 @@ from datahub.ingestion.source.looker_v2.looker_v2_config import (
     LookerV2Config,
     LookerV2GitInfo,
 )
+from datahub.ingestion.source.looker_v2.looker_v2_context import LookerV2Context
+from datahub.ingestion.source.looker_v2.looker_v2_folder_processor import (
+    LookerFolderProcessor,
+)
 from datahub.ingestion.source.looker_v2.looker_v2_pdt_graph_parser import (
-    PDTDependencyEdge,
     parse_pdt_graph,
 )
 from datahub.ingestion.source.looker_v2.looker_v2_report import LookerV2SourceReport
@@ -108,6 +111,9 @@ from datahub.ingestion.source.state.stateful_ingestion_base import (
 from datahub.metadata.schema_classes import (
     ChartTypeClass,
     EmbedClass,
+    FineGrainedLineageClass,
+    FineGrainedLineageDownstreamTypeClass,
+    FineGrainedLineageUpstreamTypeClass,
     InputFieldClass,
     InputFieldsClass,
     OtherSchemaClass,
@@ -116,12 +122,17 @@ from datahub.metadata.schema_classes import (
     SchemaMetadataClass,
     StringTypeClass,
 )
-from datahub.metadata.urns import CorpUserUrn, TagUrn
+from datahub.metadata.urns import CorpUserUrn, SchemaFieldUrn, TagUrn
 from datahub.sdk.chart import Chart
 from datahub.sdk.container import Container
 from datahub.sdk.dashboard import Dashboard
 from datahub.sdk.dataset import Dataset, UpstreamInputType
 from datahub.sdk.entity import Entity
+from datahub.sql_parsing.sqlglot_lineage import (
+    ColumnLineageInfo,
+    SqlParsingResult,
+    create_lineage_sql_parsed_result,
+)
 from datahub.utilities.backpressure_aware_executor import BackpressureAwareExecutor
 from datahub.utilities.sentinels import Unset, unset
 from datahub.utilities.url_util import remove_port_from_url
@@ -288,6 +299,17 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
 
         self.looker_api: LookerAPI = LookerAPI(self.config)
 
+        # Build shared context (will be fully populated during _initialize)
+        self._ctx = LookerV2Context(
+            config=self.config,
+            looker_api=self.looker_api,
+            reporter=self.reporter,
+            pipeline_ctx=self.ctx,
+            platform=self.platform,
+        )
+
+        self._folder_proc = LookerFolderProcessor(self._ctx)
+
         # Registries for caching
         self.user_registry: LookerUserRegistry = LookerUserRegistry(
             self.looker_api,
@@ -302,31 +324,15 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
 
         # State tracking
         self.reachable_look_registry: Set[str] = set()
-        self.reachable_explores: Dict[Tuple[str, str], List[str]] = {}
         self.processed_folders: List[str] = []
         self.chart_urns: Set[str] = set()
 
         # View tracking
         self._view_discovery_result: Optional[ViewDiscoveryResult] = None
         self._parsed_views: Dict[str, ParsedView] = {}
-        self._model_registry: Dict[str, LookmlModel] = {}
-        self._folder_registry: Dict[str, FolderBase] = {}
-
-        # Explore cache: avoids duplicate API calls between view discovery and explore processing
-        self._explore_cache: Dict[Tuple[str, str], LookmlModelExplore] = {}
-
-        # Usage stats tracking
-        self._dashboards_for_usage: List[looker_usage.LookerDashboardForUsage] = []
 
         # Cloned git repos (temp directories)
         self._temp_dirs: List[str] = []
-        self._resolved_project_paths: Dict[str, str] = {}
-
-        # Cache for parsed LookML view files: (file_path, project) -> List[ParsedView]
-        self._parsed_view_file_cache: Dict[Tuple[str, str], List[ParsedView]] = {}
-
-        # PDT graph lineage: view_name -> list of upstream dependency edges
-        self._pdt_upstream_map: Dict[str, List[PDTDependencyEdge]] = {}
 
         # Cached refinement handler (created once during initialization)
         self._refinement_handler: Optional[RefinementHandler] = None
@@ -423,8 +429,8 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
                 self._parsed_views.clear()
 
             # Free caches after views are done
-            self._explore_cache.clear()
-            self._parsed_view_file_cache.clear()
+            self._ctx.explore_cache.clear()
+            self._ctx.parsed_view_file_cache.clear()
 
             # Stage 6: Emit tag entities (Dimension, Measure, Temporal, group_label)
             if self.config.tag_measures_and_dimensions:
@@ -447,7 +453,7 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
                 with self._stage_timer("usage_extraction"):
                     yield from self._extract_usage_stats()
                 # Free usage data after extraction
-                self._dashboards_for_usage.clear()
+                self._ctx.dashboards_for_usage.clear()
 
         finally:
             # Cleanup temp directories
@@ -482,7 +488,7 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
                 with self._stage_timer(f"init.clone_dep.{project_name}"):
                     self._clone_dependency(project_name, dep)
             else:
-                self._resolved_project_paths[project_name] = dep
+                self._ctx.resolved_project_paths[project_name] = dep
 
         # Parse manifest.lkml and resolve additional dependencies
         if self.config.base_folder:
@@ -512,7 +518,7 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
                 self._refinement_handler = RefinementHandler(
                     base_folder=self.config.base_folder,
                     project_name=self.config.project_name or "default",
-                    project_dependencies=self._resolved_project_paths or None,
+                    project_dependencies=self._ctx.resolved_project_paths or None,
                 )
 
         # Emit project container
@@ -527,7 +533,7 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
         manifest_parser = ManifestParser(
             base_folder=self.config.base_folder,
             project_name=self.config.project_name,
-            project_dependencies=self._resolved_project_paths,
+            project_dependencies=self._ctx.resolved_project_paths,
             git_info=self.config.git_info,
         )
 
@@ -537,8 +543,8 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
 
             # Update resolved paths
             for name, path in resolved.items():
-                if name not in self._resolved_project_paths:
-                    self._resolved_project_paths[name] = str(path)
+                if name not in self._ctx.resolved_project_paths:
+                    self._ctx.resolved_project_paths[name] = str(path)
 
             # Update project name if discovered from manifest
             if manifest_parser.project_name and not self.config.project_name:
@@ -603,7 +609,7 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
                 repo_url=git_info.repo,
                 branch=git_info.branch,
             )
-            self._resolved_project_paths[project_name] = str(checkout_dir)
+            self._ctx.resolved_project_paths[project_name] = str(checkout_dir)
             logger.info(f"Cloned dependency '{project_name}' to {checkout_dir}")
         except Exception as e:
             self.reporter.report_warning(
@@ -626,38 +632,14 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
         """Bulk fetch all reference data upfront."""
         logger.info("Populating registries...")
 
-        # Bulk pre-fetch all folders to avoid per-dashboard API calls
-        try:
-            all_folders = self.looker_api.all_folders(
-                fields=[
-                    "id",
-                    "name",
-                    "parent_id",
-                    "is_personal",
-                    "is_personal_descendant",
-                ]
-            )
-            for folder in all_folders:
-                if folder.id:
-                    self._folder_registry[folder.id] = folder
-            self.reporter.folder_registry_size = len(self._folder_registry)
-            logger.info(f"Pre-fetched {len(self._folder_registry)} folders")
-        except SDKError as e:
-            logger.warning(
-                f"Failed to pre-fetch folders (will fall back to on-demand): {e}"
-            )
-            self.reporter.report_warning(
-                title="Folder Pre-Fetch Failed",
-                message="Could not bulk pre-fetch folders. Falling back to per-dashboard API calls.",
-                context=str(e),
-            )
+        self._folder_proc.build_registry()
 
         # Fetch all models
         try:
             models = self.looker_api.all_lookml_models()
             for model in models:
                 if model.name:
-                    self._model_registry[model.name] = model
+                    self._ctx.model_registry[model.name] = model
                     self.reporter.models_discovered += 1
         except SDKError as e:
             self.reporter.report_failure(
@@ -703,10 +685,10 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
 
     def _fetch_pdt_lineage(self) -> None:
         """Fetch PDT dependency graphs for all models via API."""
-        if not self.config.use_pdt_graph_api:
+        if not self.config.enable_api_sql_lineage:
             return
 
-        for model_name in self._model_registry:
+        for model_name in self._ctx.model_registry:
             if not self.config.model_pattern.allowed(model_name):
                 continue
             try:
@@ -714,9 +696,9 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
                 if graph and isinstance(graph.graph_text, str) and graph.graph_text:
                     edges = parse_pdt_graph(graph.graph_text)
                     for edge in edges:
-                        self._pdt_upstream_map.setdefault(edge.view_name, []).append(
-                            edge
-                        )
+                        self._ctx.pdt_upstream_map.setdefault(
+                            edge.view_name, []
+                        ).append(edge)
                     self.reporter.pdt_graphs_fetched += 1
                     self.reporter.pdt_edges_discovered += len(edges)
             except Exception as e:
@@ -729,6 +711,244 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
                     context=f"{model_name}: {e}",
                 )
 
+    def _build_view_to_explore_map(self) -> None:
+        """Build a view_name → (model_name, explore_name) mapping from the explore cache.
+
+        Used by the API SQL lineage path to know which explore to query when calling
+        generate_sql_query for a given view. The first explore that references a view wins.
+        """
+        for (model_name, explore_name), explore in self._ctx.explore_cache.items():
+            # Primary view of the explore
+            primary_view = explore.view_name or explore.name
+            if primary_view and primary_view not in self._ctx.view_to_explore_map:
+                self._ctx.view_to_explore_map[primary_view] = (model_name, explore_name)
+            # Joined views
+            if explore.joins:
+                for join in explore.joins:
+                    join_view = join.from_ or join.name
+                    if join_view and join_view not in self._ctx.view_to_explore_map:
+                        self._ctx.view_to_explore_map[join_view] = (
+                            model_name,
+                            explore_name,
+                        )
+
+        logger.debug(
+            f"Built view_to_explore_map with {len(self._ctx.view_to_explore_map)} entries"
+        )
+
+    def _get_view_fields_for_api(
+        self, view_name: str, model_name: str, explore_name: str
+    ) -> List[str]:
+        """Return field names in Looker API format (<view>.<field>) for a given view.
+
+        Uses the already-cached explore data so no extra API calls are made.
+        Only dimensions and measures belonging to this view are included;
+        one representative field per dimension group is used to avoid redundancy.
+        """
+        cache_key = (model_name, explore_name)
+        explore = self._ctx.explore_cache.get(cache_key)
+        if not explore or not explore.fields:
+            return []
+
+        fields: List[str] = []
+        seen_dim_groups: Set[str] = set()
+
+        if explore.fields.dimensions:
+            for dim in explore.fields.dimensions:
+                if not dim.name or not hasattr(dim, "view") or dim.view != view_name:
+                    continue
+                if dim.dimension_group:
+                    if dim.dimension_group in seen_dim_groups:
+                        continue
+                    seen_dim_groups.add(dim.dimension_group)
+                fields.append(dim.name)
+
+        if explore.fields.measures:
+            for measure in explore.fields.measures:
+                if (
+                    measure.name
+                    and hasattr(measure, "view")
+                    and measure.view == view_name
+                ):
+                    fields.append(measure.name)
+
+        return fields
+
+    def _generate_sql_for_chunk(
+        self,
+        view_name: str,
+        model_name: str,
+        explore_name: str,
+        fields: List[str],
+    ) -> Optional[str]:
+        """Call generate_sql_query for a subset of fields and return the SQL string."""
+        query = WriteQuery(
+            model=model_name,
+            view=explore_name,
+            fields=fields,
+            filters={},
+            limit="1",
+        )
+        try:
+            return self.looker_api.generate_sql_query(query)
+        except Exception as e:
+            logger.warning(
+                f"generate_sql_query failed for view '{view_name}' "
+                f"(explore={explore_name}, {len(fields)} fields): {e}"
+            )
+            return None
+
+    def _parse_sql_to_lineage(
+        self,
+        sql: str,
+        conn_def: LookerConnectionDefinition,
+        view_name: str,
+    ) -> Optional[SqlParsingResult]:
+        """Parse rendered SQL into a SqlParsingResult. Returns None on failure."""
+        try:
+            spr = create_lineage_sql_parsed_result(
+                query=sql,
+                default_schema=conn_def.default_schema,
+                default_db=conn_def.default_db,
+                platform=conn_def.platform,
+                platform_instance=conn_def.platform_instance,
+                env=self.config.env,
+                graph=self.ctx.graph,
+            )
+            if spr.debug_info.table_error:
+                logger.debug(
+                    f"SQL parse table error for view '{view_name}': {spr.debug_info.table_error}"
+                )
+            return spr
+        except Exception as e:
+            logger.warning(f"SQL parse failed for view '{view_name}': {e}")
+            return None
+
+    def _resolve_view_lineage_via_api(
+        self,
+        view_name: str,
+        conn_def: LookerConnectionDefinition,
+    ) -> Optional[List[UpstreamInputType]]:
+        """Resolve lineage for a reachable derived-table view using the Looker API.
+
+        Calls generate_sql_query to get fully-rendered SQL, parses it for table-level
+        and column-level lineage, then merges with any PDT graph edges already in
+        _pdt_upstream_map. Returns a list of UpstreamInputType items (dataset URNs +
+        FineGrainedLineageClass objects) or None if the view is not in the explore map.
+        """
+        explore_entry = self._ctx.view_to_explore_map.get(view_name)
+        if not explore_entry:
+            return None
+
+        model_name, explore_name = explore_entry
+        fields = self._get_view_fields_for_api(view_name, model_name, explore_name)
+        if not fields:
+            logger.debug(
+                f"No API fields found for view '{view_name}'; skipping API SQL lineage"
+            )
+            return None
+
+        chunk_size = self.config.api_sql_lineage_field_chunk_size
+        chunks = [fields[i : i + chunk_size] for i in range(0, len(fields), chunk_size)]
+
+        all_in_tables: Set[str] = set()
+        all_cll: List[FineGrainedLineageClass] = []
+
+        for chunk in chunks:
+            sql = self._generate_sql_for_chunk(
+                view_name, model_name, explore_name, chunk
+            )
+            if sql is None:
+                if not self.config.api_sql_lineage_individual_field_fallback:
+                    continue
+                # Individual field fallback
+                for field in chunk:
+                    field_sql = self._generate_sql_for_chunk(
+                        view_name, model_name, explore_name, [field]
+                    )
+                    if field_sql:
+                        spr = self._parse_sql_to_lineage(field_sql, conn_def, view_name)
+                        if spr:
+                            all_in_tables.update(spr.in_tables)
+                            if spr.column_lineage:
+                                all_cll.extend(
+                                    self._cll_to_fine_grained(spr.column_lineage)
+                                )
+                continue
+
+            spr = self._parse_sql_to_lineage(sql, conn_def, view_name)
+            if spr:
+                all_in_tables.update(spr.in_tables)
+                if spr.column_lineage:
+                    all_cll.extend(self._cll_to_fine_grained(spr.column_lineage))
+
+        # Merge PDT graph edges (table-level only, adds PDT-to-PDT view URNs not
+        # captured by the SQL parser when the PDT name differs from the raw table name)
+        pdt_edges = self._ctx.pdt_upstream_map.get(view_name, [])
+        if pdt_edges:
+            self.reporter.lineage_via_pdt_graph += 1
+        for edge in pdt_edges:
+            if edge.is_database_table:
+                try:
+                    fqn = _generate_fully_qualified_name(
+                        sql_table_name=edge.upstream_name,
+                        connection_def=conn_def,
+                        reporter=self.reporter,
+                        view_name=view_name,
+                    )
+                    all_in_tables.add(
+                        builder.make_dataset_urn_with_platform_instance(
+                            platform=conn_def.platform,
+                            name=fqn,
+                            platform_instance=conn_def.platform_instance,
+                            env=self.config.env,
+                        )
+                    )
+                except (ValueError, KeyError):
+                    pass
+            else:
+                upstream_model = edge.upstream_model or edge.model_name
+                view_urn = self._get_view_urn(edge.upstream_name, upstream_model)
+                if view_urn:
+                    all_in_tables.add(str(view_urn))
+
+        if not all_in_tables and not all_cll:
+            return None
+
+        result: List[UpstreamInputType] = list(all_in_tables)
+        result.extend(all_cll)
+        return result
+
+    def _cll_to_fine_grained(
+        self, column_lineage: List[ColumnLineageInfo]
+    ) -> List[FineGrainedLineageClass]:
+        """Convert SqlParsingResult.column_lineage to FineGrainedLineageClass objects."""
+        fgl_list: List[FineGrainedLineageClass] = []
+        for cll in column_lineage:
+            try:
+                if not cll.downstream.table or not cll.downstream.column:
+                    continue
+                downstream_urn = SchemaFieldUrn(
+                    cll.downstream.table, cll.downstream.column
+                ).urn()
+                upstream_urns = [
+                    SchemaFieldUrn(u.table, u.column).urn()
+                    for u in cll.upstreams
+                    if u.table and u.column
+                ]
+                if upstream_urns:
+                    fgl_list.append(
+                        FineGrainedLineageClass(
+                            upstreamType=FineGrainedLineageUpstreamTypeClass.FIELD_SET,
+                            downstreamType=FineGrainedLineageDownstreamTypeClass.FIELD,
+                            upstreams=upstream_urns,
+                            downstreams=[downstream_urn],
+                        )
+                    )
+            except Exception as e:
+                logger.debug(f"Failed to convert column lineage entry: {e}")
+        return fgl_list
+
     def _discover_views(self) -> None:
         """Discover and categorize views from LookML files."""
         if not self.config.base_folder:
@@ -738,11 +958,15 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
         with self._stage_timer("init.explore_view_names"):
             explore_views = self._get_explore_view_names()
 
+        # Build view→explore map for API SQL lineage (uses the now-populated _explore_cache)
+        if self.config.enable_api_sql_lineage:
+            self._build_view_to_explore_map()
+
         # Run view discovery
         discovery = ViewDiscovery(
             base_folder=self.config.base_folder,
             project_name=self.config.project_name or "default",
-            project_dependencies=self._resolved_project_paths,
+            project_dependencies=self._ctx.resolved_project_paths,
         )
 
         self._view_discovery_result = discovery.discover(explore_views)
@@ -774,7 +998,7 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
         """
         explore_pairs: List[Tuple[str, str]] = [
             (model.name, explore_basic.name)
-            for model in self._model_registry.values()
+            for model in self._ctx.model_registry.values()
             if model.explores and model.name
             for explore_basic in model.explores
             if explore_basic.name
@@ -803,7 +1027,7 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
             if result is None:
                 continue
             model_name, explore_name, explore = result
-            self._explore_cache[(model_name, explore_name)] = explore
+            self._ctx.explore_cache[(model_name, explore_name)] = explore
             if explore.view_name:
                 view_names.add(explore.view_name)
             elif explore.name:
@@ -889,7 +1113,7 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
                         yield extra_mcp.as_workunit()
                     # Collect usage data
                     if result.dashboard_usage:
-                        self._dashboards_for_usage.append(result.dashboard_usage)
+                        self._ctx.dashboards_for_usage.append(result.dashboard_usage)
                     self.reporter.dashboards_scanned += 1
             except (SDKError, ValueError, KeyError, TypeError) as e:
                 self.reporter.report_warning(
@@ -950,12 +1174,12 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
             return None
 
         # Skip personal folders
-        if self._should_skip_personal_folder(api_dashboard.folder):
+        if self._folder_proc.should_skip_personal_folder(api_dashboard.folder):
             return None
 
         # Check folder path pattern
         if api_dashboard.folder:
-            folder_path = self._get_folder_path(api_dashboard.folder)
+            folder_path = self._folder_proc.get_folder_path(api_dashboard.folder)
             if not self.config.folder_path_pattern.allowed(folder_path):
                 self.reporter.dashboards_filtered.append(
                     f"{api_dashboard.title} (folder: {folder_path})"
@@ -972,7 +1196,9 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
 
         # Process folder container
         if api_dashboard.folder and api_dashboard.folder.id:
-            folder_entities = self._get_folder_container(api_dashboard.folder)
+            folder_entities = self._folder_proc.get_folder_container(
+                api_dashboard.folder
+            )
             entities.extend(folder_entities)
 
         dashboard_usage = self._build_dashboard_usage(api_dashboard)
@@ -999,6 +1225,9 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
             return
 
         for element in api_dashboard.dashboard_elements:
+            if element.id and not self.config.chart_pattern.allowed(str(element.id)):
+                self.reporter.charts_dropped += 1
+                continue
             chart = self._create_chart_entity(element, api_dashboard)
             if chart:
                 self._add_chart_explore_lineage(chart, element)
@@ -1087,7 +1316,7 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
         # Use get_urn_looker_dashboard_id to match V1 URN pattern: dashboards.{id}
         parent_container: Union[LookerFolderKey, Unset] = unset
         if api_dashboard.folder and api_dashboard.folder.id:
-            parent_container = self._gen_folder_key(api_dashboard.folder.id)
+            parent_container = self._folder_proc.gen_folder_key(api_dashboard.folder.id)
 
         dashboard_url = None
         if self.config.external_base_url:
@@ -1193,7 +1422,9 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
         # Charts are children of the same folder as their parent dashboard
         parent_container: Union[LookerFolderKey, Unset] = unset
         if parent_dashboard.folder and parent_dashboard.folder.id:
-            parent_container = self._gen_folder_key(parent_dashboard.folder.id)
+            parent_container = self._folder_proc.gen_folder_key(
+                parent_dashboard.folder.id
+            )
 
         chart_url = self._get_chart_url(element)
         upstream_fields = self._compute_upstream_fields(element)
@@ -1299,17 +1530,17 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
 
     def _get_folder_ancestors(self, folder_id: str) -> List[FolderBase]:
         """Get ancestor folders using the pre-fetched registry when available."""
-        if self._folder_registry:
+        if self._ctx.folder_registry:
             # Walk up the tree using the registry
             ancestors: List[FolderBase] = []
-            current_folder = self._folder_registry.get(folder_id)
+            current_folder = self._ctx.folder_registry.get(folder_id)
             if current_folder is None:
                 return []
             visited: set = set()
             parent_id = current_folder.parent_id
             while parent_id and parent_id not in visited:
                 visited.add(parent_id)
-                parent = self._folder_registry.get(parent_id)
+                parent = self._ctx.folder_registry.get(parent_id)
                 if parent is None:
                     break
                 ancestors.insert(0, parent)
@@ -1317,7 +1548,16 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
             return ancestors
         # Fall back to API when registry is empty (e.g., pre-fetch failed)
         try:
-            return [f for f in self.looker_api.folder_ancestors(folder_id=folder_id)]
+            return [
+                FolderBase(
+                    id=f.id,
+                    name=f.name,
+                    parent_id=f.parent_id,
+                    is_personal=f.is_personal,
+                    is_personal_descendant=f.is_personal_descendant,
+                )
+                for f in self.looker_api.folder_ancestors(folder_id=folder_id)
+            ]
         except SDKError as e:
             logger.warning(f"Failed to fetch folder ancestors for {folder_id}: {e}")
             self.reporter.report_warning(
@@ -1335,15 +1575,15 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
         entities: List[Entity] = []
 
         # Emit ancestor chain
-        ancestors = self._get_folder_ancestors(folder.id)
+        ancestors = self._folder_proc.get_folder_ancestors(folder.id)
         for ancestor in ancestors:
             if ancestor.id and ancestor.id not in self.processed_folders:
                 self.processed_folders.append(ancestor.id)
                 parent_key = None
                 if ancestor.parent_id:
-                    parent_key = self._gen_folder_key(ancestor.parent_id)
+                    parent_key = self._folder_proc.gen_folder_key(ancestor.parent_id)
                 container = Container(
-                    container_key=self._gen_folder_key(ancestor.id),
+                    container_key=self._folder_proc.gen_folder_key(ancestor.id),
                     subtype=BIContainerSubTypes.LOOKER_FOLDER,
                     display_name=ancestor.name or f"Folder {ancestor.id}",
                     parent_container=parent_key,
@@ -1355,9 +1595,9 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
             self.processed_folders.append(folder.id)
             parent_key = None
             if hasattr(folder, "parent_id") and folder.parent_id:
-                parent_key = self._gen_folder_key(folder.parent_id)
+                parent_key = self._folder_proc.gen_folder_key(folder.parent_id)
             container = Container(
-                container_key=self._gen_folder_key(folder.id),
+                container_key=self._folder_proc.gen_folder_key(folder.id),
                 subtype=BIContainerSubTypes.LOOKER_FOLDER,
                 display_name=folder.name or f"Folder {folder.id}",
                 parent_container=parent_key,
@@ -1382,7 +1622,7 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
             return True
 
         # Check ancestor chain for personal folder flags
-        for ancestor in self._get_folder_ancestors(folder.id):
+        for ancestor in self._folder_proc.get_folder_ancestors(folder.id):
             if getattr(ancestor, "is_personal", None) or getattr(
                 ancestor, "is_personal_descendant", None
             ):
@@ -1394,7 +1634,7 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
         """Get full folder path using ancestor chain."""
         if not folder.id:
             return folder.name or ""
-        ancestors = self._get_folder_ancestors(folder.id)
+        ancestors = self._folder_proc.get_folder_ancestors(folder.id)
         path_parts = [a.name for a in ancestors if a.name]
         if folder.name:
             path_parts.append(folder.name)
@@ -1427,7 +1667,7 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
 
                 # Skip personal folders
                 folder = getattr(look, "folder", None)
-                if self._should_skip_personal_folder(folder):
+                if self._folder_proc.should_skip_personal_folder(folder):
                     continue
 
                 chart = self._create_look_entity(look)
@@ -1465,15 +1705,27 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
 
         explores_to_process: List[Tuple[str, str]] = []
 
-        for model_name, model in self._model_registry.items():
+        for model_name, model in self._ctx.model_registry.items():
             if not self.config.model_pattern.allowed(model_name):
                 continue
 
             if model.explores:
                 for explore in model.explores:
-                    if explore.name:
-                        if self.config.explore_pattern.allowed(explore.name):
-                            explores_to_process.append((model_name, explore.name))
+                    if not explore.name:
+                        continue
+                    if not self.config.explore_pattern.allowed(explore.name):
+                        continue
+                    if (
+                        self.config.emit_used_explores_only
+                        and (
+                            model_name,
+                            explore.name,
+                        )
+                        not in self._ctx.reachable_explores
+                    ):
+                        self.reporter.explores_skipped += 1
+                        continue
+                    explores_to_process.append((model_name, explore.name))
 
         self.reporter.explores_discovered = len(explores_to_process)
 
@@ -1525,8 +1777,8 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
         """Process a single explore with schema fields."""
         # Check cache first (populated during view discovery)
         cache_key = (model_name, explore_name)
-        if cache_key in self._explore_cache:
-            explore = self._explore_cache[cache_key]
+        if cache_key in self._ctx.explore_cache:
+            explore = self._ctx.explore_cache[cache_key]
             self.reporter.explore_cache_hits += 1
         else:
             self.reporter.explore_cache_misses += 1
@@ -1683,7 +1935,7 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
         explore_fields_map: Dict[str, Any] = {}
         if query.model and query.view:
             cache_key = (query.model, query.view)
-            explore = self._explore_cache.get(cache_key)
+            explore = self._ctx.explore_cache.get(cache_key)
             explore_urn = builder.make_dataset_urn_with_platform_instance(
                 platform=self.platform,
                 name=f"{query.model}.explore.{query.view}",
@@ -1763,17 +2015,17 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
         query = self._get_chart_query(element)
         if query and query.model and query.view:
             key = (query.model, query.view)
-            if key not in self.reachable_explores:
-                self.reachable_explores[key] = []
-            self.reachable_explores[key].append(f"chart:{element.id}")
+            if key not in self._ctx.reachable_explores:
+                self._ctx.reachable_explores[key] = []
+            self._ctx.reachable_explores[key].append(f"chart:{element.id}")
         # Also track from result_maker filterables
         if element.result_maker and element.result_maker.filterables:
             for filterable in element.result_maker.filterables:
                 if filterable.view and filterable.model:
                     key = (filterable.model, filterable.view)
-                    if key not in self.reachable_explores:
-                        self.reachable_explores[key] = []
-                    self.reachable_explores[key].append(f"chart:{element.id}")
+                    if key not in self._ctx.reachable_explores:
+                        self._ctx.reachable_explores[key] = []
+                    self._ctx.reachable_explores[key].append(f"chart:{element.id}")
 
         input_field_classes = self._get_enriched_input_fields(element)
         if not input_field_classes:
@@ -1875,7 +2127,7 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
 
     def _extract_usage_stats(self) -> Iterable[MetadataWorkUnit]:
         """Extract usage statistics for dashboards and charts."""
-        if not self._dashboards_for_usage:
+        if not self._ctx.dashboards_for_usage:
             return
 
         stat_generator_config = looker_usage.StatGeneratorConfig(
@@ -1892,7 +2144,7 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
                 config=stat_generator_config,
                 report=self.reporter,
                 urn_builder=self._make_dashboard_urn,
-                looker_dashboards=self._dashboards_for_usage,
+                looker_dashboards=self._ctx.dashboards_for_usage,
             )
             emitted = 0
             for mcp in dashboard_stat_generator.generate_usage_stat_mcps():
@@ -1909,7 +2161,7 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
 
         # Chart/Look usage stats
         looks: List[looker_usage.LookerChartForUsage] = []
-        for dashboard in self._dashboards_for_usage:
+        for dashboard in self._ctx.dashboards_for_usage:
             if hasattr(dashboard, "looks") and dashboard.looks:
                 looks.extend(dashboard.looks)
 
@@ -2034,7 +2286,7 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
         Returns None if no explore references this view or the connection is not mapped.
         """
         # Search explores that reference this view
-        for (_model_name, _explore_name), explore in self._explore_cache.items():
+        for (_model_name, _explore_name), explore in self._ctx.explore_cache.items():
             # Check if this explore's base view matches
             base_view = explore.view_name or explore.name
             matched = base_view == view_name
@@ -2061,11 +2313,12 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
     ) -> bool:
         """Resolve upstream lineage for a view and attach it to the dataset entity.
 
-        Resolution priority for derived table views:
-        1. PDT graph API edges (most accurate, avoids SQL regex).
-        2. SQL regex parsing of derived_table.sql (fallback).
-
-        Also resolves ${view.SQL_TABLE_NAME} cross-view references in derived SQL.
+        Resolution priority:
+        - sql_table_name views: direct table URN (no API needed).
+        - derived_table_sql views (reachable, enable_api_sql_lineage=True):
+            Combined PDT graph API + generate_sql_query → table-level + CLL.
+        - derived_table_sql views (unreachable or enable_api_sql_lineage=False):
+            SQL regex fallback (table-level only, no CLL).
 
         Returns:
             True if at least one upstream was attached; False otherwise.
@@ -2080,7 +2333,6 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
         upstream_urns: List[UpstreamInputType] = []
 
         if parsed_view.sql_table_name:
-            # Clean up sql_table_name (remove trailing semicolons, whitespace)
             table_name = parsed_view.sql_table_name.strip().rstrip(";").strip()
             if table_name and not table_name.startswith("$"):
                 try:
@@ -2090,13 +2342,14 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
                         reporter=self.reporter,
                         view_name=parsed_view.name,
                     )
-                    upstream_urn = builder.make_dataset_urn_with_platform_instance(
-                        platform=conn_def.platform,
-                        name=fqn,
-                        platform_instance=conn_def.platform_instance,
-                        env=self.config.env,
+                    upstream_urns.append(
+                        builder.make_dataset_urn_with_platform_instance(
+                            platform=conn_def.platform,
+                            name=fqn,
+                            platform_instance=conn_def.platform_instance,
+                            env=self.config.env,
+                        )
                     )
-                    upstream_urns.append(upstream_urn)
                 except (ValueError, KeyError) as e:
                     logger.warning(
                         f"Failed to resolve lineage for view '{parsed_view.name}' "
@@ -2109,48 +2362,17 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
                     )
 
         elif parsed_view.derived_table_sql:
-            # Prefer PDT graph API data over SQL regex when available
-            pdt_edges = self._pdt_upstream_map.get(parsed_view.name)
-            if pdt_edges:
-                for edge in pdt_edges:
-                    if edge.is_database_table:
-                        try:
-                            fqn = _generate_fully_qualified_name(
-                                sql_table_name=edge.upstream_name,
-                                connection_def=conn_def,
-                                reporter=self.reporter,
-                                view_name=parsed_view.name,
-                            )
-                            upstream_urn = (
-                                builder.make_dataset_urn_with_platform_instance(
-                                    platform=conn_def.platform,
-                                    name=fqn,
-                                    platform_instance=conn_def.platform_instance,
-                                    env=self.config.env,
-                                )
-                            )
-                            upstream_urns.append(upstream_urn)
-                        except (ValueError, KeyError) as e:
-                            logger.warning(
-                                f"Failed to resolve PDT graph lineage for view "
-                                f"'{parsed_view.name}' table '{edge.upstream_name}': {e}"
-                            )
-                            self.reporter.report_warning(
-                                title="PDT Lineage Resolution Failed",
-                                message="Could not resolve PDT upstream table from graph API.",
-                                context=f"view={parsed_view.name}, upstream={edge.upstream_name}: {e}",
-                            )
-                    else:
-                        # PDT-to-PDT: reference another Looker view
-                        upstream_model = edge.upstream_model or edge.model_name
-                        view_urn = self._get_view_urn(
-                            edge.upstream_name, upstream_model
-                        )
-                        if view_urn:
-                            upstream_urns.append(view_urn)
-                self.reporter.lineage_via_pdt_graph += 1
+            api_result: Optional[List[UpstreamInputType]] = None
+            if self.config.enable_api_sql_lineage:
+                api_result = self._resolve_view_lineage_via_api(
+                    parsed_view.name, conn_def
+                )
+
+            if api_result is not None:
+                upstream_urns.extend(api_result)
+                self.reporter.lineage_via_api += 1
             else:
-                # Fallback to SQL regex
+                # Fallback: SQL regex (unreachable views or API disabled/failed)
                 table_refs = LookMLParser.extract_table_refs_from_sql(
                     parsed_view.derived_table_sql
                 )
@@ -2162,13 +2384,14 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
                             reporter=self.reporter,
                             view_name=parsed_view.name,
                         )
-                        upstream_urn = builder.make_dataset_urn_with_platform_instance(
-                            platform=conn_def.platform,
-                            name=fqn,
-                            platform_instance=conn_def.platform_instance,
-                            env=self.config.env,
+                        upstream_urns.append(
+                            builder.make_dataset_urn_with_platform_instance(
+                                platform=conn_def.platform,
+                                name=fqn,
+                                platform_instance=conn_def.platform_instance,
+                                env=self.config.env,
+                            )
                         )
-                        upstream_urns.append(upstream_urn)
                     except (ValueError, KeyError) as e:
                         logger.warning(
                             f"Failed to resolve lineage for view '{parsed_view.name}' "
@@ -2218,7 +2441,7 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
             )
             try:
                 cache_key = (ref_file, ref_project)
-                ref_views = self._parsed_view_file_cache.get(cache_key)
+                ref_views = self._ctx.parsed_view_file_cache.get(cache_key)
                 if ref_views is None:
                     parser = LookMLParser(
                         template_variables=self.config.liquid_variables,
@@ -2226,7 +2449,7 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
                         environment=self.config.looker_environment,
                     )
                     ref_views = parser.parse_view_file(ref_file, ref_project)
-                    self._parsed_view_file_cache[cache_key] = ref_views
+                    self._ctx.parsed_view_file_cache[cache_key] = ref_views
                 for rv in ref_views:
                     if rv.name == ref_view_name and rv.sql_table_name:
                         table_name = rv.sql_table_name.strip().rstrip(";").strip()
@@ -2545,8 +2768,8 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
                 )
             except ValueError:
                 # Check project dependencies
-                if self._resolved_project_paths:
-                    for dep_path in self._resolved_project_paths.values():
+                if self._ctx.resolved_project_paths:
+                    for dep_path in self._ctx.resolved_project_paths.values():
                         try:
                             relative_path = str(Path(file_path).relative_to(dep_path))
                             break
