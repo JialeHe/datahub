@@ -85,6 +85,9 @@ from datahub.ingestion.source.looker_v2.looker_v2_context import LookerV2Context
 from datahub.ingestion.source.looker_v2.looker_v2_folder_processor import (
     LookerFolderProcessor,
 )
+from datahub.ingestion.source.looker_v2.looker_v2_look_processor import (
+    LookerLookProcessor,
+)
 from datahub.ingestion.source.looker_v2.looker_v2_pdt_graph_parser import (
     parse_pdt_graph,
 )
@@ -327,6 +330,13 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
         self.processed_folders: List[str] = []
         self.chart_urns: Set[str] = set()
 
+        self._look_proc = LookerLookProcessor(
+            ctx=self._ctx,
+            folder_proc=self._folder_proc,
+            user_registry=self.user_registry,
+            reachable_look_registry=self.reachable_look_registry,
+        )
+
         # View tracking
         self._view_discovery_result: Optional[ViewDiscoveryResult] = None
         self._parsed_views: Dict[str, ParsedView] = {}
@@ -414,7 +424,7 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
             # Stage 3: Process standalone looks
             if self.config.extract_looks:
                 with self._stage_timer("process_looks"):
-                    yield from self._process_looks()
+                    yield from self._look_proc.process()
 
             # Stage 4: Process explores
             if self.config.extract_explores:

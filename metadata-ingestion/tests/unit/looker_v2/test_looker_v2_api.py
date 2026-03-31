@@ -17,6 +17,9 @@ from datahub.ingestion.source.looker_v2.looker_v2_context import LookerV2Context
 from datahub.ingestion.source.looker_v2.looker_v2_folder_processor import (
     LookerFolderProcessor,
 )
+from datahub.ingestion.source.looker_v2.looker_v2_look_processor import (
+    LookerLookProcessor,
+)
 from datahub.ingestion.source.looker_v2.lookml_view_discovery import (
     ViewDiscovery,
     extract_explore_views_from_api,
@@ -269,3 +272,45 @@ class TestExtractLooksRequiresStatefulIngestion:
 
         config = LookerV2Config(**{**self.BASE_CONFIG, "extract_looks": False})
         assert config.extract_looks is False
+
+
+# ---------------------------------------------------------------------------
+# LookerLookProcessor tests
+# ---------------------------------------------------------------------------
+
+
+class TestLookProcessor:
+    def _make_processor(
+        self, looks: list, skip_personal: bool = False
+    ) -> LookerLookProcessor:
+        config = MagicMock()
+        config.skip_personal_folders = skip_personal
+        config.include_deleted = False
+        config.extract_owners = False
+        config.include_platform_instance_in_urns = False
+        config.platform_instance = None
+        mock_api = MagicMock()
+        mock_api.search_looks.return_value = looks
+        ctx = LookerV2Context(
+            config=config,
+            looker_api=mock_api,
+            reporter=MagicMock(),
+            pipeline_ctx=MagicMock(),
+            platform="looker",
+        )
+        folder_proc = LookerFolderProcessor(ctx)
+        return LookerLookProcessor(ctx, folder_proc, MagicMock(), set())
+
+    def test_empty_looks_yields_nothing(self):
+        proc = self._make_processor([])
+        workunits = list(proc.process())
+        assert workunits == []
+
+    def test_personal_folder_looks_skipped(self):
+        look = MagicMock()
+        look.id = "1"
+        look.title = "My Look"
+        look.folder = make_folder("p1", "Personal", is_personal=True)
+        proc = self._make_processor([look], skip_personal=True)
+        workunits = list(proc.process())
+        assert workunits == []
