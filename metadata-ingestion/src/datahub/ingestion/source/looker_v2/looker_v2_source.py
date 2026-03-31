@@ -82,6 +82,9 @@ from datahub.ingestion.source.looker_v2.looker_v2_config import (
     LookerV2GitInfo,
 )
 from datahub.ingestion.source.looker_v2.looker_v2_context import LookerV2Context
+from datahub.ingestion.source.looker_v2.looker_v2_dashboard_processor import (
+    LookerDashboardProcessor,
+)
 from datahub.ingestion.source.looker_v2.looker_v2_folder_processor import (
     LookerFolderProcessor,
 )
@@ -333,6 +336,8 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
         self.processed_folders: List[str] = []
         self.chart_urns: Set[str] = set()
 
+        self._ctx.user_registry = self.user_registry
+
         self._look_proc = LookerLookProcessor(
             ctx=self._ctx,
             folder_proc=self._folder_proc,
@@ -341,6 +346,14 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
         )
 
         self._usage_extractor = LookerUsageExtractor(self._ctx, self.user_registry)
+
+        self._dashboard_proc = LookerDashboardProcessor(
+            ctx=self._ctx,
+            folder_proc=self._folder_proc,
+            explore_registry=self.explore_registry,
+            reachable_look_registry=self.reachable_look_registry,
+            chart_urns=self.chart_urns,
+        )
 
         # View tracking
         self._view_discovery_result: Optional[ViewDiscoveryResult] = None
@@ -424,7 +437,7 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
             # Stage 2: Process dashboards and charts
             if self.config.extract_dashboards:
                 with self._stage_timer("process_dashboards"):
-                    yield from self._process_dashboards()
+                    yield from self._dashboard_proc.process()
 
             # Stage 3: Process standalone looks
             if self.config.extract_looks:

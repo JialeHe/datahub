@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from looker_sdk.sdk.api40.models import FolderBase, LookmlModel, LookmlModelExplore
 
     from datahub.ingestion.api.common import PipelineContext
+    from datahub.ingestion.source.looker.looker_common import LookerUserRegistry
     from datahub.ingestion.source.looker.looker_lib_wrapper import LookerAPI
     from datahub.ingestion.source.looker_v2 import looker_v2_usage as looker_usage
     from datahub.ingestion.source.looker_v2.looker_v2_config import LookerV2Config
@@ -36,6 +37,7 @@ class LookerV2Context:
     reporter: "LookerV2SourceReport"
     pipeline_ctx: "PipelineContext"
     platform: str
+    user_registry: "Optional[LookerUserRegistry]" = None
 
     # ── Mutable shared state — written and read across processors ──────────
     model_registry: "Dict[str, LookmlModel]" = field(default_factory=dict)

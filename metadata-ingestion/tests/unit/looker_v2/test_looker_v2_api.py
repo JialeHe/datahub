@@ -14,6 +14,9 @@ import pytest
 from looker_sdk.sdk.api40.models import FolderBase
 
 from datahub.ingestion.source.looker_v2.looker_v2_context import LookerV2Context
+from datahub.ingestion.source.looker_v2.looker_v2_dashboard_processor import (
+    LookerDashboardProcessor,
+)
 from datahub.ingestion.source.looker_v2.looker_v2_folder_processor import (
     LookerFolderProcessor,
 )
@@ -315,6 +318,55 @@ class TestLookProcessor:
         look.title = "My Look"
         look.folder = make_folder("p1", "Personal", is_personal=True)
         proc = self._make_processor([look], skip_personal=True)
+        workunits = list(proc.process())
+        assert workunits == []
+
+
+class TestDashboardProcessor:
+    def _make_processor(
+        self, dashboards: list, skip_personal: bool = False
+    ) -> LookerDashboardProcessor:
+        config = MagicMock()
+        config.skip_personal_folders = skip_personal
+        config.include_deleted = False
+        config.extract_owners = False
+        config.dashboard_pattern.allowed.return_value = True
+        config.chart_pattern.allowed.return_value = True
+        config.folder_path_pattern.allowed.return_value = True
+        config.extract_embed_urls = False
+        config.include_platform_instance_in_urns = False
+        config.platform_instance = None
+        config.max_concurrent_requests = 1
+        config.extract_usage_history = False
+        mock_api = MagicMock()
+        mock_api.all_dashboards.return_value = dashboards
+        ctx = LookerV2Context(
+            config=config,
+            looker_api=mock_api,
+            reporter=MagicMock(),
+            pipeline_ctx=MagicMock(),
+            platform="looker",
+        )
+        folder_proc = LookerFolderProcessor(ctx)
+        return LookerDashboardProcessor(
+            ctx=ctx,
+            folder_proc=folder_proc,
+            explore_registry=MagicMock(),
+            reachable_look_registry=set(),
+            chart_urns=set(),
+        )
+
+    def test_empty_dashboards_yields_nothing(self):
+        proc = self._make_processor([])
+        workunits = list(proc.process())
+        assert workunits == []
+
+    def test_personal_folder_dashboard_skipped(self):
+        dash = MagicMock()
+        dash.id = "1"
+        dash.title = "My Dashboard"
+        dash.folder = make_folder("p1", "Personal", is_personal=True)
+        proc = self._make_processor([dash], skip_personal=True)
         workunits = list(proc.process())
         assert workunits == []
 
