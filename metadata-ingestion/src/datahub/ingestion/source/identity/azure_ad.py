@@ -476,6 +476,21 @@ class AzureADSource(StatefulIngestionSourceBase):
                 self.report.report_failure("azure_ad_group", str(e))
 
     def _map_azure_ad_group(self, azure_ad_group):
+        # Extract group name first so we can apply the pattern filter before
+        # attempting URN construction. Groups excluded by the filter should be
+        # silently skipped, not reported as failures.
+        try:
+            group_name = self._extract_regex_match_from_dict_value(
+                azure_ad_group,
+                self.config.azure_ad_response_to_groupname_attr,
+                self.config.azure_ad_response_to_groupname_regex,
+            )
+        except ValueError as e:
+            self.report.report_failure("azure_ad_group_mapping", str(e))
+            return
+        if not self.config.groups_pattern.allowed(group_name):
+            self.report.report_filtered(f"group:{group_name}")
+            return
         corp_group_urn, error_str = self._map_identity_to_urn(
             self._map_azure_ad_group_to_urn,
             azure_ad_group,
@@ -483,14 +498,6 @@ class AzureADSource(StatefulIngestionSourceBase):
             "group",
         )
         if error_str is not None:
-            return
-        group_name = self._extract_regex_match_from_dict_value(
-            azure_ad_group,
-            self.config.azure_ad_response_to_groupname_attr,
-            self.config.azure_ad_response_to_groupname_regex,
-        )
-        if not self.config.groups_pattern.allowed(group_name):
-            self.report.report_filtered(f"{corp_group_urn}")
             return
         self.selected_azure_ad_groups.append(azure_ad_group)
         corp_group_snapshot = CorpGroupSnapshot(
