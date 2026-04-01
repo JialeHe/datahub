@@ -4,7 +4,7 @@ Covers:
 - Bulk folder pre-fetch and ancestor walk
 - View discovery categorization
 - ManifestParser constant extraction
-- Config validation (extract_looks + stateful ingestion)
+- Config validation (extract_looks + stateful ingestion, extract_views, project_dependencies)
 """
 
 from typing import Any, Optional
@@ -413,6 +413,102 @@ class TestViewProcessor:
         proc = self._make_processor()
         workunits = list(proc.process())
         assert workunits == []
+
+
+class TestExtractViewsRequiresLookMLAccess:
+    """extract_views=True must be paired with base_folder or git_info."""
+
+    BASE_CONFIG = {
+        "base_url": "https://looker.example.com",
+        "client_id": "id",
+        "client_secret": "secret",
+        "extract_looks": False,
+    }
+
+    def test_extract_views_without_lookml_access_raises(self) -> None:
+        from pydantic import ValidationError
+
+        from datahub.ingestion.source.looker_v2.looker_v2_config import LookerV2Config
+
+        with pytest.raises(ValidationError, match="base_folder.*or.*git_info"):
+            LookerV2Config(**{**self.BASE_CONFIG, "extract_views": True})
+
+    def test_extract_views_with_base_folder_passes(self) -> None:
+        from datahub.ingestion.source.looker_v2.looker_v2_config import LookerV2Config
+
+        config = LookerV2Config(
+            **{**self.BASE_CONFIG, "extract_views": True, "base_folder": "/tmp"}
+        )
+        assert config.extract_views is True
+
+    def test_extract_views_with_git_info_passes(self) -> None:
+        from datahub.ingestion.source.looker_v2.looker_v2_config import LookerV2Config
+
+        config = LookerV2Config(
+            **{
+                **self.BASE_CONFIG,
+                "extract_views": True,
+                "git_info": {"repo": "git@github.com:org/repo.git"},
+            }
+        )
+        assert config.extract_views is True
+
+    def test_extract_views_false_no_lookml_passes(self) -> None:
+        from datahub.ingestion.source.looker_v2.looker_v2_config import LookerV2Config
+
+        config = LookerV2Config(**{**self.BASE_CONFIG, "extract_views": False})
+        assert config.extract_views is False
+
+
+class TestProjectDependenciesValidator:
+    """project_dependencies must contain only str or LookerV2GitInfo values."""
+
+    BASE_CONFIG = {
+        "base_url": "https://looker.example.com",
+        "client_id": "id",
+        "client_secret": "secret",
+        "extract_looks": False,
+    }
+
+    def test_string_dependency_passes(self) -> None:
+        from datahub.ingestion.source.looker_v2.looker_v2_config import LookerV2Config
+
+        config = LookerV2Config(
+            **{
+                **self.BASE_CONFIG,
+                "project_dependencies": {"dep_project": "/local/path"},
+            }
+        )
+        assert config.project_dependencies["dep_project"] == "/local/path"
+
+    def test_git_info_dependency_passes(self) -> None:
+        from datahub.ingestion.source.looker_v2.looker_v2_config import LookerV2Config
+
+        config = LookerV2Config(
+            **{
+                **self.BASE_CONFIG,
+                "project_dependencies": {
+                    "dep_project": {"repo": "git@github.com:org/dep.git"}
+                },
+            }
+        )
+        assert (
+            config.project_dependencies["dep_project"].repo
+            == "git@github.com:org/dep.git"
+        )  # type: ignore[union-attr]
+
+    def test_invalid_dependency_type_raises(self) -> None:
+        from pydantic import ValidationError
+
+        from datahub.ingestion.source.looker_v2.looker_v2_config import LookerV2Config
+
+        with pytest.raises(ValidationError, match="Invalid project dependency"):
+            LookerV2Config(
+                **{
+                    **self.BASE_CONFIG,
+                    "project_dependencies": {"dep_project": 42},
+                }
+            )
 
 
 class TestExploreProcessor:

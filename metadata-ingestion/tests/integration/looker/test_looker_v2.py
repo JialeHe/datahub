@@ -5,6 +5,7 @@ from unittest import mock
 
 import pytest
 from freezegun import freeze_time
+from looker_sdk.error import SDKError
 from looker_sdk.sdk.api40.models import (
     Dashboard,
     DashboardBase,
@@ -120,6 +121,33 @@ def _setup_mock_sdk(sdk: mock.MagicMock) -> None:
     sdk.graph_derived_tables_for_model.return_value = pdt_graph_mock
 
     sdk.all_connections.return_value = []
+
+
+def _build_pipeline(tmp_path: Path, extra_config: dict) -> Pipeline:
+    """Build a pipeline without running it, for tests that need to inspect the object."""
+    output_file = tmp_path / "looker_v2_mces.json"
+    config: dict = {
+        "base_url": "https://looker.company.com",
+        "client_id": "foo",
+        "client_secret": "bar",
+        "extract_looks": False,
+        "extract_usage_history": False,
+        "project_name": "lkml_samples",
+    }
+    config.update(extra_config)
+    return Pipeline.create(
+        {
+            "run_id": "looker-v2-test",
+            "source": {
+                "type": "looker-v2",
+                "config": config,
+            },
+            "sink": {
+                "type": "file",
+                "config": {"filename": str(output_file)},
+            },
+        }
+    )
 
 
 def _run_pipeline(
@@ -360,6 +388,27 @@ def test_usage_history(pytestconfig: pytest.Config, tmp_path: Path) -> None:
             output_path=output_file,
             golden_path=GOLDEN_DIR / "usage_history.json",
         )
+
+
+@freeze_time(FROZEN_TIME)
+@pytest.mark.integration
+def test_dashboard_sdk_error_is_soft_failure(tmp_path: Path) -> None:
+    """When sdk.dashboard() raises SDKError, the pipeline soft-fails and continues."""
+    mocked_client = mock.MagicMock()
+
+    with mock.patch("looker_sdk.init40") as mock_sdk:
+        mock_sdk.return_value = mocked_client
+        _setup_mock_sdk(mocked_client)
+
+        # Make the detail fetch raise so the pipeline must handle it gracefully.
+        mocked_client.dashboard.side_effect = SDKError("connection refused")
+
+        pipeline = _build_pipeline(tmp_path, {})
+        pipeline.run()
+        # Pipeline itself must not crash — errors are surfaced as warnings/failures
+        # on the report, not as an unhandled exception.
+        # Pipeline must complete without raising — that's the assertion.
+        assert pipeline.source is not None
 
 
 @freeze_time(FROZEN_TIME)
