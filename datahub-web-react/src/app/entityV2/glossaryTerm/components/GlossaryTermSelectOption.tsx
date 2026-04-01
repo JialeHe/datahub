@@ -4,7 +4,11 @@ import Term from '@app/sharedV2/tags/term/Term';
 
 import { Entity, GlossaryTerm, GlossaryTermAssociation } from '@types';
 
-export function GlossaryTermSelectOption({ entity }: { entity: Entity }) {
+interface Props {
+    entity: Entity;
+}
+
+export function GlossaryTermSelectOption({ entity }: Props) {
     const glossaryTerm = entity as GlossaryTerm;
     const termAssociation: GlossaryTermAssociation = {
         term: glossaryTerm,

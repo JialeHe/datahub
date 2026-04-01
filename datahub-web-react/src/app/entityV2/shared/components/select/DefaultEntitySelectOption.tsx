@@ -48,7 +48,7 @@ const DisplayName = styled(Text)`
 `;
 
 interface Props {
-    entity?: Entity;
+    entity?: Entity | null;
 }
 
 export function DefaultEntitySelectOption({ entity }: Props) {

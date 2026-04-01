@@ -1,8 +1,8 @@
 import React, { useCallback } from 'react';
 
+import { DefaultEntitySelectOption } from '@app/entityV2/shared/components/select/DefaultEntitySelectOption';
 import BaseEntityFilter from '@app/searchV2/filtersV2/filters/BaseEntityFilter/BaseEntityFilter';
 import { FilterComponentProps } from '@app/searchV2/filtersV2/types';
-import { DefaultEntitySelectOption } from '@app/sharedV2/select/DefaultEntitySelectOption';
 import { Entity, EntityType } from '@src/types.generated';
 
 export default function PlatformEntityFilter(props: FilterComponentProps) {

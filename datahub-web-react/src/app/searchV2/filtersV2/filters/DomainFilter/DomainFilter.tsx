@@ -1,6 +1,7 @@
 import { debounce } from 'lodash';
 import React, { useMemo, useState } from 'react';
 
+import { DefaultEntitySelectOption } from '@app/entityV2/shared/components/select/DefaultEntitySelectOption';
 import useDomainsFromAggregations from '@app/searchV2/filtersV2/filters/DomainFilter/hooks/useDomainsFromAggregations';
 import useDomainsFromSuggestions from '@app/searchV2/filtersV2/filters/DomainFilter/hooks/useDomainsFromSuggestions';
 import useMergedDomains from '@app/searchV2/filtersV2/filters/DomainFilter/hooks/useMergedDomains';
@@ -8,7 +9,6 @@ import useOptionsFromDomains from '@app/searchV2/filtersV2/filters/DomainFilter/
 import { DEBOUNCE_ON_SEARCH_TIMEOUT_MS } from '@app/searchV2/filtersV2/filters/constants';
 import useValues from '@app/searchV2/filtersV2/filters/hooks/useValues';
 import { FilterComponentProps } from '@app/searchV2/filtersV2/types';
-import { DefaultEntitySelectOption } from '@app/sharedV2/select/DefaultEntitySelectOption';
 import { NestedSelect } from '@src/alchemy-components/components/Select/Nested/NestedSelect';
 import { NestedSelectOption } from '@src/alchemy-components/components/Select/Nested/types';
 import { Domain, EntityType, FilterOperator } from '@src/types.generated';

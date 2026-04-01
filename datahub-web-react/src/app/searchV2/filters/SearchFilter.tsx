@@ -1,12 +1,14 @@
 import React from 'react';
 import { CSSProperties } from 'styled-components';
 
+import EntityFilterSelect from '@app/searchV2/filters/EntityFilterSelect';
+import EntityTypeFilterSelect from '@app/searchV2/filters/EntityTypeFilterSelect';
 import SearchFilterView from '@app/searchV2/filters/SearchFilterView';
-import { FilterPredicate } from '@app/searchV2/filters/types';
+import { FieldType, FilterPredicate } from '@app/searchV2/filters/types';
 import useSearchFilterDropdown from '@app/searchV2/filters/useSearchFilterDropdown';
 import { useFilterDisplayName } from '@app/searchV2/filters/utils';
 
-import { FacetFilterInput, FacetMetadata } from '@types';
+import { EntityType, FacetFilterInput, FacetMetadata } from '@types';
 
 interface Props {
     filter: FacetMetadata;
@@ -37,6 +39,34 @@ export default function SearchFilter({
     ) as FilterPredicate;
 
     const displayName = useFilterDisplayName(filter, currentFilterPredicate?.field?.displayName);
+
+    if (currentFilterPredicate?.field.type === FieldType.ENTITY) {
+        return (
+            <EntityFilterSelect
+                field={currentFilterPredicate?.field}
+                values={currentFilterPredicate?.values || []}
+                defaultOptions={finalAggregations}
+                onChangeValues={updateFilters}
+                includeCount
+                displayName={displayName}
+            />
+        );
+    }
+
+    if (currentFilterPredicate?.field.type === FieldType.NESTED_ENTITY_TYPE) {
+        return (
+            <EntityTypeFilterSelect
+                field={currentFilterPredicate?.field}
+                values={currentFilterPredicate?.values || []}
+                defaultOptions={finalAggregations}
+                onChangeValues={updateFilters}
+                includeCount
+                aggregationsEntityTypes={finalAggregations
+                    .map((agg) => agg.entity?.type)
+                    .filter((entityType): entityType is EntityType => !!entityType)}
+            />
+        );
+    }
 
     return (
         <SearchFilterView

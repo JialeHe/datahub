@@ -3,25 +3,20 @@ import { CaretUp } from '@phosphor-icons/react/dist/csr/CaretUp';
 import React, { useState } from 'react';
 import styled from 'styled-components';
 
+import { EntitySelectOption } from '@app/entityV2/shared/components/select/EntitySelectOption';
 import { generateColor } from '@app/entityV2/shared/components/styled/StyledTag';
+import { getParentEntities } from '@app/entityV2/shared/utils/getParentEntities';
 import ParentEntities from '@app/searchV2/filters/ParentEntities';
 import { Label } from '@app/searchV2/filters/styledComponents';
 import { FilterOptionType } from '@app/searchV2/filters/types';
 import {
+    getCounterText,
     getFilterIconAndLabel,
-    getParentEntities,
     isAnyOptionSelected,
     isFilterOptionSelected,
 } from '@app/searchV2/filters/utils';
-import {
-    DOMAINS_FILTER_NAME,
-    ENTITY_SUB_TYPE_FILTER_NAME,
-    MAX_COUNT_VAL,
-    TYPE_NAMES_FILTER_NAME,
-} from '@app/searchV2/utils/constants';
-import { formatNumber } from '@app/shared/formatNumber';
+import { DOMAINS_FILTER_NAME, TYPE_NAMES_FILTER_NAME } from '@app/searchV2/utils/constants';
 import { capitalizeFirstLetterOnly } from '@app/shared/textUtil';
-import { EntitySelectOption } from '@app/sharedV2/select/EntitySelectOption';
 import { useEntityRegistry } from '@app/useEntityRegistry';
 
 import { Entity, EntityType } from '@types';
@@ -119,10 +114,6 @@ export default function FilterOption({
         nestedOptions?.map((o) => o.value),
     );
 
-    const getCountText = () => {
-        return count === MAX_COUNT_VAL && field === ENTITY_SUB_TYPE_FILTER_NAME ? '10k+' : formatNumber(count);
-    };
-
     function updateFilterValues() {
         if (isFilterOptionSelected(selectedFilterOptions, value)) {
             setSelectedFilterOptions(selectedFilterOptions.filter((option) => option.value !== value));
@@ -166,7 +157,9 @@ export default function FilterOption({
                         </LabelCountWrapper>
                     </LabelWrapper>
                 </CheckboxContent>
-                {includeCount && <Pill label={getCountText()} size="xs" variant="filled" color="gray" />}
+                {includeCount && count !== undefined && (
+                    <Pill label={getCounterText(count, field)} size="xs" variant="filled" color="gray" />
+                )}
                 <Checkbox
                     isChecked={isSelected}
                     isIntermediate={isIndeterminate}

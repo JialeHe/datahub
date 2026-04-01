@@ -36,6 +36,7 @@ import {
     GLOSSARY_TERMS_FILTER_NAME,
     LAST_MODIFIED_FILTER_NAME,
     LEGACY_ENTITY_FILTER_NAME,
+    MAX_COUNT_VAL,
     OWNERS_FILTER_NAME,
     PLATFORM_FILTER_NAME,
     PROPOSED_GLOSSARY_TERMS_FILTER_NAME,
@@ -48,6 +49,7 @@ import {
     TYPE_NAMES_FILTER_NAME,
     UNIT_SEPARATOR,
 } from '@app/searchV2/utils/constants';
+import { formatNumber } from '@app/shared/formatNumber';
 import { capitalizeFirstLetterOnly, forcePluralize, pluralizeIfIrregular } from '@app/shared/textUtil';
 import getTypeIcon from '@app/sharedV2/icons/getTypeIcon';
 import { removeMarkdown } from '@src/app/entity/shared/components/styled/StripMarkdownText';
@@ -63,14 +65,12 @@ import {
     CorpUser,
     DataPlatform,
     DataPlatformInstance,
-    Document,
     Domain,
     Entity,
     EntityType,
     FacetFilterInput,
     FacetMetadata,
     FilterOperator,
-    GlossaryTerm,
     StructuredPropertyEntity,
     Tag,
 } from '@types';
@@ -362,23 +362,6 @@ export function canCreateViewFromFilters(activeFilters: FacetFilterInput[]) {
         }
     }
     return true;
-}
-
-export function getParentEntities(entity: Entity): Entity[] | null {
-    if (!entity) {
-        return null;
-    }
-    if (entity.type === EntityType.GlossaryTerm || entity.type === EntityType.GlossaryNode) {
-        return (entity as GlossaryTerm).parentNodes?.nodes || [];
-    }
-    if (entity.type === EntityType.Domain) {
-        return (entity as Domain).parentDomains?.domains || [];
-    }
-    if (entity.type === EntityType.Document) {
-        // Document type is generated and includes parentDocuments field
-        return (entity as Document).parentDocuments?.documents || [];
-    }
-    return null;
 }
 
 const getInferredFieldType = (_: string, aggregationMetadata: AggregationMetadata[]) => {
@@ -728,4 +711,8 @@ export function getFilterDisplayName(option: FilterValueOption, field: FilterFie
     return field.field.startsWith(STRUCTURED_PROPERTIES_FILTER_NAME)
         ? getStructuredPropFilterDisplayName(field.field, option.value)
         : undefined;
+}
+
+export function getCounterText(value?: number, field?: string) {
+    return value === MAX_COUNT_VAL && field === ENTITY_SUB_TYPE_FILTER_NAME ? '10k+' : formatNumber(value);
 }
