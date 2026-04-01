@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 from datahub.ingestion.source.looker_v2.looker_v2_pdt_graph_parser import (
@@ -64,7 +65,8 @@ def test_pdt_edges_merged_into_result() -> None:
     ctx.explore_cache[("my_model", "my_explore")] = mock_explore
 
     # generate_sql_query returns a SQL string; parse it to an empty result.
-    ctx.looker_api.generate_sql_query.return_value = (
+    looker_api_mock = cast(MagicMock, ctx.looker_api)
+    looker_api_mock.generate_sql_query.return_value = (
         "SELECT id FROM raw_schema.raw_table"
     )
 
@@ -126,7 +128,7 @@ def test_chunk_fallback_used_when_generate_sql_raises() -> None:
             raise Exception("chunk too large")
         return good_sql
 
-    ctx.looker_api.generate_sql_query.side_effect = side_effect
+    cast(MagicMock, ctx.looker_api).generate_sql_query.side_effect = side_effect
     ctx.config.api_sql_lineage_individual_field_fallback = True
     # Set chunk size larger than field count so one chunk is generated.
     ctx.config.api_sql_lineage_field_chunk_size = 100
@@ -180,6 +182,8 @@ def test_cll_to_fine_grained_converts_column_lineage() -> None:
     assert len(result) == 1
     fgl = result[0]
     assert isinstance(fgl, FineGrainedLineageClass)
+    assert fgl.upstreams is not None
+    assert fgl.downstreams is not None
     assert len(fgl.upstreams) == 1
     assert len(fgl.downstreams) == 1
     assert "col_in" in fgl.upstreams[0]

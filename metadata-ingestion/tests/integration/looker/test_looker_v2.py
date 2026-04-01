@@ -14,6 +14,7 @@ from looker_sdk.sdk.api40.models import (
     LookmlModelExplore,
     LookmlModelExploreField,
     LookmlModelExploreFieldset,
+    LookmlModelNavExplore,
     Query,
 )
 
@@ -42,7 +43,7 @@ def _setup_mock_sdk(sdk: mock.MagicMock) -> None:
             name="lkml_samples",
             project_name="lkml_samples",
             explores=[
-                LookmlModelExplore(
+                LookmlModelNavExplore(
                     name="order_items",
                 )
             ],
@@ -271,8 +272,8 @@ def test_emit_used_explores_only(pytestconfig: pytest.Config, tmp_path: Path) ->
                 name="lkml_samples",
                 project_name="lkml_samples",
                 explores=[
-                    LookmlModelExplore(name="order_items"),
-                    LookmlModelExplore(name="unused_explore"),
+                    LookmlModelNavExplore(name="order_items"),
+                    LookmlModelNavExplore(name="unused_explore"),
                 ],
             )
         ]

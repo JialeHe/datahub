@@ -1,5 +1,7 @@
 """Unit tests for LookerDashboardProcessor."""
 
+from typing import cast
+from unittest import mock
 from unittest.mock import MagicMock
 
 from looker_sdk.sdk.api40.models import Dashboard as LookerAPIDashboard
@@ -24,7 +26,7 @@ def _make_processor(ctx: LookerV2Context) -> LookerDashboardProcessor:
 def test_chart_pattern_drops_disallowed_chart() -> None:
     """When chart_pattern denies an element, it is skipped and charts_dropped is incremented."""
     ctx = make_ctx()
-    ctx.config.chart_pattern.allowed.return_value = False
+    cast(MagicMock, ctx.config).chart_pattern.allowed.return_value = False
 
     processor = _make_processor(ctx)
 
@@ -55,7 +57,6 @@ def test_reachable_explores_populated_from_element_query() -> None:
     """After _extract_chart_input_fields, ctx.reachable_explores contains the chart ID."""
     ctx = make_ctx(explore_cache={})
     processor = _make_processor(ctx)
-    processor._get_enriched_input_fields = MagicMock(return_value=[])
 
     element = MagicMock()
     element.id = "99"
@@ -73,7 +74,8 @@ def test_reachable_explores_populated_from_element_query() -> None:
     chart = MagicMock()
     chart.urn = "urn:li:chart:(looker,element_99)"
 
-    processor._extract_chart_input_fields(element, chart)
+    with mock.patch.object(processor, "_get_enriched_input_fields", return_value=[]):
+        processor._extract_chart_input_fields(element, chart)
 
     key = ("my_model", "my_explore")
     assert key in ctx.reachable_explores
