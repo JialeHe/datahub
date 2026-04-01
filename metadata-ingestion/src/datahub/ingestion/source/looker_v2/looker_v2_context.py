@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
+from datahub.ingestion.source.looker_v2.looker_v2_config import LookerV2Config
+
 if TYPE_CHECKING:
     from looker_sdk.sdk.api40.models import FolderBase, LookmlModel, LookmlModelExplore
 
@@ -18,7 +20,6 @@ if TYPE_CHECKING:
     from datahub.ingestion.source.looker.looker_common import LookerUserRegistry
     from datahub.ingestion.source.looker.looker_lib_wrapper import LookerAPI
     from datahub.ingestion.source.looker_v2 import looker_v2_usage as looker_usage
-    from datahub.ingestion.source.looker_v2.looker_v2_config import LookerV2Config
     from datahub.ingestion.source.looker_v2.looker_v2_pdt_graph_parser import (
         PDTDependencyEdge,
     )
@@ -32,7 +33,7 @@ if TYPE_CHECKING:
 @dataclass
 class LookerV2Context:
     # ── Infrastructure (immutable after construction) ──────────────────────
-    config: "LookerV2Config"
+    config: LookerV2Config
     looker_api: "LookerAPI"
     reporter: "LookerV2SourceReport"
     pipeline_ctx: "PipelineContext"
