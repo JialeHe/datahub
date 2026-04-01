@@ -2,13 +2,7 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from unittest.mock import MagicMock, patch
-
-sys.path.insert(0, str(Path(__file__).parent))
-
-from conftest import make_ctx
 
 from datahub.ingestion.source.looker_v2.looker_v2_pdt_graph_parser import (
     PDTDependencyEdge,
@@ -23,6 +17,7 @@ from datahub.sql_parsing.sqlglot_lineage import (
     ColumnRef,
     DownstreamColumnRef,
 )
+from tests.unit.looker_v2.conftest import make_ctx
 
 
 def _make_resolver(**overrides: object) -> LookerViewLineageResolver:
@@ -99,10 +94,7 @@ def test_pdt_edges_merged_into_result() -> None:
     assert result is not None
     # The PDT edge should have contributed a dataset URN string.
     assert any(
-        isinstance(item, str)
-        and "raw_schema" in item.lower()
-        or "raw" in str(item).lower()
-        for item in result
+        isinstance(item, str) and "raw_schema" in item.lower() for item in result
     )
 
 
