@@ -1,6 +1,6 @@
 import * as utils from "./utils";
 
-const TEST_USER_DISPLAY_NAME = "jdoe";
+const TEST_USER_URN = "urn:li:corpuser:jdoe";
 const TEST_ASSET_NAME = "Baz Dashboard";
 const TEST_DOMAIN_URN = "urn:li:domain:testing";
 const TEST_SUBDOMAIN_NAME = "Subdomain";
@@ -8,25 +8,21 @@ const TEST_DATA_PRODUCT_NAME = "Testing";
 
 describe("summary tab - domain", () => {
   beforeEach(() => {
-    utils.setThemeV2AndSummaryTabFlags(true);
+    utils.setSummaryTabFlags(true);
     cy.login();
     utils.openDomainByUrn(TEST_DOMAIN_URN);
     utils.goToSummaryTab();
   });
 
-  it("domain - header section", () => {
+  it("summary tab", () => {
     utils.testPropertiesSection([
       { name: "Created", type: "CREATED" },
-      { name: "Owners", type: "OWNERS", value: TEST_USER_DISPLAY_NAME },
+      { name: "Owners", type: "OWNERS", dataTestId: `owner-${TEST_USER_URN}` },
     ]);
-  });
 
-  it("domain - description section", () => {
-    utils.testAboutSection();
-  });
+    utils.ensureAboutSectionIsVisible();
 
-  it("domain - modules section", () => {
-    const defaultModules = [
+    utils.testTemplateSection([
       {
         type: "assets",
         name: "Assets",
@@ -44,8 +40,6 @@ describe("summary tab - domain", () => {
         name: "Data Products",
         value: TEST_DATA_PRODUCT_NAME,
       },
-    ];
-
-    utils.testTemplateSection(defaultModules);
+    ]);
   });
 });

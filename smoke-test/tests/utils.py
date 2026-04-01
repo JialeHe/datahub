@@ -3,6 +3,7 @@ import logging
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse, urlunparse
 
 import click
 import click.testing
@@ -64,6 +65,24 @@ def get_root_urn():
 
 def get_gms_url():
     return env_vars.get_gms_url() or f"http://localhost:8080{get_gms_base_path()}"
+
+
+def get_gms_prometheus_base_url():
+    """Base URL for /actuator/prometheus.
+
+    Docker images default to management on :4319 while GMS HTTP stays on :8080; when the GMS URL
+    uses port 8080, assume Micrometer is on the same host at 4319 unless DATAHUB_GMS_MANAGEMENT_URL
+    is set. For a local GMS with Actuator on the main port only, set DATAHUB_GMS_MANAGEMENT_URL
+    to your GMS base URL.
+    """
+    mgmt = env_vars.get_gms_management_url()
+    if mgmt:
+        return mgmt.rstrip("/")
+    base = get_gms_url().rstrip("/")
+    parsed = urlparse(base)
+    if parsed.port == 8080 and parsed.hostname is not None:
+        return urlunparse((parsed.scheme, f"{parsed.hostname}:4319", "", "", "", ""))
+    return base
 
 
 def get_frontend_url():
@@ -152,6 +171,7 @@ def with_test_retry(
     return tenacity.retry(
         stop=tenacity.stop_after_attempt(retry_count),
         wait=tenacity.wait_fixed(sleep_sec),
+        reraise=True,
     )
 
 
@@ -277,7 +297,7 @@ def delete_urns_from_file(
     graph_client, filename: str, shared_data: bool = False
 ) -> None:
     if not env_utils.get_boolean_env_variable("CLEANUP_DATA", True):
-        print("Not cleaning data to save time")
+        logger.info("Not cleaning data to save time")
         return
 
     def delete(entry):
@@ -330,7 +350,7 @@ def create_datahub_step_state_aspect(
     username: str, onboarding_id: str
 ) -> Dict[str, Any]:
     entity_urn = f"urn:li:dataHubStepState:urn:li:corpuser:{username}-{onboarding_id}"
-    print(f"Creating dataHubStepState aspect for {entity_urn}")
+    logger.info(f"Creating dataHubStepState aspect for {entity_urn}")
     return {
         "auditHeader": None,
         "entityType": "dataHubStepState",
@@ -420,13 +440,14 @@ class TestSessionWrapper:
 
     def _wait(self, *args, **kwargs):
         if "/logIn" not in args[0]:
-            print("TestSessionWrapper sync wait.")
+            logger.info("TestSessionWrapper sync wait.")
             wait_for_writes_to_sync()
 
     @tenacity.retry(
         stop=tenacity.stop_after_attempt(10),
         wait=tenacity.wait_exponential(multiplier=1, min=4, max=30),
         retry=tenacity.retry_if_exception_type(Exception),
+        reraise=True,
     )
     def _generate_gms_token(self):
         actor_urn = self._upstream.cookies["actor"]

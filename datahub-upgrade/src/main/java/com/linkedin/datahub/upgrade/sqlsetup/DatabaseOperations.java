@@ -88,21 +88,32 @@ public interface DatabaseOperations {
   String createCdcUserSql(String cdcUser, String cdcPassword);
 
   /**
-   * Generate SQL for granting CDC privileges to a user.
+   * Generate SQL statements for granting CDC privileges to a user. Returns a list of individual SQL
+   * statements that can be executed separately.
    *
    * @param cdcUser the CDC username
    * @param databaseName the database name
-   * @return the SQL statement for granting CDC privileges
+   * @return list of SQL statements for granting CDC privileges
    */
-  String grantCdcPrivilegesSql(String cdcUser, String databaseName);
+  java.util.List<String> grantCdcPrivilegesSql(String cdcUser, String databaseName);
 
   /**
    * Generate SQL statements for creating the metadata_aspect_v2 table and its indexes. Returns a
    * list of individual SQL statements that can be executed separately.
    *
+   * @param createSchemaVersionIndex whether to include the schemaVersionIndex (controlled by
+   *     featureFlags.zduStage10)
    * @return list of SQL statements to create the table and indexes
    */
-  java.util.List<String> createTableSqlStatements();
+  java.util.List<String> createTableSqlStatements(boolean createSchemaVersionIndex);
+
+  /**
+   * Called after table creation to create any indexes that must run outside a transaction (e.g.
+   * CONCURRENTLY). Defaults to a no-op.
+   *
+   * @param connection open JDBC connection to the target database
+   */
+  default void postSetup(Connection connection) throws SQLException {}
 
   /**
    * Create a database if it doesn't exist.

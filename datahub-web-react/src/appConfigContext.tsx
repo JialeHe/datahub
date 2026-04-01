@@ -85,6 +85,7 @@ export const DEFAULT_APP_CONFIG = {
         showManageTags: false,
         showIntroducePage: false,
         showIngestionPageRedesign: false,
+        ingestionOnboardingRedesignV1: false,
         showLineageExpandMore: false,
         showDefaultExternalLinks: true,
         showStatsTabRedesign: false,
@@ -96,6 +97,10 @@ export const DEFAULT_APP_CONFIG = {
         assetSummaryPageV1: false,
         datasetSummaryPageV1: false,
         documentationFileUploadV1: false,
+        contextDocumentsEnabled: false,
+        hideLineageInSearchCards: false,
+        glossaryBasedPoliciesEnabled: false,
+        multipleDataProductsPerAsset: false,
     },
     chromeExtensionConfig: {
         enabled: false,

@@ -7,6 +7,7 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableMap;
 import com.linkedin.common.urn.Urn;
 import com.linkedin.metadata.config.StructuredPropertiesConfiguration;
+import com.linkedin.metadata.config.search.BuildIndicesConfiguration;
 import com.linkedin.metadata.config.search.ElasticSearchConfiguration;
 import com.linkedin.metadata.config.search.IndexConfiguration;
 import com.linkedin.metadata.search.elasticsearch.index.MappingsBuilder;
@@ -26,6 +27,7 @@ import io.github.resilience4j.retry.Retry;
 import io.github.resilience4j.retry.RetryConfig;
 import io.github.resilience4j.retry.RetryRegistry;
 import java.io.IOException;
+import java.net.SocketTimeoutException;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -60,6 +62,7 @@ import org.opensearch.action.admin.indices.settings.put.UpdateSettingsRequest;
 import org.opensearch.action.search.SearchRequest;
 import org.opensearch.action.search.SearchResponse;
 import org.opensearch.client.*;
+import org.opensearch.client.GetAliasesResponse;
 import org.opensearch.client.core.CountRequest;
 import org.opensearch.client.core.CountResponse;
 import org.opensearch.client.indices.CreateIndexRequest;
@@ -79,6 +82,7 @@ import org.opensearch.tasks.TaskInfo;
 
 @Slf4j
 public class ESIndexBuilder {
+
   //  this setting is not allowed to change as of now in AOS:
   // https://docs.aws.amazon.com/opensearch-service/latest/developerguide/supported-operations.html
   //  public static final String INDICES_MEMORY_INDEX_BUFFER_SIZE =
@@ -91,23 +95,28 @@ public class ESIndexBuilder {
   private static final String INDEX_NUMBER_OF_REPLICAS = "index." + NUMBER_OF_REPLICAS;
   private static final String NUMBER_OF_SHARDS = "number_of_shards";
   private static final String ORIGINALPREFIX = "original";
-  private static final Integer REINDEX_BATCHSIZE = 5000;
   private static final Float MINJVMHEAP = 10.F;
   // for debugging
   // private static final Float MINJVMHEAP = 0.1F;
 
   private final SearchClientShim<?> searchClient;
+
   @Getter @VisibleForTesting private final ElasticSearchConfiguration config;
+
   private final IndexConfiguration indexConfig;
+
   @Getter @VisibleForTesting private final StructuredPropertiesConfiguration structPropConfig;
+
   @Getter private final Map<String, Map<String, String>> indexSettingOverrides;
+
   @Getter @VisibleForTesting private final GitVersion gitVersion;
+
   private final OpenSearchJvmInfo jvminfo;
 
-  private static final RequestOptions REQUEST_OPTIONS =
-      RequestOptions.DEFAULT.toBuilder()
-          .setRequestConfig(RequestConfig.custom().setSocketTimeout(180 * 1000).build())
-          .build();
+  /**
+   * Extended socket timeout for slow operations (count, refresh, createIndex, reindex, listTasks).
+   */
+  private final RequestOptions requestOptionsLong;
 
   private final RetryRegistry retryRegistry;
   private static RetryRegistry deletionRetryRegistry;
@@ -129,6 +138,19 @@ public class ESIndexBuilder {
     this.indexSettingOverrides = indexSettingOverrides;
     this.gitVersion = gitVersion;
 
+    BuildIndicesConfiguration buildIndices =
+        Objects.requireNonNull(
+            elasticSearchConfiguration.getBuildIndices(), "buildIndices config is required");
+    int slowTimeoutSec =
+        buildIndices.getSlowOperationTimeoutSeconds() > 0
+            ? buildIndices.getSlowOperationTimeoutSeconds()
+            : BuildIndicesConfiguration.DEFAULT_SLOW_OPERATION_TIMEOUT_SECONDS;
+    this.requestOptionsLong =
+        RequestOptions.DEFAULT.toBuilder()
+            .setRequestConfig(
+                RequestConfig.custom().setSocketTimeout(slowTimeoutSec * 1000).build())
+            .build();
+
     // Create a RetryRegistry with a custom global configuration
     RetryConfig config =
         RetryConfig.custom()
@@ -138,6 +160,29 @@ public class ESIndexBuilder {
             .failAfterMaxAttempts(true)
             .build();
     this.retryRegistry = RetryRegistry.of(config);
+
+    int countRetryAttempts =
+        buildIndices.getCountRetryMaxAttempts() > 0
+            ? Math.max(1, buildIndices.getCountRetryMaxAttempts())
+            : BuildIndicesConfiguration.DEFAULT_COUNT_RETRY_MAX_ATTEMPTS;
+    int countRetryWaitSec =
+        buildIndices.getCountRetryWaitSeconds() > 0
+            ? buildIndices.getCountRetryWaitSeconds()
+            : BuildIndicesConfiguration.DEFAULT_COUNT_RETRY_WAIT_SECONDS;
+    RetryConfig countRetryConfig =
+        RetryConfig.custom()
+            .maxAttempts(countRetryAttempts)
+            .waitDuration(Duration.ofSeconds(countRetryWaitSec))
+            .retryOnException(
+                e ->
+                    e instanceof OpenSearchException
+                        || e instanceof SocketTimeoutException
+                        || (e.getCause() != null
+                            && (e.getCause() instanceof OpenSearchException
+                                || e.getCause() instanceof SocketTimeoutException)))
+            .failAfterMaxAttempts(true)
+            .build();
+    this.retryRegistry.addConfiguration("countRetry", countRetryConfig);
 
     // Configure delete retry behavior
     // this is hitting this issue: https://github.com/resilience4j/resilience4j/issues/1404
@@ -238,7 +283,6 @@ public class ESIndexBuilder {
       @Nonnull SettingsBuilder settingsBuilder,
       @Nonnull MappingsBuilder mappingsBuilder,
       Collection<Pair<Urn, StructuredPropertyDefinition>> properties) {
-
     Collection<MappingsBuilder.IndexMapping> indexMappings =
         mappingsBuilder.getIndexMappings(opContext, properties);
 
@@ -312,8 +356,9 @@ public class ESIndexBuilder {
     baseSettings.put(NUMBER_OF_REPLICAS, indexConfig.getNumReplicas());
     baseSettings.put(
         REFRESH_INTERVAL, String.format("%ss", indexConfig.getRefreshIntervalSeconds()));
-    // use zstd in OS only, in ES we can use it in the future with best_compression
-    if (isOpenSearch29OrHigher()) {
+    // Use zstd in OS only and only if KNN is not enabled (codec settings conflict with KNN)
+    // In ES we can use it in the future with best_compression
+    if (isOpenSearch29OrHigher() && !isKnnEnabled(baseSettings)) {
       baseSettings.put("codec", "zstd_no_dict");
     }
     baseSettings.putAll(indexSettingOverrides.getOrDefault(indexName, Map.of()));
@@ -321,8 +366,7 @@ public class ESIndexBuilder {
     builder.targetSettings(targetSetting);
 
     // Check if index exists
-    boolean exists =
-        searchClient.indexExists(new GetIndexRequest(indexName), RequestOptions.DEFAULT);
+    boolean exists = searchClient.indexExists(new GetIndexRequest(indexName), requestOptionsLong);
     builder.exists(exists);
 
     // If index doesn't exist, no reindex
@@ -333,7 +377,7 @@ public class ESIndexBuilder {
 
     Settings currentSettings =
         searchClient
-            .getIndexSettings(new GetSettingsRequest().indices(indexName), RequestOptions.DEFAULT)
+            .getIndexSettings(new GetSettingsRequest().indices(indexName), requestOptionsLong)
             .getIndexToSettings()
             .values()
             .iterator()
@@ -342,7 +386,7 @@ public class ESIndexBuilder {
 
     Map<String, Object> currentMappings =
         searchClient
-            .getIndexMapping(new GetMappingsRequest().indices(indexName), RequestOptions.DEFAULT)
+            .getIndexMapping(new GetMappingsRequest().indices(indexName), requestOptionsLong)
             .mappings()
             .values()
             .stream()
@@ -359,10 +403,13 @@ public class ESIndexBuilder {
     return builder.build();
   }
 
+  private static boolean isKnnEnabled(Map<String, Object> baseSettings) {
+    return baseSettings.get("knn") == Boolean.TRUE;
+  }
+
   @SuppressWarnings("unchecked")
   private void mergeStructuredPropertyMappings(
       Map<String, Object> targetMappings, Map<String, Object> currentMappings) {
-
     // Extract current structured property mapping (entire object, not just properties)
     Map<String, Object> currentStructuredPropertyMapping =
         (Map<String, Object>)
@@ -395,7 +442,6 @@ public class ESIndexBuilder {
   // ES8+ includes additional top level fields that we don't want to wipe out or detect as
   // differences
   private void mergeTopLevelFields(Map<String, Object> target, Map<String, Object> current) {
-
     current.entrySet().stream()
         .filter(entry -> !PROPERTIES.equals(entry.getKey())) // Skip properties field
         .forEach(entry -> target.putIfAbsent(entry.getKey(), entry.getValue()));
@@ -403,7 +449,6 @@ public class ESIndexBuilder {
 
   @SuppressWarnings("unchecked")
   private void mergeStructuredProperties(Map<String, Object> target, Map<String, Object> current) {
-
     Map<String, Object> currentProperties =
         (Map<String, Object>) current.getOrDefault(PROPERTIES, new HashMap<>());
 
@@ -458,7 +503,7 @@ public class ESIndexBuilder {
         request.settings(indexSettings);
 
         boolean ack =
-            searchClient.updateIndexSettings(request, RequestOptions.DEFAULT).isAcknowledged();
+            searchClient.updateIndexSettings(request, requestOptionsLong).isAcknowledged();
         log.info(
             "Updated index {} with new settings. Settings: {}, Acknowledged: {}",
             indexState.name(),
@@ -491,14 +536,14 @@ public class ESIndexBuilder {
     result.put("changed", false);
     result.put("dryRun", dryRun);
     GetIndexRequest getIndexRequest = new GetIndexRequest(indexName);
-    GetIndexResponse response = searchClient.getIndex(getIndexRequest, RequestOptions.DEFAULT);
+    GetIndexResponse response = searchClient.getIndex(getIndexRequest, requestOptionsLong);
     Map<String, Settings> indexToSettings = response.getSettings();
     Optional<String> key = indexToSettings.keySet().stream().findFirst();
     String thekey = key.get();
     Settings indexSettings = indexToSettings.get(thekey);
     int replicaCount = Integer.parseInt(indexSettings.get("index.number_of_replicas", "1"));
     CountRequest countRequest = new CountRequest(indexName);
-    CountResponse countResponse = searchClient.count(countRequest, RequestOptions.DEFAULT);
+    CountResponse countResponse = searchClient.count(countRequest, requestOptionsLong);
     long docCount = countResponse.getCount();
     result.put("currentReplicas", replicaCount);
     result.put("documentCount", docCount);
@@ -510,7 +555,7 @@ public class ESIndexBuilder {
         Settings.Builder settingsBuilder =
             Settings.builder().put("index.number_of_replicas", indexConfig.getNumReplicas());
         updateSettingsRequest.settings(settingsBuilder);
-        searchClient.updateIndexSettings(updateSettingsRequest, RequestOptions.DEFAULT);
+        searchClient.updateIndexSettings(updateSettingsRequest, requestOptionsLong);
       }
       result.put("changed", true);
       result.put("action", "Increase replicas from 0 to " + indexConfig.getNumReplicas());
@@ -535,19 +580,19 @@ public class ESIndexBuilder {
     result.put("changed", false);
     result.put("dryRun", dryRun);
     GetIndexRequest getIndexRequest = new GetIndexRequest(indexName);
-    if (!searchClient.indexExists(getIndexRequest, RequestOptions.DEFAULT)) {
+    if (!searchClient.indexExists(getIndexRequest, requestOptionsLong)) {
       result.put("skipped", true);
       result.put("reason", "Index does not exist");
       return result;
     }
-    GetIndexResponse response = searchClient.getIndex(getIndexRequest, RequestOptions.DEFAULT);
+    GetIndexResponse response = searchClient.getIndex(getIndexRequest, requestOptionsLong);
     Map<String, Settings> indexToSettings = response.getSettings();
     Optional<String> key = indexToSettings.keySet().stream().findFirst();
     String thekey = key.get();
     Settings indexSettings = indexToSettings.get(thekey);
     int replicaCount = Integer.parseInt(indexSettings.get("index.number_of_replicas", "1"));
     CountRequest countRequest = new CountRequest(indexName);
-    CountResponse countResponse = searchClient.count(countRequest, RequestOptions.DEFAULT);
+    CountResponse countResponse = searchClient.count(countRequest, requestOptionsLong);
     long docCount = countResponse.getCount();
     result.put("currentReplicas", replicaCount);
     result.put("documentCount", docCount);
@@ -558,7 +603,7 @@ public class ESIndexBuilder {
         UpdateSettingsRequest updateSettingsRequest = new UpdateSettingsRequest(indexName);
         Settings.Builder settingsBuilder = Settings.builder().put("index.number_of_replicas", 0);
         updateSettingsRequest.settings(settingsBuilder);
-        searchClient.updateIndexSettings(updateSettingsRequest, RequestOptions.DEFAULT);
+        searchClient.updateIndexSettings(updateSettingsRequest, requestOptionsLong);
       }
       result.put("changed", true);
       result.put("action", "Decrease replicas from " + replicaCount + " to 0");
@@ -633,7 +678,7 @@ public class ESIndexBuilder {
       log.info("Updating index {} mappings in place.", indexState.name());
       PutMappingRequest request =
           new PutMappingRequest(indexState.name()).source(indexState.targetMappings());
-      searchClient.putIndexMapping(request, RequestOptions.DEFAULT);
+      searchClient.putIndexMapping(request, requestOptionsLong);
       log.info("Updated index {} with new mappings", indexState.name());
     } else {
       if (!suppressError) {
@@ -652,7 +697,7 @@ public class ESIndexBuilder {
       ReindexConfig config)
       throws Exception {
     GetAliasesResponse aliasesResponse =
-        searchClient.getIndexAliases(new GetAliasesRequest(indexAlias), RequestOptions.DEFAULT);
+        searchClient.getIndexAliases(new GetAliasesRequest(indexAlias), requestOptionsLong);
     if (aliasesResponse.getAliases().isEmpty()) {
       throw new IllegalArgumentException(
           String.format("Input to reindexInPlaceAsync should be an alias. %s is not", indexAlias));
@@ -661,7 +706,8 @@ public class ESIndexBuilder {
     // Point alias at new index
     String nextIndexName = getNextIndexName(indexAlias, System.currentTimeMillis());
     createIndex(nextIndexName, config);
-    renameReindexedIndices(searchClient, indexAlias, null, nextIndexName, false);
+    renameReindexedIndices(
+        searchClient, indexAlias, null, nextIndexName, false, requestOptionsLong);
     int targetShards =
         Optional.ofNullable(config.targetSettings().get(NUMBER_OF_SHARDS))
             .map(Object::toString)
@@ -722,7 +768,10 @@ public class ESIndexBuilder {
       } else {
         // Create new index
         createIndex(tempIndexName, indexState);
-        long curDocCount = getCount(indexState.name());
+        long curDocCount =
+            retryRegistry
+                .retry("retryCurDocCount", "countRetry")
+                .executeCheckedSupplier(() -> getCount(indexState.name()));
         if (curDocCount == 0) {
           reindexTaskCompleted = true;
           result = ReindexResult.REINDEXED_SKIPPED_0DOCS;
@@ -733,7 +782,7 @@ public class ESIndexBuilder {
               submitReindex(
                   new String[] {indexState.name()},
                   tempIndexName,
-                  REINDEX_BATCHSIZE,
+                  getReindexBatchSize(),
                   null,
                   null,
                   targetShards);
@@ -784,10 +833,9 @@ public class ESIndexBuilder {
               tempIndexName);
           reindexTaskCompleted = true;
           break;
-
         } else {
           float progressPercentage =
-              100 * (1.0f * documentCounts.getSecond()) / documentCounts.getFirst();
+              (100 * (1.0f * documentCounts.getSecond())) / documentCounts.getFirst();
           log.warn(
               "Task: {} - Document counts do not match {} != {}. Complete: {}%. Estimated time remaining: {} minutes",
               parentTaskId,
@@ -797,16 +845,18 @@ public class ESIndexBuilder {
               estimatedMinutesRemaining);
 
           long lastUpdateDelta = System.currentTimeMillis() - documentCountsLastUpdated;
-          if (lastUpdateDelta > (300 * 1000)) {
+          int noProgressRetryMinutes = getReindexNoProgressRetryMinutes();
+          if (lastUpdateDelta > (noProgressRetryMinutes * 60L * 1000)) {
             if (reindexCount <= indexConfig.getNumRetries()) {
               log.warn(
-                  "No change in index count after 5 minutes, re-triggering reindex #{}.",
+                  "No change in index count after {} minutes, re-triggering reindex #{}.",
+                  noProgressRetryMinutes,
                   reindexCount);
               reinfo =
                   submitReindex(
                       new String[] {indexState.name()},
                       tempIndexName,
-                      REINDEX_BATCHSIZE,
+                      getReindexBatchSize(),
                       null,
                       null,
                       targetShards);
@@ -857,7 +907,7 @@ public class ESIndexBuilder {
           indexState.name(),
           tempIndexName,
           e.toString());
-      deleteActionWithRetry(searchClient, tempIndexName);
+      deleteActionWithRetry(searchClient, tempIndexName, requestOptionsLong);
       throw e;
     }
 
@@ -870,7 +920,12 @@ public class ESIndexBuilder {
       setReindexOptimalSettingsUndo(tempIndexName, targetReplicas, targetRefresh, reinfo);
     }
     renameReindexedIndices(
-        searchClient, indexState.name(), indexState.indexPattern(), tempIndexName, true);
+        searchClient,
+        indexState.name(),
+        indexState.indexPattern(),
+        tempIndexName,
+        true,
+        requestOptionsLong);
     log.info("Finished setting up {}", indexState.name());
     return result;
   }
@@ -882,7 +937,8 @@ public class ESIndexBuilder {
    * @param tempIndexName Index name to delete
    * @throws Exception If deletion ultimately fails after all retries
    */
-  private static void deleteActionWithRetry(SearchClientShim<?> searchClient, String tempIndexName)
+  private static void deleteActionWithRetry(
+      SearchClientShim<?> searchClient, String tempIndexName, RequestOptions requestOptions)
       throws Exception {
     Retry retry = deletionRetryRegistry.retry("elasticsearchDeleteIndex");
     // Wrap the delete operation in a Callable
@@ -892,14 +948,13 @@ public class ESIndexBuilder {
             log.info("Attempting to delete index: {}", tempIndexName);
             // Check if index exists before deleting
             boolean indexExists =
-                searchClient.indexExists(
-                    new GetIndexRequest(tempIndexName), RequestOptions.DEFAULT);
+                searchClient.indexExists(new GetIndexRequest(tempIndexName), requestOptions);
             if (indexExists) {
               // Configure delete request with timeout
               DeleteIndexRequest request = new DeleteIndexRequest(tempIndexName);
               request.timeout(TimeValue.timeValueSeconds(30));
               // Execute delete
-              searchClient.deleteIndex(request, RequestOptions.DEFAULT);
+              searchClient.deleteIndex(request, requestOptions);
               log.info("Successfully deleted index: {}", tempIndexName);
             } else {
               log.info("Index {} does not exist, no need to delete", tempIndexName);
@@ -917,7 +972,8 @@ public class ESIndexBuilder {
       SearchClientShim<?> searchClient,
       AliasActions removeAction,
       AliasActions addAction,
-      String tempIndexName)
+      String tempIndexName,
+      RequestOptions requestOptions)
       throws Exception {
     Retry retry = deletionRetryRegistry.retry("elasticsearchDeleteIndex");
     Callable<Void> deleteOperation =
@@ -930,7 +986,7 @@ public class ESIndexBuilder {
                 new IndicesAliasesRequest().addAliasAction(removeAction).addAliasAction(addAction);
             request.timeout(TimeValue.timeValueSeconds(30));
             // Execute delete
-            searchClient.updateIndexAliases(request, RequestOptions.DEFAULT);
+            searchClient.updateIndexAliases(request, requestOptions);
             log.info("Successfully deleted index/indices(behind alias): {}", tempIndexName);
             return null;
           } catch (Exception e) {
@@ -957,6 +1013,18 @@ public class ESIndexBuilder {
           e.getMessage());
       throw e;
     }
+  }
+
+  private int getReindexBatchSize() {
+    return Objects.requireNonNull(
+        config.getBuildIndices().getReindexBatchSize(),
+        "elasticsearch.buildIndices.reindexBatchSize must be set (e.g. in application.yaml)");
+  }
+
+  private int getReindexNoProgressRetryMinutes() {
+    return Objects.requireNonNull(
+        config.getBuildIndices().getReindexNoProgressRetryMinutes(),
+        "elasticsearch.buildIndices.reindexNoProgressRetryMinutes must be set (e.g. in application.yaml)");
   }
 
   private Map<String, Object> setReindexOptimalSettings(String tempIndexName, int targetShards)
@@ -990,11 +1058,12 @@ public class ESIndexBuilder {
     //    }
     // calculate best slices number..., by def == primary shards
     int slices = targetShards;
-    // but if too large, tone it done
-    // we have max of 60 shards as of now in some huge index, and this sounds fine regarding nb of
-    // slices, ES sets the max of slices at 1024, so hour number is quite conservative, just cap it
-    // lower, like 256
-    slices = Math.min(256, slices);
+    // but if too large, tone it down; ES sets the max of slices at 1024
+    int maxSlices =
+        Objects.requireNonNull(
+            config.getBuildIndices().getReindexMaxSlices(),
+            "elasticsearch.buildIndices.reindexMaxSlices must be set (e.g. in application.yaml)");
+    slices = Math.min(maxSlices, slices);
     res.put("optimalSlices", slices);
     return res;
   }
@@ -1026,14 +1095,15 @@ public class ESIndexBuilder {
       String originalName,
       @Nullable String pattern,
       String newName,
-      boolean deleteOld)
+      boolean deleteOld,
+      RequestOptions requestOptions)
       throws Exception {
     GetAliasesRequest getAliasesRequest = new GetAliasesRequest(originalName);
     if (pattern != null) {
       getAliasesRequest.indices(pattern);
     }
     GetAliasesResponse aliasesResponse =
-        searchClient.getIndexAliases(getAliasesRequest, RequestOptions.DEFAULT);
+        searchClient.getIndexAliases(getAliasesRequest, requestOptions);
 
     // If not aliased, delete the original index
     final Collection<String> aliasedIndexDelete;
@@ -1053,7 +1123,20 @@ public class ESIndexBuilder {
         deleteOld ? AliasActions.removeIndex() : AliasActions.remove().alias(originalName);
     removeAction.indices(aliasedIndexDelete.toArray(new String[0]));
     AliasActions addAction = AliasActions.add().alias(originalName).index(newName);
-    updateAliasWithRetry(searchClient, removeAction, addAction, delinfo);
+    updateAliasWithRetry(searchClient, removeAction, addAction, delinfo, requestOptions);
+  }
+
+  private static RequestOptions buildRequestOptionsLong(
+      @Nullable ElasticSearchConfiguration elasticSearchConfiguration) {
+    int timeoutSec = BuildIndicesConfiguration.DEFAULT_SLOW_OPERATION_TIMEOUT_SECONDS;
+    if (elasticSearchConfiguration != null
+        && elasticSearchConfiguration.getBuildIndices() != null
+        && elasticSearchConfiguration.getBuildIndices().getSlowOperationTimeoutSeconds() > 0) {
+      timeoutSec = elasticSearchConfiguration.getBuildIndices().getSlowOperationTimeoutSeconds();
+    }
+    return RequestOptions.DEFAULT.toBuilder()
+        .setRequestConfig(RequestConfig.custom().setSocketTimeout(timeoutSec * 1000).build())
+        .build();
   }
 
   private String getIndexSetting(String indexName, String setting) throws IOException {
@@ -1062,7 +1145,7 @@ public class ESIndexBuilder {
             .indices(indexName)
             .includeDefaults(true) // Include default settings if not explicitly set
             .names(setting); // Optionally filter to just the setting we want
-    GetSettingsResponse response = searchClient.getIndexSettings(request, RequestOptions.DEFAULT);
+    GetSettingsResponse response = searchClient.getIndexSettings(request, requestOptionsLong);
     String indexSetting = response.getSetting(indexName, setting);
     return indexSetting;
   }
@@ -1071,7 +1154,7 @@ public class ESIndexBuilder {
     UpdateSettingsRequest request = new UpdateSettingsRequest(indexName);
     Settings settings = Settings.builder().put(setting, value).build();
     request.settings(settings);
-    searchClient.updateIndexSettings(request, RequestOptions.DEFAULT);
+    searchClient.updateIndexSettings(request, requestOptionsLong);
   }
 
   /**
@@ -1107,7 +1190,7 @@ public class ESIndexBuilder {
     // make sure we get all docs from source
     searchClient.refreshIndex(
         new org.opensearch.action.admin.indices.refresh.RefreshRequest(sourceIndices),
-        RequestOptions.DEFAULT);
+        requestOptionsLong);
     Map<String, Object> reindexInfo = setReindexOptimalSettings(destinationIndex, targetShards);
     ReindexRequest reindexRequest =
         new ReindexRequest()
@@ -1125,8 +1208,12 @@ public class ESIndexBuilder {
       reindexRequest.setSourceQuery(sourceFilterQuery);
     }
     RequestOptions requestOptions =
-        ESUtils.buildReindexTaskRequestOptions(
-            gitVersion.getVersion(), sourceIndices[0], destinationIndex);
+        requestOptionsLong.toBuilder()
+            .addHeader(
+                ESUtils.OPAQUE_ID_HEADER,
+                ESUtils.getOpaqueIdHeaderValue(
+                    gitVersion.getVersion(), sourceIndices[0], destinationIndex))
+            .build();
     String reindexTask = searchClient.submitReindexTask(reindexRequest, requestOptions);
     reindexInfo.put("taskId", reindexTask);
     return reindexInfo;
@@ -1143,11 +1230,11 @@ public class ESIndexBuilder {
       // Check if reindex succeeded by comparing document counts
       originalCount =
           retryRegistry
-              .retry("retrySourceIndexCount")
+              .retry("retrySourceIndexCount", "countRetry")
               .executeCheckedSupplier(() -> getCount(sourceIndex));
       reindexedCount =
           retryRegistry
-              .retry("retryDestinationIndexCount")
+              .retry("retryDestinationIndexCount", "countRetry")
               .executeCheckedSupplier(() -> getCount(destinationIndex));
       if (originalCount == reindexedCount) {
         break;
@@ -1174,7 +1261,7 @@ public class ESIndexBuilder {
         () -> {
           ListTasksRequest listTasksRequest = new ListTasksRequest().setDetailed(true);
           List<TaskInfo> taskInfos =
-              searchClient.listTasks(listTasksRequest, REQUEST_OPTIONS).getTasks();
+              searchClient.listTasks(listTasksRequest, requestOptionsLong).getTasks();
           return taskInfos.stream()
               .filter(
                   info ->
@@ -1188,7 +1275,6 @@ public class ESIndexBuilder {
 
   private void diff(String indexA, String indexB, long maxDocs) {
     if (maxDocs <= 100) {
-
       SearchSourceBuilder searchSourceBuilder = new SearchSourceBuilder();
       searchSourceBuilder.size(100);
       searchSourceBuilder.sort(SortBuilders.fieldSort("_id").order(SortOrder.ASC));
@@ -1199,8 +1285,8 @@ public class ESIndexBuilder {
       indexBRequest.source(searchSourceBuilder);
 
       try {
-        SearchResponse responseA = searchClient.search(indexARequest, RequestOptions.DEFAULT);
-        SearchResponse responseB = searchClient.search(indexBRequest, RequestOptions.DEFAULT);
+        SearchResponse responseA = searchClient.search(indexARequest, requestOptionsLong);
+        SearchResponse responseB = searchClient.search(indexBRequest, requestOptionsLong);
 
         Set<String> actual =
             Arrays.stream(responseB.getHits().getHits())
@@ -1223,21 +1309,108 @@ public class ESIndexBuilder {
     // we need to refreshIndex cause we are reindexing with refresh_interval=-1
     searchClient.refreshIndex(
         new org.opensearch.action.admin.indices.refresh.RefreshRequest(indexName),
-        RequestOptions.DEFAULT);
+        requestOptionsLong);
     return searchClient
-        .count(
-            new CountRequest(indexName).query(QueryBuilders.matchAllQuery()),
-            RequestOptions.DEFAULT)
+        .count(new CountRequest(indexName).query(QueryBuilders.matchAllQuery()), requestOptionsLong)
         .getCount();
+  }
+
+  /**
+   * Check if an index exists.
+   *
+   * @param indexName The name of the index to check
+   * @return true if the index exists, false otherwise
+   * @throws IOException If there's an error communicating with Elasticsearch
+   */
+  public boolean indexExists(@Nonnull String indexName) throws IOException {
+    return searchClient.indexExists(new GetIndexRequest(indexName), requestOptionsLong);
+  }
+
+  /**
+   * Refresh an index to make all operations performed since the last refresh available for search.
+   *
+   * @param indexName The name of the index to refresh
+   * @throws IOException If there's an error communicating with Elasticsearch
+   */
+  public void refreshIndex(@Nonnull String indexName) throws IOException {
+    searchClient.refreshIndex(
+        new org.opensearch.action.admin.indices.refresh.RefreshRequest(indexName),
+        requestOptionsLong);
+  }
+
+  /**
+   * Delete an index. Handles both aliases and concrete indices.
+   *
+   * @param indexName The name of the index or alias to delete
+   * @throws IOException If there's an error communicating with Elasticsearch
+   */
+  public void deleteIndex(@Nonnull String indexName) throws IOException {
+    IndexDeletionUtils.IndexResolutionResult resolution =
+        IndexDeletionUtils.resolveIndexForDeletion(searchClient, indexName);
+    if (resolution == null) {
+      log.debug("Index {} does not exist, nothing to delete", indexName);
+      return;
+    }
+
+    for (String concreteIndex : resolution.indicesToDelete()) {
+      try {
+        deleteActionWithRetry(searchClient, concreteIndex, requestOptionsLong);
+      } catch (Exception e) {
+        throw new IOException("Failed to delete index: " + concreteIndex, e);
+      }
+    }
   }
 
   private void createIndex(String indexName, ReindexConfig state) throws IOException {
     log.info("Index {} does not exist. Creating", indexName);
+    Map<String, Object> mappings = state.targetMappings();
+    Map<String, Object> settings = state.targetSettings();
+    log.info("Creating index {} with targetMappings: {}", indexName, mappings);
+    log.info("Creating index {} with targetSettings: {}", indexName, settings);
+
     CreateIndexRequest createIndexRequest = new CreateIndexRequest(indexName);
-    createIndexRequest.mapping(state.targetMappings());
-    createIndexRequest.settings(state.targetSettings());
-    searchClient.createIndex(createIndexRequest, RequestOptions.DEFAULT);
+    createIndexRequest.mapping(mappings);
+    createIndexRequest.settings(settings);
+    boolean createIndexRetryEnabled =
+        config.getBuildIndices() == null || config.getBuildIndices().isCreateIndexRetryEnabled();
+    try {
+      searchClient.createIndex(createIndexRequest, requestOptionsLong);
+    } catch (IOException e) {
+      // Timeout or connection error may mean the index was created; check before retrying
+      if (searchClient.indexExists(new GetIndexRequest(indexName), requestOptionsLong)) {
+        log.info(
+            "Create index {} timed out or failed but index exists, proceeding: {}",
+            indexName,
+            e.getMessage());
+        return;
+      }
+      if (createIndexRetryEnabled) {
+        log.warn("Create index {} failed ({}), retrying once", indexName, e.getMessage());
+        searchClient.createIndex(createIndexRequest, requestOptionsLong);
+      } else {
+        throw e;
+      }
+    }
     log.info("Created index {}", indexName);
+  }
+
+  /**
+   * Efficiently clear an index by deleting it and recreating it with the same configuration. This
+   * is much more efficient than deleting all documents using deleteByQuery.
+   *
+   * @param indexName The name of the index to clear (can be an alias or concrete index)
+   * @param config The ReindexConfig containing mappings and settings for the index
+   * @throws IOException If the deletion or creation fails
+   */
+  public void clearIndex(String indexName, ReindexConfig config) throws IOException {
+    deleteIndex(indexName);
+    log.info("Recreating index {} after clearing", indexName);
+    createIndex(indexName, config);
+    if (!indexExists(indexName)) {
+      throw new IOException("Index " + indexName + " was not successfully created after clearing!");
+    }
+    refreshIndex(indexName);
+    log.info("Successfully cleared and recreated index {}", indexName);
   }
 
   public static void cleanOrphanedIndices(
@@ -1250,12 +1423,13 @@ public class ESIndexBuilder {
         esConfig.getBuildIndices().getRetentionValue(),
         esConfig.getBuildIndices().getRetentionUnit());
 
+    RequestOptions requestOptions = buildRequestOptionsLong(esConfig);
     getOrphanedIndices(searchClient, esConfig, indexState)
         .forEach(
             orphanIndex -> {
               log.warn("Deleting orphan index {}.", orphanIndex);
               try {
-                deleteActionWithRetry(searchClient, orphanIndex);
+                deleteActionWithRetry(searchClient, orphanIndex, requestOptions);
               } catch (Exception e) {
                 throw new RuntimeException(e);
               }
@@ -1267,6 +1441,7 @@ public class ESIndexBuilder {
       ElasticSearchConfiguration esConfig,
       ReindexConfig indexState) {
     List<String> orphanedIndices = new ArrayList<>();
+    RequestOptions requestOptions = buildRequestOptionsLong(esConfig);
     try {
       Date retentionDate =
           Date.from(
@@ -1278,7 +1453,7 @@ public class ESIndexBuilder {
 
       GetIndexResponse response =
           searchClient.getIndex(
-              new GetIndexRequest(indexState.indexCleanPattern()), RequestOptions.DEFAULT);
+              new GetIndexRequest(indexState.indexCleanPattern()), requestOptions);
 
       for (String index : response.getIndices()) {
         var creationDateStr = response.getSetting(index, "index.creation_date");

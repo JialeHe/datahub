@@ -99,6 +99,7 @@ public class SearchTestUtils {
                           .maxThreads(1)
                           .queryOptimization(true)
                           .pointInTimeCreationEnabled(true) // Enable PIT for graph queries
+                          .sliceFutureDrainTimeoutSeconds(2)
                           .build())
                   .build())
           .bulkProcessor(BulkProcessorConfiguration.builder().numRetries(1).build())
@@ -128,7 +129,13 @@ public class SearchTestUtils {
                   .minSearchFilterLength(3)
                   .build())
           .buildIndices(
-              BuildIndicesConfiguration.builder().reindexOptimizationEnabled(true).build())
+              BuildIndicesConfiguration.builder()
+                  .reindexOptimizationEnabled(true)
+                  .reindexBatchSize(5000)
+                  .reindexMaxSlices(256)
+                  .reindexNoProgressRetryMinutes(5)
+                  .createIndexRetryEnabled(true)
+                  .build())
           .entityIndex(
               EntityIndexConfiguration.builder()
                   .v2(EntityIndexVersionConfiguration.builder().enabled(true).cleanup(true).build())
@@ -155,17 +162,19 @@ public class SearchTestUtils {
           .build();
 
   // Configuration with PIT enabled for search entities (for tests that specifically need PIT)
-  public static ElasticSearchConfiguration TEST_OS_SEARCH_CONFIG_WITH_PIT =
-      BASE_TEST_CONFIG.toBuilder()
-          .search(
-              BASE_TEST_CONFIG.getSearch().toBuilder()
-                  .pointInTimeCreationEnabled(true) // Enable PIT for search entities
-                  .graph(
-                      BASE_TEST_CONFIG.getSearch().getGraph().toBuilder()
-                          .pointInTimeCreationEnabled(true) // Enable graph PIT
-                          .build())
-                  .build())
-          .build();
+  public static ElasticSearchConfiguration getTestOsSearchConfigWithPit(
+      SearchConfiguration searchConfiguration) {
+    return BASE_TEST_CONFIG.toBuilder()
+        .search(
+            searchConfiguration.toBuilder()
+                .pointInTimeCreationEnabled(true) // Enable PIT for search entities
+                .graph(
+                    searchConfiguration.getGraph().toBuilder()
+                        .pointInTimeCreationEnabled(true) // Enable graph PIT
+                        .build())
+                .build())
+        .build();
+  }
 
   public static ElasticSearchConfiguration TEST_ES_SEARCH_CONFIG =
       TEST_OS_SEARCH_CONFIG.toBuilder().build();
@@ -417,6 +426,11 @@ public class SearchTestUtils {
           @Override
           public DataHubAppConfiguration getDataHubAppConfig() {
             return new DataHubAppConfiguration();
+          }
+
+          @Override
+          public int getMaxParentDepth() {
+            return 50;
           }
         });
   }
