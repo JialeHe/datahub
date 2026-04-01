@@ -159,7 +159,7 @@ def test_core_ingest(pytestconfig: pytest.Config, tmp_path: Path) -> None:
             }
         )
         pipeline.run()
-        pipeline.raise_from_status(raise_warnings=False)
+        pipeline.raise_from_status()
 
         mce_helpers.check_golden_file(
             pytestconfig,
