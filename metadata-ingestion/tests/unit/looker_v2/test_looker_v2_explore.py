@@ -65,6 +65,7 @@ def _make_measure(name: str) -> MagicMock:
     field.label_short = None
     field.type = "count"
     field.description = ""
+    field.dimension_group = None
     field.tags = []
     field.field_group_label = None
     return field
@@ -123,6 +124,8 @@ class TestGetExploreUpstreamViewUrns:
         urns = processor._get_explore_upstream_view_urns(explore, "my_model")
 
         assert len(urns) == 2
+        urn_strings = [str(u) for u in urns]
+        assert all("test_project.some_view" in u for u in urn_strings)
 
     def test_explore_name_used_as_base_view_when_view_name_matches(self) -> None:
         processor = _make_processor()
@@ -131,3 +134,4 @@ class TestGetExploreUpstreamViewUrns:
         urns = processor._get_explore_upstream_view_urns(explore, "my_model")
 
         assert len(urns) == 1
+        assert "test_project.some_view" in str(urns[0])
