@@ -29,11 +29,13 @@ class LookerV2SourceReport(LookerDashboardSourceReport):
 
     charts_discovered: int = 0
     charts_scanned: int = 0
+    charts_dropped: int = 0  # Filtered by chart_pattern
 
     looks_discovered: int = 0
     # looks_scanned: inherited from LookerDashboardSourceReport
 
     explores_discovered: int = 0
+    explores_skipped: int = 0  # Skipped because not referenced by any dashboard/look
     # explores_scanned: inherited from LookerDashboardSourceReport
 
     models_discovered: int = 0
@@ -182,6 +184,8 @@ class LookerV2SourceReport(LookerDashboardSourceReport):
             total = sum(self.stage_timings_seconds.values())
             lines = [
                 f"  {name}: {secs:.3f}s ({100 * secs / total:.1f}%)"
+                if total > 0
+                else f"  {name}: {secs:.3f}s"
                 for name, secs in sorted(
                     self.stage_timings_seconds.items(), key=lambda x: -x[1]
                 )
