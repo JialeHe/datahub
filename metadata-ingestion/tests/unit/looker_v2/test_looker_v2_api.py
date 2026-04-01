@@ -17,6 +17,9 @@ from datahub.ingestion.source.looker_v2.looker_v2_context import LookerV2Context
 from datahub.ingestion.source.looker_v2.looker_v2_dashboard_processor import (
     LookerDashboardProcessor,
 )
+from datahub.ingestion.source.looker_v2.looker_v2_explore_processor import (
+    LookerExploreProcessor,
+)
 from datahub.ingestion.source.looker_v2.looker_v2_folder_processor import (
     LookerFolderProcessor,
 )
@@ -386,3 +389,40 @@ class TestUsageExtractor:
         extractor = LookerUsageExtractor(ctx, MagicMock())
         workunits = list(extractor.process())
         assert workunits == []
+
+
+class TestExploreProcessor:
+    def _make_processor(
+        self, model_registry: dict, reachable_explores: dict
+    ) -> LookerExploreProcessor:
+        config = MagicMock()
+        config.model_pattern.allowed.return_value = True
+        config.explore_pattern.allowed.return_value = True
+        config.emit_used_explores_only = True
+        config.max_concurrent_requests = 1
+        config.project_name = None
+        config.base_folder = None
+        ctx = LookerV2Context(
+            config=config,
+            looker_api=MagicMock(),
+            reporter=MagicMock(),
+            pipeline_ctx=MagicMock(),
+            platform="looker",
+            model_registry=model_registry,
+            reachable_explores=reachable_explores,
+        )
+        return LookerExploreProcessor(ctx)
+
+    def test_unreachable_explore_skipped_when_flag_on(self) -> None:
+        model = MagicMock()
+        explore = MagicMock()
+        explore.name = "orders"
+        model.explores = [explore]
+        proc = self._make_processor(
+            model_registry={"my_model": model},
+            reachable_explores={},  # orders not in reachable
+        )
+        proc._ctx.reporter.explores_skipped = 0
+        workunits = list(proc.process())
+        assert workunits == []
+        assert proc._ctx.reporter.explores_skipped == 1

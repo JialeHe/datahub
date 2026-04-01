@@ -85,6 +85,9 @@ from datahub.ingestion.source.looker_v2.looker_v2_context import LookerV2Context
 from datahub.ingestion.source.looker_v2.looker_v2_dashboard_processor import (
     LookerDashboardProcessor,
 )
+from datahub.ingestion.source.looker_v2.looker_v2_explore_processor import (
+    LookerExploreProcessor,
+)
 from datahub.ingestion.source.looker_v2.looker_v2_folder_processor import (
     LookerFolderProcessor,
 )
@@ -355,6 +358,8 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
             chart_urns=self.chart_urns,
         )
 
+        self._explore_proc = LookerExploreProcessor(self._ctx)
+
         # View tracking
         self._view_discovery_result: Optional[ViewDiscoveryResult] = None
         self._parsed_views: Dict[str, ParsedView] = {}
@@ -447,7 +452,7 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
             # Stage 4: Process explores
             if self.config.extract_explores:
                 with self._stage_timer("process_explores"):
-                    yield from self._process_explores()
+                    yield from self._explore_proc.process()
 
             # Stage 5: Process views (reachable and unreachable)
             if self.config.extract_views:
