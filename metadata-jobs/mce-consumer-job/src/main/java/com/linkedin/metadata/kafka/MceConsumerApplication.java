@@ -5,6 +5,7 @@ import com.linkedin.metadata.spring.YamlPropertySourceFactory;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.cassandra.autoconfigure.CassandraAutoConfiguration;
+import org.springframework.boot.elasticsearch.autoconfigure.ElasticsearchClientAutoConfiguration;
 import org.springframework.boot.elasticsearch.autoconfigure.ElasticsearchRestClientAutoConfiguration;
 import org.springframework.context.annotation.ComponentScan;
 import org.springframework.context.annotation.FilterType;
@@ -12,7 +13,11 @@ import org.springframework.context.annotation.PropertySource;
 
 @SuppressWarnings("checkstyle:HideUtilityClassConstructor")
 @SpringBootApplication(
-    exclude = {ElasticsearchRestClientAutoConfiguration.class, CassandraAutoConfiguration.class})
+    exclude = {
+      ElasticsearchClientAutoConfiguration.class,
+      ElasticsearchRestClientAutoConfiguration.class,
+      CassandraAutoConfiguration.class
+    })
 @ComponentScan(
     basePackages = {
       "com.linkedin.metadata.boot.kafka",

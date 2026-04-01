@@ -41,7 +41,7 @@ import org.springframework.web.bind.annotation.RestController;
 @Slf4j
 public class FilesController {
 
-  @Autowired(required = false)
+  @Autowired
   @Qualifier("s3Util")
   private S3Util s3Util;
 
