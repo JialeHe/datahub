@@ -159,17 +159,18 @@ class LookerDashboardSource(TestableSource, StatefulIngestionSourceBase):
         self.source_config: LookerDashboardSourceConfig = config
         self.reporter: LookerDashboardSourceReport = LookerDashboardSourceReport()
         # Structured warning — visible in DataHub UI ingestion run report
-        # TODO: Add link to migration guide
         self.reporter.report_warning(
             title="Source Deprecated",
             message=(
                 "The 'looker' source is deprecated. "
-                "Migrate to 'looker-v2' for unified extraction from both the Looker API and LookML files."
+                "Migrate to 'looker-v2' for unified extraction from both the Looker API and LookML files. "
+                "See https://datahubproject.io/docs/how/migrate-looker-to-looker-v2"
             ),
         )
         # Python warning — visible in CLI logs
         warnings.warn(
-            "The 'looker' source is deprecated. Migrate to 'looker-v2'.",
+            "The 'looker' source is deprecated. Migrate to 'looker-v2'. "
+            "See https://datahubproject.io/docs/how/migrate-looker-to-looker-v2",
             DeprecationWarning,
             stacklevel=2,
         )
