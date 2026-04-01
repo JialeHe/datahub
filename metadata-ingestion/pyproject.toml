@@ -770,6 +770,7 @@ looker-v2 = [
     "lkml>=1.3.7,<2.0.0",
     "looker-sdk>=25.0.0,<26.0.0",
     "patchy==2.8.0",
+    "python-liquid>=2.0.0,<3.0.0",
     "sqlglot[c]==30.0.3",
 ]
 

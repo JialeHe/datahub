@@ -1297,6 +1297,7 @@ looker-v2 = [
     { name = "lkml" },
     { name = "looker-sdk" },
     { name = "patchy" },
+    { name = "python-liquid" },
     { name = "sqlglot", extra = ["c"] },
 ]
 lookml = [
@@ -2904,6 +2905,7 @@ requires-dist = [
     { name = "python-liquid", marker = "extra == 'dev'", specifier = ">=2.0.0,<3.0.0" },
     { name = "python-liquid", marker = "extra == 'docs'", specifier = ">=2.0.0,<3.0.0" },
     { name = "python-liquid", marker = "extra == 'looker'", specifier = ">=2.0.0,<3.0.0" },
+    { name = "python-liquid", marker = "extra == 'looker-v2'", specifier = ">=2.0.0,<3.0.0" },
     { name = "python-liquid", marker = "extra == 'lookml'", specifier = ">=2.0.0,<3.0.0" },
     { name = "python-liquid", marker = "extra == 'mode'", specifier = ">=2.0.0,<3.0.0" },
     { name = "pyyaml", specifier = "<7.0.0" },

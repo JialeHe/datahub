@@ -256,6 +256,10 @@ looker_v2_common = {
     "jinja2>=3.1.0,<4.0.0",
     # deepmerge; bumped from 1.1.1 to match constraints.txt (2.0)
     "deepmerge>=2.0,<3.0.0",
+    # python-liquid is a transitive dependency: looker_v2_source imports from
+    # looker_common, which imports looker_dataclasses, which imports
+    # looker_template_language at module level (from liquid import Undefined).
+    "python-liquid>=2.0.0,<3.0.0",
 }
 
 bigquery_common = {
