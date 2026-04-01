@@ -101,6 +101,9 @@ from datahub.ingestion.source.looker_v2.looker_v2_report import LookerV2SourceRe
 from datahub.ingestion.source.looker_v2.looker_v2_usage_extractor import (
     LookerUsageExtractor,
 )
+from datahub.ingestion.source.looker_v2.looker_v2_view_processor import (
+    LookerViewProcessor,
+)
 from datahub.ingestion.source.looker_v2.lookml_manifest_parser import ManifestParser
 from datahub.ingestion.source.looker_v2.lookml_parser import (
     LookMLParser,
@@ -370,6 +373,11 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
         # Cached refinement handler (created once during initialization)
         self._refinement_handler: Optional[RefinementHandler] = None
 
+        self._view_proc = LookerViewProcessor(
+            ctx=self._ctx,
+            refinement_handler=None,
+        )
+
     @property
     def _dashboard_chart_platform_instance(self) -> Optional[str]:
         """Return the platform_instance for dashboard/chart URNs.
@@ -457,7 +465,7 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
             # Stage 5: Process views (reachable and unreachable)
             if self.config.extract_views:
                 with self._stage_timer("process_views"):
-                    yield from self._process_views()
+                    yield from self._view_proc.process()
                 # Free parsed view cache after view processing
                 self._parsed_views.clear()
 
@@ -540,11 +548,6 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
         with self._stage_timer("init.pdt_lineage"):
             self._fetch_pdt_lineage()
 
-        # Discover views (includes parallel explore API calls)
-        if self.config.extract_views and self.config.base_folder:
-            with self._stage_timer("init.discover_views"):
-                self._discover_views()
-
         # Initialize refinement handler once for all views
         if self.config.process_refinements and self.config.base_folder:
             with self._stage_timer("init.refinement_handler"):
@@ -553,6 +556,7 @@ class LookerV2Source(TestableSource, StatefulIngestionSourceBase):
                     project_name=self.config.project_name or "default",
                     project_dependencies=self._ctx.resolved_project_paths or None,
                 )
+                self._view_proc._refinement_handler = self._refinement_handler
 
         # Emit project container
         if self.config.project_name and self.config.base_folder:

@@ -29,6 +29,9 @@ from datahub.ingestion.source.looker_v2.looker_v2_look_processor import (
 from datahub.ingestion.source.looker_v2.looker_v2_usage_extractor import (
     LookerUsageExtractor,
 )
+from datahub.ingestion.source.looker_v2.looker_v2_view_processor import (
+    LookerViewProcessor,
+)
 from datahub.ingestion.source.looker_v2.lookml_view_discovery import (
     ViewDiscovery,
     extract_explore_views_from_api,
@@ -388,6 +391,27 @@ class TestUsageExtractor:
         )
         extractor = LookerUsageExtractor(ctx, MagicMock())
         workunits = list(extractor.process())
+        assert workunits == []
+
+
+class TestViewProcessor:
+    def _make_processor(self) -> LookerViewProcessor:
+        config = MagicMock()
+        config.extract_views = True
+        config.base_folder = None
+        config.emit_unreachable_views = False
+        ctx = LookerV2Context(
+            config=config,
+            looker_api=MagicMock(),
+            reporter=MagicMock(),
+            pipeline_ctx=MagicMock(),
+            platform="looker",
+        )
+        return LookerViewProcessor(ctx)
+
+    def test_no_base_folder_yields_nothing(self):
+        proc = self._make_processor()
+        workunits = list(proc.process())
         assert workunits == []
 
 
