@@ -4,15 +4,16 @@ from unittest.mock import MagicMock
 
 from looker_sdk.sdk.api40.models import Dashboard as LookerAPIDashboard
 
+from datahub.ingestion.source.looker_v2.looker_v2_context import LookerV2Context
 from datahub.ingestion.source.looker_v2.looker_v2_dashboard_processor import (
     LookerDashboardProcessor,
 )
 from tests.unit.looker_v2.conftest import make_ctx
 
 
-def _make_processor(ctx: object) -> LookerDashboardProcessor:
+def _make_processor(ctx: LookerV2Context) -> LookerDashboardProcessor:
     return LookerDashboardProcessor(
-        ctx=ctx,  # type: ignore[arg-type]
+        ctx=ctx,
         folder_proc=MagicMock(),
         explore_registry=MagicMock(),
         reachable_look_registry=set(),
@@ -52,8 +53,9 @@ def test_chart_pattern_drops_disallowed_chart() -> None:
 
 def test_reachable_explores_populated_from_element_query() -> None:
     """After _extract_chart_input_fields, ctx.reachable_explores contains the chart ID."""
-    ctx = make_ctx()
+    ctx = make_ctx(explore_cache={})
     processor = _make_processor(ctx)
+    processor._get_enriched_input_fields = MagicMock(return_value=[])
 
     element = MagicMock()
     element.id = "99"
@@ -70,9 +72,6 @@ def test_reachable_explores_populated_from_element_query() -> None:
 
     chart = MagicMock()
     chart.urn = "urn:li:chart:(looker,element_99)"
-
-    # _get_enriched_input_fields will be called internally; suppress it
-    ctx.explore_cache = {}
 
     processor._extract_chart_input_fields(element, chart)
 
