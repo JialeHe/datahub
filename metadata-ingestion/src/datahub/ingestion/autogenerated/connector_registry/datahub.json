@@ -404,7 +404,7 @@
         }
       ],
       "classname": "datahub.ingestion.source.usage.clickhouse_usage.ClickHouseUsageSource",
-      "platform_id": "clickhouse-usage",
+      "platform_id": "clickhouse",
       "platform_name": "ClickHouse",
       "support_status": "CERTIFIED"
     },
@@ -567,7 +567,7 @@
       "classname": "datahub.ingestion.source.datahub.datahub_source.DataHubSource",
       "platform_id": "datahub",
       "platform_name": "DataHub",
-      "support_status": "CERTIFIED"
+      "support_status": "TESTING"
     },
     "datahub-apply": {
       "capabilities": [],
@@ -640,22 +640,10 @@
           "supported": true
         },
         {
-          "capability": "DESCRIPTIONS",
-          "description": "Enabled by default",
-          "subtype_modifier": null,
-          "supported": true
-        },
-        {
           "capability": "DELETION_DETECTION",
           "description": "Enabled by default via stateful ingestion",
           "subtype_modifier": null,
           "supported": true
-        },
-        {
-          "capability": "PLATFORM_INSTANCE",
-          "description": "Project containers are generated instead",
-          "subtype_modifier": null,
-          "supported": false
         },
         {
           "capability": "SCHEMA_METADATA",
@@ -1321,6 +1309,12 @@
     "flink": {
       "capabilities": [
         {
+          "capability": "CONTAINERS",
+          "description": "Catalog databases as containers (requires SQL Gateway)",
+          "subtype_modifier": null,
+          "supported": true
+        },
+        {
           "capability": "DELETION_DETECTION",
           "description": "Via stateful ingestion",
           "subtype_modifier": null,
@@ -1333,8 +1327,14 @@
           "supported": true
         },
         {
+          "capability": "SCHEMA_METADATA",
+          "description": "Catalog table schemas via SQL Gateway (requires include_catalog_metadata)",
+          "subtype_modifier": null,
+          "supported": true
+        },
+        {
           "capability": "LINEAGE_COARSE",
-          "description": "Table-level lineage from Kafka DataStream sources/sinks and SQL/Table API via catalog resolution",
+          "description": "Table-level lineage from Kafka sources/sinks",
           "subtype_modifier": null,
           "supported": true
         }
@@ -1391,7 +1391,7 @@
         },
         {
           "capability": "LINEAGE_FINE",
-          "description": "Support via the `emit_storage_lineage` config field",
+          "description": "Support via the `emit_s3_lineage` config field",
           "subtype_modifier": null,
           "supported": true
         },
@@ -1772,9 +1772,9 @@
         },
         {
           "capability": "DOMAINS",
-          "description": "Supported via the `domain` config field",
+          "description": "Currently not supported.",
           "subtype_modifier": null,
-          "supported": true
+          "supported": false
         },
         {
           "capability": "OWNERSHIP",
@@ -2795,7 +2795,7 @@
         },
         {
           "capability": "LINEAGE_FINE",
-          "description": "Enabled by default, configured using `extract_column_level_lineage`.",
+          "description": "Disabled by default, configured using `extract_column_level_lineage`. ",
           "subtype_modifier": null,
           "supported": true
         },
@@ -2930,9 +2930,8 @@
         },
         {
           "capability": "LINEAGE_FINE",
-          "description": "Column-level lineage when emitting lineage to connector sources (e.g. Iceberg, Hive)",
+          "description": "Enabled by default to get lineage for views via `include_view_column_lineage`",
           "subtype_modifier": [
-            "Table",
             "View"
           ],
           "supported": true
@@ -3820,7 +3819,7 @@
         }
       ],
       "classname": "datahub.ingestion.source.usage.starburst_trino_usage.TrinoUsageSource",
-      "platform_id": "starburst-trino-usage",
+      "platform_id": "trino",
       "platform_name": "Trino",
       "support_status": "CERTIFIED"
     },
@@ -4044,9 +4043,8 @@
         },
         {
           "capability": "LINEAGE_FINE",
-          "description": "Column-level lineage when emitting lineage to connector sources (e.g. Iceberg, Hive)",
+          "description": "Enabled by default to get lineage for views via `include_view_column_lineage`",
           "subtype_modifier": [
-            "Table",
             "View"
           ],
           "supported": true
