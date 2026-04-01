@@ -32,7 +32,7 @@ def make_ctx(**overrides: Any) -> LookerV2Context:
     config.extract_embed_urls = False
     config.project_name = "test_project"
 
-    defaults: dict = dict(
+    defaults: dict[str, Any] = dict(
         config=config,
         looker_api=MagicMock(),
         reporter=LookerV2SourceReport(),
