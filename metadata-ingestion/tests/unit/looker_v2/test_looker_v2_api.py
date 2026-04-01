@@ -492,10 +492,11 @@ class TestProjectDependenciesValidator:
                 },
             }
         )
-        assert (
-            config.project_dependencies["dep_project"].repo
-            == "git@github.com:org/dep.git"
-        )  # type: ignore[union-attr]
+        from datahub.ingestion.source.looker_v2.looker_v2_config import LookerV2GitInfo
+
+        dep = config.project_dependencies["dep_project"]
+        assert isinstance(dep, LookerV2GitInfo)
+        assert dep.repo == "git@github.com:org/dep.git"
 
     def test_invalid_dependency_type_raises(self) -> None:
         from pydantic import ValidationError

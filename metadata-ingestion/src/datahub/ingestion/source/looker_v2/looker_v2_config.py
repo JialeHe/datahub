@@ -95,6 +95,10 @@ class LookerV2Config(
         default=AllowDenyPattern.allow_all(),
         description="Filter dashboards by title.",
     )
+    chart_pattern: AllowDenyPattern = Field(
+        default=AllowDenyPattern.allow_all(),
+        description="Filter charts (dashboard elements) by their Looker element ID.",
+    )
     explore_pattern: AllowDenyPattern = Field(
         default=AllowDenyPattern.allow_all(),
         description="Filter explores by name.",
@@ -110,6 +114,11 @@ class LookerV2Config(
     folder_path_pattern: AllowDenyPattern = Field(
         default=AllowDenyPattern.allow_all(),
         description="Filter dashboards by folder path (e.g., 'Shared/Sales').",
+    )
+    emit_used_explores_only: bool = Field(
+        default=True,
+        description="When enabled, only explores referenced by at least one dashboard or look are emitted. "
+        "Disable to emit all explores regardless of usage.",
     )
 
     # ==================== Common Options ====================
@@ -160,13 +169,25 @@ class LookerV2Config(
         description="Map Looker connections to DataHub platforms for lineage. "
         "Connections not listed here will be auto-discovered from the Looker API.",
     )
-    use_pdt_graph_api: bool = Field(
+    enable_api_sql_lineage: bool = Field(
         default=True,
-        description="Use Looker's PDT dependency graph API for derived table lineage. "
-        "More reliable than SQL regex parsing for PDT-to-PDT dependencies. "
-        "Falls back to SQL parsing when API data is unavailable. "
-        "Requires the 'develop' permission on the Looker API client. "
-        "Set to False if your API credentials lack the 'develop' permission.",
+        description="Use both Looker's PDT dependency graph API and generate_sql_query API to resolve "
+        "lineage for views reachable from explores. The PDT graph provides PDT-to-PDT edges; "
+        "generate_sql_query returns fully rendered SQL (resolving all Liquid templates and LookML "
+        "references) from which table-level and column-level lineage are extracted. Results from both "
+        "APIs are combined. Falls back to SQL regex parsing if API calls fail or the view is not "
+        "reachable from any explore. Requires the 'develop' permission on the Looker API client; "
+        "set to False if your credentials lack it.",
+    )
+    api_sql_lineage_field_chunk_size: int = Field(
+        default=100,
+        description="When resolving lineage via generate_sql_query, views with more fields than this "
+        "threshold are split into multiple API calls to avoid SQL generation failures on large field sets.",
+    )
+    api_sql_lineage_individual_field_fallback: bool = Field(
+        default=True,
+        description="When a field chunk fails SQL generation, retry each field individually to maximise "
+        "lineage coverage and isolate problematic fields.",
     )
     emit_unreachable_views: bool = Field(
         default=False,
