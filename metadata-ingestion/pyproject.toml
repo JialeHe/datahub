@@ -803,6 +803,9 @@ metabase = [
     "sqlglot[c]==30.0.3",
 ]
 
+langsmith = [
+    "langsmith>=0.1.0,<1.0.0",
+]
 mlflow = [
     "mlflow-skinny>=2.3.0,<2.21.0",
     "setuptools<82",
@@ -2069,6 +2072,7 @@ datahub-lineage-file = "datahub.ingestion.source.metadata.lineage:LineageFileSou
 datahub-business-glossary = "datahub.ingestion.source.metadata.business_glossary:BusinessGlossaryFileSource"
 dataplex = "datahub.ingestion.source.dataplex.dataplex:DataplexSource"
 mlflow = "datahub.ingestion.source.mlflow:MLflowSource"
+langsmith = "datahub.ingestion.source.langsmith:LangSmithSource"
 mode = "datahub.ingestion.source.mode:ModeSource"
 mongodb = "datahub.ingestion.source.mongodb:MongoDBSource"
 mssql = "datahub.ingestion.source.sql.mssql:SQLServerSource"

@@ -680,6 +680,9 @@ plugins: Dict[str, Set[str]] = {
         # setuptools 82 removed pkg_resources, which mlflow uses at runtime.
         "setuptools<82",
     },
+    "langsmith": {
+        "langsmith>=0.1.0,<1.0.0",
+    },
     "datahub-debug": {"dnspython==2.7.0", "requests<3.0.0"},
     "datahub-gc": set(),
     "datahub-documents": unstructured_lib,
@@ -913,6 +916,7 @@ base_dev_requirements = {
             "iceberg",
             "iceberg-catalog",
             "mlflow",
+            "langsmith",
             "mongodb",
             "json-schema",
             "ldap",
@@ -1071,6 +1075,7 @@ entry_points = {
         "datahub-business-glossary = datahub.ingestion.source.metadata.business_glossary:BusinessGlossaryFileSource",
         "dataplex = datahub.ingestion.source.dataplex.dataplex:DataplexSource",
         "mlflow = datahub.ingestion.source.mlflow:MLflowSource",
+        "langsmith = datahub.ingestion.source.langsmith:LangSmithSource",
         "mode = datahub.ingestion.source.mode:ModeSource",
         "mongodb = datahub.ingestion.source.mongodb:MongoDBSource",
         "mssql = datahub.ingestion.source.sql.mssql:SQLServerSource",

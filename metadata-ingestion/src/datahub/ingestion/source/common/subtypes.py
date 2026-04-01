@@ -160,6 +160,10 @@ class MLAssetSubTypes(StrEnum):
 
     FOLDER = "Folder"
 
+    LANGSMITH_PROJECT = "LangSmith Project"
+    LANGSMITH_TRACE = "LLM Trace"
+    LANGSMITH_SPAN = "LLM Span"
+
 
 class DataJobSubTypes(StrEnum):
     # ADF Activity Types
