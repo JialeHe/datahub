@@ -2,7 +2,7 @@ import functools
 import itertools
 import logging
 from contextlib import AbstractContextManager, nullcontext
-from typing import Iterable, List, Optional, Sequence, Union
+from typing import Dict, Iterable, List, Optional, Sequence, Union
 
 from google.api_core.exceptions import (
     DeadlineExceeded,
