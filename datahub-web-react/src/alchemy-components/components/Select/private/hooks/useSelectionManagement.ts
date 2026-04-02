@@ -92,8 +92,13 @@ export const useSelectionManagement = ({
     }, [selectedValues]);
 
     const commitSelection = useCallback(() => {
+        // When autocommit is enabled, values are committed immediately via setStagedValues.
+        // commitSelection is only needed when autocommit is disabled to apply staged changes.
+        if (autocommit) {
+            return;
+        }
         updateSelectedValues(stagedValues);
-    }, [stagedValues, updateSelectedValues]);
+    }, [autocommit, stagedValues, updateSelectedValues]);
 
     return {
         selectedValues,

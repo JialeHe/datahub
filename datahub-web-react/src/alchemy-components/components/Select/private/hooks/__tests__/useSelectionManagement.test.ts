@@ -248,6 +248,34 @@ describe('useSelectionManagement', () => {
             expect(result.current.stagedValues).toEqual(['1', '2', '3']);
             expect(mockOnUpdate).toHaveBeenCalledWith(['1', '2', '3']);
         });
+
+        it('should be a no-op when autocommit is enabled', () => {
+            const mockOnUpdate = vi.fn();
+            const { result } = renderHook(() =>
+                useSelectionManagement({
+                    ...defaultProps,
+                    initialValues: ['1'],
+                    onUpdate: mockOnUpdate,
+                    autocommit: true,
+                }),
+            );
+
+            // With autocommit, setStagedValues already commits
+            act(() => {
+                result.current.setStagedValues(['1', '2']);
+            });
+
+            expect(result.current.selectedValues).toEqual(['1', '2']);
+            expect(mockOnUpdate).toHaveBeenCalledTimes(1);
+
+            // Calling commitSelection should not trigger another update
+            act(() => {
+                result.current.commitSelection();
+            });
+
+            expect(result.current.selectedValues).toEqual(['1', '2']);
+            expect(mockOnUpdate).toHaveBeenCalledTimes(1); // Still only 1 call
+        });
     });
 
     describe('resetStagedValues', () => {
