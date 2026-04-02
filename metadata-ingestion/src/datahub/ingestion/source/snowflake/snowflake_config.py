@@ -146,6 +146,27 @@ class SemanticViewsConfig(ConfigModel):
         return self
 
 
+class StagesConfig(ConfigModel):
+    enabled: bool = Field(
+        default=False,
+        description="If enabled, Snowflake Stages will be ingested as containers with associated metadata.",
+    )
+
+
+class TasksConfig(ConfigModel):
+    enabled: bool = Field(
+        default=False,
+        description="If enabled, Snowflake Tasks will be ingested as DataJobs with DAG dependencies and SQL lineage.",
+    )
+
+
+class PipesConfig(ConfigModel):
+    enabled: bool = Field(
+        default=False,
+        description="If enabled, Snowflake Snowpipe objects will be ingested as DataJobs with COPY INTO lineage.",
+    )
+
+
 class SnowflakeFilterConfig(SQLFilterConfig):
     database_pattern: AllowDenyPattern = Field(
         AllowDenyPattern(
@@ -187,6 +208,24 @@ class SnowflakeFilterConfig(SQLFilterConfig):
         "Specify regex to match the entire semantic view name in database.schema.semantic_view format. "
         "e.g. to match all semantic views starting with sales in Analytics database and public schema,"
         " use the regex 'Analytics.public.sales.*'",
+    )
+
+    stage_pattern: AllowDenyPattern = Field(
+        default=AllowDenyPattern.allow_all(),
+        description="Regex patterns for stages to filter in ingestion. "
+        "Specify regex to match the entire stage name in database.schema.stage format.",
+    )
+
+    task_pattern: AllowDenyPattern = Field(
+        default=AllowDenyPattern.allow_all(),
+        description="Regex patterns for tasks to filter in ingestion. "
+        "Specify regex to match the entire task name in database.schema.task format.",
+    )
+
+    pipe_pattern: AllowDenyPattern = Field(
+        default=AllowDenyPattern.allow_all(),
+        description="Regex patterns for pipes to filter in ingestion. "
+        "Specify regex to match the entire pipe name in database.schema.pipe format.",
     )
 
     match_fully_qualified_names: bool = Field(
@@ -424,6 +463,21 @@ class SnowflakeV2Config(
     semantic_views: SemanticViewsConfig = Field(
         default_factory=SemanticViewsConfig,
         description="Configuration for semantic views ingestion.",
+    )
+
+    stages: StagesConfig = Field(
+        default_factory=StagesConfig,
+        description="Configuration for Snowflake Stages ingestion.",
+    )
+
+    tasks: TasksConfig = Field(
+        default_factory=TasksConfig,
+        description="Configuration for Snowflake Tasks ingestion.",
+    )
+
+    pipes: PipesConfig = Field(
+        default_factory=PipesConfig,
+        description="Configuration for Snowflake Snowpipe ingestion.",
     )
 
     structured_property_pattern: AllowDenyPattern = Field(
