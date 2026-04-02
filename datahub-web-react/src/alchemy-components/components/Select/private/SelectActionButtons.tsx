@@ -26,7 +26,13 @@ export default function SelectActionButtons({
             {showClear && hasSelectedValues && !isDisabled && !isReadOnly && (
                 <ClearButton size={fontSize} onClick={onClearClickHandler} data-testid="button-clear" />
             )}
-            <StyledIcon icon={CaretDown} rotate={isOpen ? '180' : '0'} size="md" color="gray" />
+            <StyledIcon
+                icon={CaretDown}
+                rotate={isOpen ? '180' : '0'}
+                size="md"
+                color="gray"
+                data-testid="button-expand"
+            />
         </ActionButtonsContainer>
     );
 }

@@ -158,12 +158,11 @@ export default function EntityTypeFilterSelect({
             showSearch
             searchPlaceholder={`Search ${displayName}`}
             renderCustomOptionText={(option) => <span>{option.label}</span>}
-            showClear
             isLoadingParentChildList={aggLoading}
             selectLabelProps={{ variant: 'labeled', label: displayName }}
-            shouldDisplayConfirmationFooter={false}
-            autocommit={false}
             renderCustomOption={renderCustomOption}
+            shouldUpdateValuesOnClose
+            showClear
         />
     );
 }

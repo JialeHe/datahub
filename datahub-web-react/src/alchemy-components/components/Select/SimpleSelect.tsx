@@ -55,6 +55,7 @@ export const SimpleSelect = <OptionType extends SelectOption = SelectOption>({
     onUpdate,
     onClear,
     onClose,
+    shouldUpdateValuesOnClose,
     showSearch = selectDefaults.showSearch,
     isDisabled = selectDefaults.isDisabled,
     isReadOnly = selectDefaults.isReadOnly,
@@ -97,19 +98,30 @@ export const SimpleSelect = <OptionType extends SelectOption = SelectOption>({
     const selectRef = useRef<HTMLDivElement>(null);
     const dropdownRef = useRef<HTMLDivElement>(null);
 
-    const { selectedValues, stagedValues, onValueChanged, clearSelection, commitSelection, setStagedValues } =
-        useSelectionManagement({
-            initialValues: initialValues || values || [],
-            values,
-            onUpdate,
-            isMultiselect: isMultiSelect,
-            autocommit,
-        });
+    const {
+        selectedValues,
+        stagedValues,
+        onValueChanged,
+        clearSelection,
+        commitSelection,
+        setStagedValues,
+        resetStagedValues,
+    } = useSelectionManagement({
+        initialValues: initialValues || values || [],
+        values,
+        onUpdate,
+        isMultiselect: isMultiSelect,
+        autocommit,
+    });
 
     const handleDropdownClose = useCallback(() => {
-        commitSelection();
+        if (shouldUpdateValuesOnClose) {
+            commitSelection();
+        } else {
+            resetStagedValues();
+        }
         onClose?.();
-    }, [commitSelection, onClose]);
+    }, [commitSelection, onClose, shouldUpdateValuesOnClose, resetStagedValues]);
 
     const {
         isOpen,
@@ -254,6 +266,7 @@ export const SimpleSelect = <OptionType extends SelectOption = SelectOption>({
                                                     onCheckboxChange={() => handleOptionChange(option)}
                                                     isChecked={stagedValues.includes(option.value)}
                                                     isDisabled={disabledValues?.includes(option.value)}
+                                                    dataTestId={`option-${option.value}-checkbox`}
                                                     size="sm"
                                                 />
                                             </LabelContainer>

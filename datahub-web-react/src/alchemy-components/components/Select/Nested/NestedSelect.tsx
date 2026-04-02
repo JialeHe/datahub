@@ -32,6 +32,7 @@ export interface SelectProps<OptionType extends NestedSelectOption = NestedSelec
     onUpdate?: (selectedValues: OptionType[]) => void;
     onClear?: () => void;
     onClose?: () => void;
+    shouldUpdateValuesOnClose?: boolean;
     onToggle?: (isOpen: boolean) => void;
     size?: SelectSizeOptions;
     showSearch?: boolean;
@@ -85,6 +86,7 @@ export const NestedSelect = <OptionType extends NestedSelectOption = NestedSelec
     onUpdate,
     onClear,
     onClose,
+    shouldUpdateValuesOnClose,
     loadData,
     onSearch,
     showSearch = selectDefaults.showSearch,
@@ -138,13 +140,13 @@ export const NestedSelect = <OptionType extends NestedSelectOption = NestedSelec
     });
 
     const handleDropdownClose = useCallback(() => {
-        if (shouldDisplayConfirmationFooter) {
-            resetStagedValues();
-        } else {
+        if (shouldUpdateValuesOnClose) {
             commitSelection();
+        } else {
+            resetStagedValues();
         }
         onClose?.();
-    }, [shouldDisplayConfirmationFooter, resetStagedValues, commitSelection, onClose]);
+    }, [shouldUpdateValuesOnClose, resetStagedValues, commitSelection, onClose]);
 
     const {
         isOpen,

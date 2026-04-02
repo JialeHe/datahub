@@ -32,6 +32,7 @@ export interface SelectProps<OptionType extends SelectOption = SelectOption> {
     onCancel?: () => void;
     onClear?: () => void;
     onClose?: () => void;
+    shouldUpdateValuesOnClose?: boolean;
     onUpdate?: (selectedValues: string[]) => void;
     size?: SelectSizeOptions;
     icon?: React.ComponentType<any>;

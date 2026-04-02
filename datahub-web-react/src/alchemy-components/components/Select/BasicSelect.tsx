@@ -51,6 +51,8 @@ export const BasicSelect = <OptionType extends SelectOption = SelectOption>({
     initialValues,
     onCancel,
     onUpdate,
+    onClose,
+    shouldUpdateValuesOnClose,
     showSearch = selectDefaults.showSearch,
     isDisabled = selectDefaults.isDisabled,
     isReadOnly = selectDefaults.isReadOnly,
@@ -64,6 +66,7 @@ export const BasicSelect = <OptionType extends SelectOption = SelectOption>({
     showSelectAll = selectDefaults.showSelectAll,
     selectAllLabel = selectDefaults.selectAllLabel,
     showDescriptions = selectDefaults.showDescriptions,
+    shouldOrderSelectedOptionsToTop,
     icon,
     renderCustomOptionText,
     selectLabelProps,
@@ -78,12 +81,6 @@ export const BasicSelect = <OptionType extends SelectOption = SelectOption>({
     const [searchQuery, setSearchQuery] = useState('');
     const selectRef = useRef<HTMLDivElement>(null);
     const dropdownRef = useRef<HTMLDivElement>(null);
-    const {
-        isOpen,
-        isVisible,
-        close: closeDropdown,
-        toggle: toggleDropdown,
-    } = useSelectDropdown(false, selectRef, dropdownRef, visibilityDeps);
 
     const {
         selectedValues,
@@ -100,7 +97,23 @@ export const BasicSelect = <OptionType extends SelectOption = SelectOption>({
         isMultiselect: isMultiSelect,
     });
 
+    const handleDropdownClose = useCallback(() => {
+        if (shouldUpdateValuesOnClose) {
+            commitSelection();
+        } else {
+            resetStagedValues();
+        }
+        onClose?.();
+    }, [commitSelection, onClose, shouldUpdateValuesOnClose, resetStagedValues]);
+
     const [areAllSelected, setAreAllSelected] = useState(false);
+
+    const {
+        isOpen,
+        isVisible,
+        close: closeDropdown,
+        toggle: toggleDropdown,
+    } = useSelectDropdown(false, selectRef, dropdownRef, visibilityDeps, handleDropdownClose);
 
     useEffect(() => {
         setAreAllSelected(stagedValues.length === options.length);
@@ -111,13 +124,15 @@ export const BasicSelect = <OptionType extends SelectOption = SelectOption>({
 
         if (!isMultiSelect || stagedValues.length === 0) return filtered;
 
+        if (!shouldOrderSelectedOptionsToTop) return filtered;
+
         const selectedSet = new Set(stagedValues);
         return [...filtered].sort((a, b) => {
             const aSelected = selectedSet.has(a.value) ? 0 : 1;
             const bSelected = selectedSet.has(b.value) ? 0 : 1;
             return aSelected - bSelected;
         });
-    }, [options, searchQuery, isMultiSelect, stagedValues]);
+    }, [options, searchQuery, isMultiSelect, shouldOrderSelectedOptionsToTop, stagedValues]);
 
     const handleSelectClick = useCallback(() => {
         if (!isDisabled && !isReadOnly) {
@@ -148,9 +163,7 @@ export const BasicSelect = <OptionType extends SelectOption = SelectOption>({
     const handleCancelClick = useCallback(() => {
         resetStagedValues();
         closeDropdown();
-        if (onCancel) {
-            onCancel();
-        }
+        onCancel?.();
     }, [resetStagedValues, closeDropdown, onCancel]);
 
     const handleClearSelection = useCallback(() => {

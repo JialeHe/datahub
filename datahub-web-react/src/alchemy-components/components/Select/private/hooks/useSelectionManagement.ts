@@ -1,5 +1,5 @@
 import { isEqual } from 'lodash';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 interface UseSelectionManagementProps {
     initialValues: string[];
@@ -32,43 +32,57 @@ export const useSelectionManagement = ({
     autocommit,
 }: UseSelectionManagementProps): UseSelectionManagementReturn => {
     const [selectedValues, setSelectedValues] = useState<string[]>(initialValues || []);
+    const selectedValuesRef = useRef<string[]>(initialValues || []);
+
     const [stagedValues, setInternalStagedValues] = useState<string[]>(initialValues || []);
+    const stagedValuesRef = useRef<string[]>(initialValues || []);
+
+    const setSelectedValuesSync = useCallback((newValues: string[]) => {
+        selectedValuesRef.current = newValues;
+        setSelectedValues(newValues);
+    }, []);
+
+    const setStagedValuesSync = useCallback((newValues: string[]) => {
+        stagedValuesRef.current = newValues;
+        setInternalStagedValues(newValues);
+    }, []);
 
     const updateSelectedValues = useCallback(
         (newValues: string[]) => {
-            setSelectedValues(newValues);
+            setSelectedValuesSync(newValues);
             onUpdate?.(newValues);
         },
-        [onUpdate],
+        [onUpdate, setSelectedValuesSync],
     );
 
     const setStagedValues = useCallback(
         (newValues: string[], options?: Options) => {
-            setInternalStagedValues(newValues);
+            setStagedValuesSync(newValues);
             if (autocommit || options?.autocommit) {
                 updateSelectedValues(newValues);
             }
         },
-        [autocommit, updateSelectedValues],
+        [autocommit, updateSelectedValues, setStagedValuesSync],
     );
 
     // Sync both selected and staged when controlled values change
     useEffect(() => {
         if (values !== undefined && !isEqual(selectedValues, values)) {
-            setSelectedValues(values);
-            setInternalStagedValues(values);
+            setSelectedValuesSync(values);
+            setStagedValuesSync(values);
         }
-    }, [values]); // eslint-disable-line react-hooks/exhaustive-deps
+    }, [values, setSelectedValuesSync, setStagedValuesSync]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const onValueChanged = useCallback(
         (value: string) => {
-            const isAlreadySelected = stagedValues.includes(value);
+            const { current } = stagedValuesRef;
+            const isAlreadySelected = current.includes(value);
 
             // Multi-select: toggle on/off
             if (isMultiselect) {
                 const newStagedValues = isAlreadySelected
-                    ? stagedValues.filter((v) => v !== value) // Toggle off
-                    : [...stagedValues, value]; // Toggle on
+                    ? current.filter((v) => v !== value) // Toggle off
+                    : [...current, value]; // Toggle on
                 setStagedValues(newStagedValues);
                 return;
             }
@@ -81,7 +95,7 @@ export const useSelectionManagement = ({
             // Single-select: select new value (replace current)
             setStagedValues([value]);
         },
-        [stagedValues, isMultiselect, setStagedValues],
+        [isMultiselect, setStagedValues],
     );
 
     const clearSelection = useCallback(
@@ -92,8 +106,8 @@ export const useSelectionManagement = ({
     );
 
     const resetStagedValues = useCallback(() => {
-        setInternalStagedValues(selectedValues);
-    }, [selectedValues]);
+        setStagedValuesSync(selectedValuesRef.current);
+    }, [setStagedValuesSync]);
 
     const commitSelection = useCallback(() => {
         // When autocommit is enabled, values are committed immediately via setStagedValues.
@@ -101,8 +115,8 @@ export const useSelectionManagement = ({
         if (autocommit) {
             return;
         }
-        updateSelectedValues(stagedValues);
-    }, [autocommit, stagedValues, updateSelectedValues]);
+        updateSelectedValues(stagedValuesRef.current);
+    }, [autocommit, updateSelectedValues]);
 
     return {
         selectedValues,

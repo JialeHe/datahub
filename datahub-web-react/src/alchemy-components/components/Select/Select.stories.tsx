@@ -241,6 +241,15 @@ const meta: Meta = {
                 defaultValue: { summary: 'true' },
             },
         },
+        shouldUpdateValuesOnClose: {
+            description: 'Whether to update values when dropdown closes (vs. resetting to previously selected values).',
+            control: {
+                type: 'boolean',
+            },
+            table: {
+                defaultValue: { summary: 'false' },
+            },
+        },
     },
 
     // Define defaults

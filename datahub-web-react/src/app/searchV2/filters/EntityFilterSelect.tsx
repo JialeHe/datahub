@@ -149,6 +149,7 @@ export default function EntityFilterSelect({
             autocommit={false}
             dataTestId={`filter-dropdown-${displayName?.replace(/\s/g, '-')}`}
             shouldOrderSelectedOptionsToTop
+            shouldUpdateValuesOnClose
         />
     );
 }
