@@ -147,6 +147,7 @@ export default function EntityFilterSelect({
             selectLabelProps={{ variant: 'labeled', label: displayName }}
             renderCustomOptionText={renderOptionText}
             autocommit={false}
+            dataTestId={`filter-dropdown-${displayName?.replace(/\s/g, '-')}`}
             shouldOrderSelectedOptionsToTop
         />
     );

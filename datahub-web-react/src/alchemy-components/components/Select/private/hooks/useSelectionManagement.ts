@@ -62,20 +62,24 @@ export const useSelectionManagement = ({
 
     const onValueChanged = useCallback(
         (value: string) => {
-            let newStagedValues: string[];
+            const isAlreadySelected = stagedValues.includes(value);
 
-            if (stagedValues.includes(value)) {
-                // Remove value
-                newStagedValues = stagedValues.filter((v) => v !== value);
-            } else if (!isMultiselect) {
-                // Single select: replace
-                newStagedValues = [value];
-            } else {
-                // Multi select: add
-                newStagedValues = [...stagedValues, value];
+            // Multi-select: toggle on/off
+            if (isMultiselect) {
+                const newStagedValues = isAlreadySelected
+                    ? stagedValues.filter((v) => v !== value) // Toggle off
+                    : [...stagedValues, value]; // Toggle on
+                setStagedValues(newStagedValues);
+                return;
             }
 
-            setStagedValues(newStagedValues);
+            // Single-select: clicking already selected option is a no-op
+            if (isAlreadySelected) {
+                return;
+            }
+
+            // Single-select: select new value (replace current)
+            setStagedValues([value]);
         },
         [stagedValues, isMultiselect, setStagedValues],
     );

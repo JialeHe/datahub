@@ -154,7 +154,7 @@ describe('useSelectionManagement', () => {
                 expect(result.current.stagedValues).toEqual(['2']);
             });
 
-            it('should remove value when toggling off', () => {
+            it('should keep value selected when clicking already selected option (no-op)', () => {
                 const { result } = renderHook(() =>
                     useSelectionManagement({
                         ...defaultProps,
@@ -168,7 +168,7 @@ describe('useSelectionManagement', () => {
                     result.current.onValueChanged('1');
                 });
 
-                expect(result.current.stagedValues).toEqual([]);
+                expect(result.current.stagedValues).toEqual(['1']);
             });
         });
     });
