@@ -187,7 +187,11 @@ def _table_name_from_sqlglot_table(
         # Only restore MSSQL temp prefix on the rightmost part (the actual table name).
         final_exp = all_parts_exp[-1]
         final_part = final_exp.name
-        if is_dialect_instance(dialect, ["mssql"]) and hasattr(final_exp, "args"):
+        if (
+            dialect is not None
+            and is_dialect_instance(dialect, ["mssql"])
+            and hasattr(final_exp, "args")
+        ):
             # Note: sqlglot v28+ uses "global_" instead of "global"
             is_global_temp = final_exp.args.get("global_", False) or final_exp.args.get(
                 "global", False
