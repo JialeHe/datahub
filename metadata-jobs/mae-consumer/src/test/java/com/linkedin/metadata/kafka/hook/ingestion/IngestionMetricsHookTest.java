@@ -167,7 +167,8 @@ public class IngestionMetricsHookTest {
   @Test
   public void testNullStatusDefaultsToUnknown() throws Exception {
     ExecutionRequestResult result = new ExecutionRequestResult();
-    // status not set — getStatus() returns null
+    result.setStatus(""); // Explicitly set empty status to test defaulting
+    result.setDurationMs(1000L);
 
     StructuredExecutionReport structuredReport = new StructuredExecutionReport();
     structuredReport.setType("CLI_INGEST");

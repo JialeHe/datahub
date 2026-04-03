@@ -160,7 +160,10 @@ public class IngestionMetricsHook implements MetadataChangeLogHook {
       JsonNode sinkReport = findSinkReport(reportJson);
 
       String platform = extractPlatform(reportJson, sourceReport);
-      String status = result.getStatus() != null ? result.getStatus() : "unknown";
+      String status =
+          (result.getStatus() != null && !result.getStatus().isEmpty())
+              ? result.getStatus()
+              : "unknown";
 
       Tags tags =
           Tags.of(
