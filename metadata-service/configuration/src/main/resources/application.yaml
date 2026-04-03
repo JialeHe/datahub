@@ -864,6 +864,10 @@ updateIndices:
 ingestionScheduler:
   enabled: ${ENABLE_INGESTION_SCHEDULER_HOOK:true} # enable to execute ingestion scheduling
   consumerGroupSuffix: ${INGESTION_SCHEDULER_HOOK_CONSUMER_GROUP_SUFFIX:}
+ingestionMetrics:
+  hook:
+    enabled: ${ENABLE_INGESTION_METRICS_HOOK:false}
+    consumerGroupSuffix: ${INGESTION_METRICS_HOOK_CONSUMER_GROUP_SUFFIX:}
 incidents:
   hook:
     enabled: ${ENABLE_INCIDENTS_HOOK:true}

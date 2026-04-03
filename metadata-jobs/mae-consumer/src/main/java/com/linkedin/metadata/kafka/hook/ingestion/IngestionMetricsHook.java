@@ -2,20 +2,13 @@ package com.linkedin.metadata.kafka.hook.ingestion;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.MissingNode;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableSet;
-import com.linkedin.common.GlobalTags;
-import com.linkedin.common.TagAssociation;
 import com.linkedin.common.urn.Urn;
-import com.linkedin.common.urn.UrnUtils;
-import com.linkedin.entity.EntityResponse;
-import com.linkedin.entity.EnvelopedAspect;
-import com.linkedin.entity.client.SystemEntityClient;
 import com.linkedin.events.metadata.ChangeType;
-import com.linkedin.execution.ExecutionRequestInput;
 import com.linkedin.execution.ExecutionRequestResult;
 import com.linkedin.execution.StructuredExecutionReport;
-import com.linkedin.ingestion.DataHubIngestionSourceInfo;
 import com.linkedin.metadata.kafka.hook.MetadataChangeLogHook;
 import com.linkedin.metadata.utils.GenericRecordUtils;
 import com.linkedin.mxe.MetadataChangeLog;
@@ -24,14 +17,11 @@ import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.DistributionSummary;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Tags;
-import java.net.URI;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicLong;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import lombok.Getter;
@@ -41,17 +31,23 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 /**
- * This hook listens for {@link ExecutionRequestResult} MCL events from ingestion runs and emits
- * Micrometer metrics for ingestion observability. Metrics are exposed via the /actuator/prometheus
- * endpoint.
+ * MAE consumer hook that converts {@link ExecutionRequestResult} MCL events into Micrometer metrics
+ * and structured log events for ingestion observability.
  *
- * <p>The hook processes execution results that contain structured ingestion reports including:
+ * <p>Design decisions:
  *
  * <ul>
- *   <li>Run metadata (pipeline name, platform, status)
- *   <li>Volume metrics (records written, events produced)
- *   <li>Quality metrics (errors, warnings, failures)
- *   <li>Performance metrics (duration)
+ *   <li>Only UPSERT and CREATE change types are processed — RESTATE is excluded because reindex
+ *       operations replay historical MCLs and would double-count all counters.
+ *   <li>Metric labels use only stable, low-cardinality values (platform, status, customer). Per-run
+ *       identifiers and high-cardinality fields (pipeline ID, version, ingestion_source,
+ *       py_version, gms_version) are emitted in the {@code [INGESTION_RUN_EVENT]} structured log
+ *       only.
+ *   <li>warnings/failures counters reflect the JSON array size, which the ingestion framework caps
+ *       at 10 via LossyList. A run with 200 failures shows failures_count=10. No total count field
+ *       exists in the structured report.
+ *   <li>No entity client RPCs are made — all data comes from the MCL event itself. The ingestion
+ *       source can be looked up via GraphQL using the execution_id in the structured log.
  * </ul>
  */
 @Slf4j
@@ -59,110 +55,82 @@ import org.springframework.stereotype.Component;
 public class IngestionMetricsHook implements MetadataChangeLogHook {
 
   private static final String ASPECT_NAME = "dataHubExecutionRequestResult";
-  private static final String INPUT_ASPECT_NAME = "dataHubExecutionRequestInput";
-  private static final String GLOBAL_TAGS_ASPECT_NAME = "globalTags";
-  private static final String INGESTION_SOURCE_INFO_ASPECT_NAME = "dataHubIngestionSourceInfo";
+  // JMX-style prefix intentionally chosen: Micrometer converts dots to underscores in Prometheus,
+  // producing com_datahub_ingest_* which matches the Observe Agent allowlist filter regex.
   private static final String METRIC_PREFIX = "com.datahub.ingest.";
-  // CLI_INGEST: from CLI ingestion (datahub ingest command)
-  // RUN_INGEST: from executor-based ingestion (scheduled, manual via UI)
   private static final Set<String> SUPPORTED_REPORT_TYPES =
       ImmutableSet.of("CLI_INGEST", "RUN_INGEST");
   private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
+  // RESTATE excluded: reindex replays MCLs as RESTATE, which would double-count all metrics.
   private static final Set<ChangeType> SUPPORTED_CHANGE_TYPES =
       ImmutableSet.of(ChangeType.UPSERT, ChangeType.CREATE);
 
-  // Criticality tag URN prefixes (e.g., urn:li:tag:critical -> "critical")
-  private static final String CRITICALITY_CRITICAL = "critical";
-  private static final String CRITICALITY_WARNING = "warning";
-  private static final String CRITICALITY_ALERT_DISABLED = "alert-disabled";
-  private static final String CRITICALITY_DEFAULT = "warning"; // Default if no tag present
-
-  // Metric tag names (pipeline is intentionally NOT a metric tag — it's per-run and would
-  // cause unbounded cardinality. Per-execution detail is emitted as a structured log event.)
+  // 3 metric labels: platform, status, customer.
+  // version, ingestion_source removed — unbounded cardinality. Both in [INGESTION_RUN_EVENT] log.
   private static final String TAG_PLATFORM = "platform";
   private static final String TAG_STATUS = "status";
-  private static final String TAG_INGESTION_SOURCE = "ingestion_source";
-  private static final String TAG_CRITICALITY = "criticality";
-  private static final String TAG_SINK_HOST = "sink_host";
-  private static final String TAG_VERSION = "version";
-
-  @VisibleForTesting static final long CRITICALITY_CACHE_TTL_MS = 5 * 60 * 1000L; // 5 minutes
-
+  private static final String TAG_CUSTOMER = "customer";
   private final MeterRegistry meterRegistry;
-  private final SystemEntityClient entityClient;
-  private final boolean isEnabled;
+  private final boolean enabled;
   @Getter private final String consumerGroupSuffix;
-  private OperationContext systemOpContext;
-
-  private final ConcurrentHashMap<String, String> criticalityCache = new ConcurrentHashMap<>();
-  private final ConcurrentHashMap<String, String> sinkHostCache = new ConcurrentHashMap<>();
-  private final AtomicLong ingestionSourceCacheRefreshedAt =
-      new AtomicLong(System.currentTimeMillis());
+  private final String customerId;
 
   @Autowired
   public IngestionMetricsHook(
-      @Nonnull MeterRegistry meterRegistry,
-      @Nonnull SystemEntityClient entityClient,
-      @Nonnull @Value("${ingestionMetrics.hook.enabled:true}") Boolean isEnabled,
-      @Nonnull @Value("${ingestionMetrics.hook.consumerGroupSuffix:}") String consumerGroupSuffix) {
+      @Nonnull final MeterRegistry meterRegistry,
+      @Value("${ingestionMetrics.hook.enabled:false}") final boolean isEnabled,
+      @Nonnull @Value("${ingestionMetrics.hook.consumerGroupSuffix:}")
+          final String consumerGroupSuffix,
+      @Nullable @Value("${executors.executorCustomerId:#{null}}") final String customerId) {
     this.meterRegistry = meterRegistry;
-    this.entityClient = entityClient;
-    this.isEnabled = isEnabled;
+    this.enabled = isEnabled;
     this.consumerGroupSuffix = consumerGroupSuffix;
+    this.customerId = customerId != null ? customerId : "unknown";
   }
 
   @VisibleForTesting
-  public IngestionMetricsHook(
-      @Nonnull MeterRegistry meterRegistry,
-      @Nullable SystemEntityClient entityClient,
-      @Nonnull Boolean isEnabled) {
-    this.meterRegistry = meterRegistry;
-    this.entityClient = entityClient;
-    this.isEnabled = isEnabled;
-    this.consumerGroupSuffix = "";
+  public IngestionMetricsHook(@Nonnull MeterRegistry meterRegistry, boolean isEnabled) {
+    this(meterRegistry, isEnabled, "", null);
   }
 
   @Override
   public boolean isEnabled() {
-    return isEnabled;
+    return enabled;
   }
 
   @Override
   public IngestionMetricsHook init(@Nonnull OperationContext systemOperationContext) {
-    this.systemOpContext = systemOperationContext;
     log.info("Initialized the ingestion metrics hook");
     return this;
   }
 
   @Override
   public void invoke(@Nonnull MetadataChangeLog event) throws Exception {
-    if (!isEnabled || !isEligibleForProcessing(event)) {
+    if (!enabled || !isEligibleForProcessing(event)) {
       return;
     }
 
     try {
       ExecutionRequestResult result = extractResult(event);
 
-      // Only process ingestion reports (CLI_INGEST or RUN_INGEST)
       if (!isIngestionReport(result)) {
         return;
       }
 
-      recordMetrics(result, event.getEntityUrn().toString());
+      recordMetrics(result, event.getEntityUrn());
     } catch (Exception e) {
       log.error("Failed to process ingestion metrics for event: {}", event.getEntityUrn(), e);
     }
   }
 
-  /** Returns true if this event should be processed by this hook. */
   private boolean isEligibleForProcessing(@Nonnull MetadataChangeLog event) {
     return ASPECT_NAME.equals(event.getAspectName())
         && SUPPORTED_CHANGE_TYPES.contains(event.getChangeType())
-        && event.getAspect() != null;
+        && event.getAspect() != null
+        && event.getEntityUrn() != null;
   }
 
-  /** Checks if this is an ingestion report (CLI_INGEST or RUN_INGEST). */
   private boolean isIngestionReport(@Nonnull ExecutionRequestResult result) {
     if (!result.hasStructuredReport()) {
       return false;
@@ -171,7 +139,6 @@ public class IngestionMetricsHook implements MetadataChangeLogHook {
     return SUPPORTED_REPORT_TYPES.contains(report.getType());
   }
 
-  /** Extracts the ExecutionRequestResult from the MCL event. */
   @Nonnull
   private ExecutionRequestResult extractResult(@Nonnull MetadataChangeLog event) {
     return GenericRecordUtils.deserializeAspect(
@@ -180,9 +147,8 @@ public class IngestionMetricsHook implements MetadataChangeLogHook {
         ExecutionRequestResult.class);
   }
 
-  /** Records metrics from the execution result and emits a structured log event. */
   private void recordMetrics(
-      @Nonnull ExecutionRequestResult result, @Nonnull String executionRequestUrn) {
+      @Nonnull ExecutionRequestResult result, @Nonnull Urn executionRequestUrn) {
     try {
       JsonNode reportJson = parseStructuredReport(result);
       if (reportJson == null) {
@@ -190,33 +156,24 @@ public class IngestionMetricsHook implements MetadataChangeLogHook {
         return;
       }
 
-      // Find source/sink reports once (used for platform extraction, metrics, and log)
       JsonNode sourceReport = findSourceReport(reportJson);
       JsonNode sinkReport = findSinkReport(reportJson);
 
-      String pipelineName = extractPipelineName(reportJson, executionRequestUrn);
       String platform = extractPlatform(reportJson, sourceReport);
-      String status = result.getStatus();
-      String version = extractVersion(reportJson);
+      String status = result.getStatus() != null ? result.getStatus() : "unknown";
 
-      String ingestionSourceUrn = extractIngestionSourceUrn(executionRequestUrn);
-      String ingestionSource =
-          ingestionSourceUrn != null ? extractIdFromUrn(ingestionSourceUrn) : "unknown";
-      String criticality = extractCriticality(ingestionSourceUrn);
-      String sinkHost = extractSinkHost(ingestionSourceUrn);
-
-      // Stable tags only — no per-run pipeline (avoids unbounded cardinality)
       Tags tags =
           Tags.of(
               TAG_PLATFORM, sanitizeTagValue(platform),
               TAG_STATUS, sanitizeTagValue(status),
-              TAG_INGESTION_SOURCE, sanitizeTagValue(ingestionSource),
-              TAG_CRITICALITY, sanitizeTagValue(criticality),
-              TAG_SINK_HOST, sanitizeTagValue(sinkHost),
-              TAG_VERSION, sanitizeTagValue(version));
+              TAG_CUSTOMER, sanitizeTagValue(customerId));
 
-      // Extract numeric values (used for both metrics and structured log)
       long eventsProduced = extractLongField(sourceReport, "events_produced");
+      // NOTE: warnings and failures are counted by array size, but the ingestion framework's
+      // LossyList caps these arrays at 10 entries. A run with 200 failures emits failures_count=10.
+      // There is no separate total count field in the structured report — this is a known
+      // limitation.
+      // LossyList in the ingestion framework always serializes as a JSON array.
       int warningsCount = extractArraySize(sourceReport, "warnings");
       int failuresCount = extractArraySize(sourceReport, "failures");
       long recordsWritten = extractLongField(sinkReport, "total_records_written");
@@ -236,60 +193,72 @@ public class IngestionMetricsHook implements MetadataChangeLogHook {
             .record(result.getDurationMs());
       }
 
-      if (eventsProduced > 0) {
-        Counter.builder(METRIC_PREFIX + "events_produced")
-            .tags(tags)
-            .register(meterRegistry)
-            .increment(eventsProduced);
-      }
-      if (warningsCount > 0) {
-        Counter.builder(METRIC_PREFIX + "warnings")
-            .tags(tags)
-            .register(meterRegistry)
-            .increment(warningsCount);
-      }
-      if (failuresCount > 0) {
-        Counter.builder(METRIC_PREFIX + "failures")
-            .tags(tags)
-            .register(meterRegistry)
-            .increment(failuresCount);
-      }
-      if (recordsWritten > 0) {
-        Counter.builder(METRIC_PREFIX + "records_written")
-            .tags(tags)
-            .register(meterRegistry)
-            .increment(recordsWritten);
-      }
-      if (sinkFailuresCount > 0) {
-        Counter.builder(METRIC_PREFIX + "sink_failures")
-            .tags(tags)
-            .register(meterRegistry)
-            .increment(sinkFailuresCount);
-      }
+      // Register all counters unconditionally so Prometheus has the series even for zero-value
+      // runs. Without this, rate() returns no data instead of 0 for label combinations that
+      // haven't crossed the zero threshold, causing dashboard holes.
+      Counter.builder(METRIC_PREFIX + "events_produced")
+          .tags(tags)
+          .description("Metadata records extracted from source")
+          .register(meterRegistry)
+          .increment(eventsProduced);
+      Counter.builder(METRIC_PREFIX + "warnings")
+          .tags(tags)
+          .description("Source warning count per ingestion run")
+          .register(meterRegistry)
+          .increment(warningsCount);
+      Counter.builder(METRIC_PREFIX + "failures")
+          .tags(tags)
+          .description("Source extraction error count per ingestion run")
+          .register(meterRegistry)
+          .increment(failuresCount);
+      Counter.builder(METRIC_PREFIX + "records_written")
+          .tags(tags)
+          .description("Records successfully written to DataHub")
+          .register(meterRegistry)
+          .increment(recordsWritten);
+      Counter.builder(METRIC_PREFIX + "sink_failures")
+          .tags(tags)
+          .description("Sink write failures — indicates data loss")
+          .register(meterRegistry)
+          .increment(sinkFailuresCount);
+
+      long tablesScanned = extractLongField(sourceReport, "tables_scanned");
+      DistributionSummary.builder(METRIC_PREFIX + "tables_scanned")
+          .tags(tags)
+          .description("Number of tables scanned per ingestion run")
+          .register(meterRegistry)
+          .record(tablesScanned);
+
+      long viewParseFailures =
+          extractLongField(sourceReport, "num_view_definitions_failed_parsing");
+      Counter.builder(METRIC_PREFIX + "view_parse_failures")
+          .tags(tags)
+          .description(
+              "View definitions that failed to parse — silent failures not counted in failures metric")
+          .register(meterRegistry)
+          .increment(viewParseFailures);
 
       // Per-execution detail as structured log (Observe ingests this for drill-down)
       emitRunEvent(
-          pipelineName,
-          executionRequestUrn,
-          ingestionSource,
-          platform,
-          status,
-          criticality,
-          result.hasDurationMs() ? result.getDurationMs() : null,
-          eventsProduced,
-          recordsWritten,
-          warningsCount,
-          failuresCount,
-          sinkFailuresCount,
-          sourceReport,
-          sinkReport);
+          new RunEvent(
+              executionRequestUrn,
+              platform,
+              status,
+              result.hasDurationMs() ? result.getDurationMs() : null,
+              eventsProduced,
+              recordsWritten,
+              warningsCount,
+              failuresCount,
+              sinkFailuresCount,
+              reportJson,
+              sourceReport,
+              sinkReport));
 
     } catch (Exception e) {
       log.error("Error recording metrics for {}: {}", executionRequestUrn, e.getMessage(), e);
     }
   }
 
-  /** Parses the structured report JSON. */
   @Nullable
   private JsonNode parseStructuredReport(@Nonnull ExecutionRequestResult result) {
     try {
@@ -304,19 +273,6 @@ public class IngestionMetricsHook implements MetadataChangeLogHook {
     }
   }
 
-  /** Extracts pipeline name from the report. */
-  @Nonnull
-  private String extractPipelineName(@Nonnull JsonNode reportJson, @Nonnull String urn) {
-    // Try to get from run_id which often contains pipeline info
-    JsonNode runId = reportJson.path("runId");
-    if (!runId.isMissingNode() && runId.isTextual()) {
-      return runId.asText();
-    }
-    // Fall back to execution request URN
-    return extractIdFromUrn(urn);
-  }
-
-  /** Extracts platform from the source report (uses pre-found sourceReport to avoid re-lookup). */
   @Nonnull
   private String extractPlatform(@Nonnull JsonNode reportJson, @Nonnull JsonNode sourceReport) {
     // Try executor format first: source.type
@@ -336,219 +292,6 @@ public class IngestionMetricsHook implements MetadataChangeLogHook {
   }
 
   /**
-   * Extracts the sink host from the ingestion source's recipe sink server URL. Fetches {@code
-   * dataHubIngestionSourceInfo} aspect, parses the recipe JSON, and extracts the hostname from
-   * {@code sink.config.server} (e.g., "customer1.example.com" from
-   * "https://customer1.example.com"). Results are cached alongside criticality with the same TTL.
-   */
-  @Nonnull
-  private String extractSinkHost(@Nullable String ingestionSourceUrn) {
-    if (ingestionSourceUrn == null || entityClient == null || systemOpContext == null) {
-      return "unknown";
-    }
-
-    evictIngestionSourceCacheIfExpired();
-
-    return sinkHostCache.computeIfAbsent(ingestionSourceUrn, this::fetchSinkHost);
-  }
-
-  /** Fetches sink host from ingestion source info recipe (called on cache miss). */
-  @Nonnull
-  private String fetchSinkHost(@Nonnull String ingestionSourceUrn) {
-    try {
-      Urn urn = UrnUtils.getUrn(ingestionSourceUrn);
-      EntityResponse response =
-          entityClient.getV2(
-              systemOpContext,
-              urn.getEntityType(),
-              urn,
-              ImmutableSet.of(INGESTION_SOURCE_INFO_ASPECT_NAME));
-
-      if (response != null
-          && response.getAspects() != null
-          && response.getAspects().containsKey(INGESTION_SOURCE_INFO_ASPECT_NAME)) {
-        EnvelopedAspect enveloped = response.getAspects().get(INGESTION_SOURCE_INFO_ASPECT_NAME);
-        DataHubIngestionSourceInfo sourceInfo =
-            new DataHubIngestionSourceInfo(enveloped.getValue().data());
-
-        if (sourceInfo.hasConfig() && sourceInfo.getConfig().hasRecipe()) {
-          return extractSinkHostFromRecipe(sourceInfo.getConfig().getRecipe());
-        }
-      }
-
-      log.debug("No ingestion source info found for {}", ingestionSourceUrn);
-      return "unknown";
-    } catch (Exception e) {
-      log.warn(
-          "Failed to fetch ingestion source info for {}: {}", ingestionSourceUrn, e.getMessage());
-      return "unknown";
-    }
-  }
-
-  /** Parses recipe JSON and extracts hostname from sink server URL. */
-  @Nonnull
-  private String extractSinkHostFromRecipe(@Nonnull String recipeJson) {
-    try {
-      JsonNode recipe = OBJECT_MAPPER.readTree(recipeJson);
-      JsonNode serverNode = recipe.path("sink").path("config").path("server");
-      if (serverNode.isMissingNode() || !serverNode.isTextual()) {
-        return "unknown";
-      }
-      return extractHostname(serverNode.asText());
-    } catch (Exception e) {
-      log.debug("Failed to parse recipe for sink host extraction: {}", e.getMessage());
-      return "unknown";
-    }
-  }
-
-  /**
-   * Extracts hostname from URL (e.g., "customer1.example.com" from
-   * "https://customer1.example.com").
-   */
-  @Nonnull
-  private String extractHostname(@Nonnull String url) {
-    try {
-      URI uri = new URI(url);
-      String host = uri.getHost();
-      return (host != null && !host.isEmpty()) ? host : "unknown";
-    } catch (Exception e) {
-      return "unknown";
-    }
-  }
-
-  /** Extracts CLI version from the report (e.g., "1.3.1" from cli.cli_version). */
-  @Nonnull
-  private String extractVersion(@Nonnull JsonNode reportJson) {
-    JsonNode cliVersion = reportJson.path("cli").path("cli_version");
-    if (!cliVersion.isMissingNode() && cliVersion.isTextual()) {
-      return cliVersion.asText();
-    }
-    return "unknown";
-  }
-
-  /**
-   * Extracts the stable ingestion source URN from the execution request.
-   *
-   * <p>This fetches the ExecutionRequestInput aspect to get the ingestionSource URN, which is
-   * stable across runs for the same logical ingestion source. This allows proper grouping of
-   * metrics for consecutive failure detection and baseline calculations.
-   *
-   * @param executionRequestUrn the URN of the execution request
-   * @return the full ingestion source URN if available, or null if not found
-   */
-  @Nullable
-  private String extractIngestionSourceUrn(@Nonnull String executionRequestUrn) {
-    if (entityClient == null || systemOpContext == null) {
-      log.debug(
-          "EntityClient or OperationContext not available, cannot fetch ingestion source for {}",
-          executionRequestUrn);
-      return null;
-    }
-
-    try {
-      Urn urn = UrnUtils.getUrn(executionRequestUrn);
-      EntityResponse response =
-          entityClient.getV2(
-              systemOpContext, urn.getEntityType(), urn, ImmutableSet.of(INPUT_ASPECT_NAME));
-
-      if (response != null
-          && response.getAspects() != null
-          && response.getAspects().containsKey(INPUT_ASPECT_NAME)) {
-        ExecutionRequestInput input =
-            new ExecutionRequestInput(
-                response.getAspects().get(INPUT_ASPECT_NAME).getValue().data());
-
-        if (input.hasSource() && input.getSource().hasIngestionSource()) {
-          String ingestionSourceUrn = input.getSource().getIngestionSource().toString();
-          log.debug(
-              "Found ingestion source {} for execution request {}",
-              ingestionSourceUrn,
-              executionRequestUrn);
-          return ingestionSourceUrn;
-        }
-      }
-
-      log.debug("No ingestion source found for execution request {}", executionRequestUrn);
-      return null;
-
-    } catch (Exception e) {
-      log.warn("Failed to fetch ingestion source for {}: {}", executionRequestUrn, e.getMessage());
-      return null;
-    }
-  }
-
-  /**
-   * Extracts the criticality level from the ingestion source's global tags, with caching.
-   *
-   * <p>Results are cached by ingestion source URN for {@link #CRITICALITY_CACHE_TTL_MS} to avoid
-   * repeated RPCs for the same source across consecutive runs. The cache is cleared in bulk when
-   * the TTL expires, so tag changes are picked up within the TTL window.
-   *
-   * @param ingestionSourceUrn the URN of the ingestion source (may be null)
-   * @return the criticality level: 'critical', 'warning', 'alert-disabled', or default 'warning'
-   */
-  @Nonnull
-  private String extractCriticality(@Nullable String ingestionSourceUrn) {
-    if (ingestionSourceUrn == null || entityClient == null || systemOpContext == null) {
-      return CRITICALITY_DEFAULT;
-    }
-
-    evictIngestionSourceCacheIfExpired();
-
-    return criticalityCache.computeIfAbsent(ingestionSourceUrn, this::fetchCriticality);
-  }
-
-  /** Evicts both criticality and sink host caches if the TTL has expired. */
-  private void evictIngestionSourceCacheIfExpired() {
-    long lastRefresh = ingestionSourceCacheRefreshedAt.get();
-    long now = System.currentTimeMillis();
-    if (now - lastRefresh > CRITICALITY_CACHE_TTL_MS
-        && ingestionSourceCacheRefreshedAt.compareAndSet(lastRefresh, now)) {
-      criticalityCache.clear();
-      sinkHostCache.clear();
-    }
-  }
-
-  /** Fetches criticality from entity client (called on cache miss). */
-  @Nonnull
-  private String fetchCriticality(@Nonnull String ingestionSourceUrn) {
-    try {
-      Urn urn = UrnUtils.getUrn(ingestionSourceUrn);
-      EntityResponse response =
-          entityClient.getV2(
-              systemOpContext, urn.getEntityType(), urn, ImmutableSet.of(GLOBAL_TAGS_ASPECT_NAME));
-
-      if (response != null
-          && response.getAspects() != null
-          && response.getAspects().containsKey(GLOBAL_TAGS_ASPECT_NAME)) {
-        GlobalTags globalTags =
-            new GlobalTags(response.getAspects().get(GLOBAL_TAGS_ASPECT_NAME).getValue().data());
-
-        for (TagAssociation tagAssociation : globalTags.getTags()) {
-          String tagName = extractIdFromUrn(tagAssociation.getTag().toString());
-          if (CRITICALITY_CRITICAL.equalsIgnoreCase(tagName)) {
-            return CRITICALITY_CRITICAL;
-          } else if (CRITICALITY_WARNING.equalsIgnoreCase(tagName)) {
-            return CRITICALITY_WARNING;
-          } else if (CRITICALITY_ALERT_DISABLED.equalsIgnoreCase(tagName)) {
-            return CRITICALITY_ALERT_DISABLED;
-          }
-        }
-      }
-
-      log.debug(
-          "No criticality tag found for ingestion source {}, using default: {}",
-          ingestionSourceUrn,
-          CRITICALITY_DEFAULT);
-      return CRITICALITY_DEFAULT;
-
-    } catch (Exception e) {
-      log.warn("Failed to fetch criticality tags for {}: {}", ingestionSourceUrn, e.getMessage());
-      return CRITICALITY_DEFAULT;
-    }
-  }
-
-  /**
    * Finds the source report in the JSON (handles multiple formats).
    *
    * <p>Executor format (RUN_INGEST): {"source": {"type": "...", "report": {...}}}
@@ -564,8 +307,9 @@ public class IngestionMetricsHook implements MetadataChangeLogHook {
       if (!report.isMissingNode()) {
         return report;
       }
-      // If no nested report, maybe it's directly in source
-      return source;
+      // source exists but has no nested report — return missingNode to avoid silently reading
+      // fields from the source parent object (which would return 0 for all numeric lookups)
+      return MissingNode.getInstance();
     }
 
     // Fall back to CLI format: "Source (type)" keys
@@ -576,7 +320,7 @@ public class IngestionMetricsHook implements MetadataChangeLogHook {
         return entry.getValue();
       }
     }
-    return OBJECT_MAPPER.missingNode();
+    return MissingNode.getInstance();
   }
 
   /**
@@ -595,8 +339,9 @@ public class IngestionMetricsHook implements MetadataChangeLogHook {
       if (!report.isMissingNode()) {
         return report;
       }
-      // If no nested report, maybe it's directly in sink
-      return sink;
+      // sink exists but has no nested report — return missingNode to avoid silently reading
+      // fields from the sink parent object
+      return MissingNode.getInstance();
     }
 
     // Fall back to CLI format: "Sink (type)" keys
@@ -607,75 +352,158 @@ public class IngestionMetricsHook implements MetadataChangeLogHook {
         return entry.getValue();
       }
     }
-    return OBJECT_MAPPER.missingNode();
+    return MissingNode.getInstance();
   }
 
-  /** Extracts ID from URN. */
-  @Nonnull
-  private String extractIdFromUrn(@Nonnull String urn) {
-    // URN format: urn:li:dataHubExecutionRequest:xxxxx
-    int lastColon = urn.lastIndexOf(':');
-    if (lastColon > 0 && lastColon < urn.length() - 1) {
-      return urn.substring(lastColon + 1);
-    }
-    return urn;
-  }
-
-  /** Extracts a long value from a JSON field, returning 0 if absent or non-numeric. */
   private long extractLongField(@Nonnull JsonNode parent, @Nonnull String fieldName) {
     JsonNode value = parent.path(fieldName);
     return (!value.isMissingNode() && value.isNumber()) ? value.asLong() : 0;
   }
 
-  /** Returns the size of a JSON array field, or 0 if absent or not an array. */
   private int extractArraySize(@Nonnull JsonNode parent, @Nonnull String fieldName) {
     JsonNode array = parent.path(fieldName);
     return (!array.isMissingNode() && array.isArray()) ? array.size() : 0;
   }
 
-  /**
-   * Emits a structured JSON log event with full per-execution detail. Observe (or any log
-   * aggregator) ingests this for per-run drill-down, while Prometheus metrics use only stable
-   * labels for aggregation.
-   */
-  private void emitRunEvent(
-      @Nonnull String pipeline,
-      @Nonnull String executionRequestUrn,
-      @Nonnull String ingestionSource,
-      @Nonnull String platform,
-      @Nonnull String status,
-      @Nonnull String criticality,
-      @Nullable Long durationMs,
+  /** Per-execution detail passed to emitRunEvent to avoid long parameter lists. */
+  record RunEvent(
+      Urn executionRequestUrn,
+      String platform,
+      String status,
+      Long durationMs,
       long eventsProduced,
       long recordsWritten,
       int warningsCount,
       int failuresCount,
       int sinkFailuresCount,
-      @Nonnull JsonNode sourceReport,
-      @Nonnull JsonNode sinkReport) {
-    try {
-      Map<String, Object> event = new LinkedHashMap<>();
-      event.put("pipeline", pipeline);
-      event.put("execution_id", extractIdFromUrn(executionRequestUrn));
-      event.put("ingestion_source", ingestionSource);
-      event.put("platform", platform);
-      event.put("status", status);
-      event.put("criticality", criticality);
-      if (durationMs != null) {
-        event.put("duration_ms", durationMs);
-      }
-      event.put("events_produced", eventsProduced);
-      event.put("records_written", recordsWritten);
-      event.put("warnings_count", warningsCount);
-      event.put("failures_count", failuresCount);
-      event.put("sink_failures_count", sinkFailuresCount);
-      event.put("failures", extractLogEntries(sourceReport, "failures"));
-      event.put("warnings", extractLogEntries(sourceReport, "warnings"));
-      event.put("sink_failures", extractLogEntries(sinkReport, "failures"));
+      JsonNode reportJson,
+      JsonNode sourceReport,
+      JsonNode sinkReport) {}
 
-      log.info("[INGESTION_RUN_EVENT] {}", OBJECT_MAPPER.writeValueAsString(event));
+  private void emitRunEvent(@Nonnull RunEvent r) {
+    if (!log.isInfoEnabled()) {
+      return;
+    }
+    try {
+      log.info("[INGESTION_RUN_EVENT] {}", OBJECT_MAPPER.writeValueAsString(buildRunEventMap(r)));
     } catch (Exception e) {
       log.warn("Failed to emit structured run event: {}", e.getMessage());
+    }
+  }
+
+  @VisibleForTesting
+  Map<String, Object> buildRunEventMap(@Nonnull RunEvent r) {
+    Map<String, Object> event = new LinkedHashMap<>();
+
+    event.put("execution_id", r.executionRequestUrn().getId());
+    event.put("customer", customerId);
+    event.put("platform", r.platform());
+    event.put("status", r.status());
+    if (r.durationMs() != null) {
+      event.put("duration_ms", r.durationMs());
+    }
+
+    JsonNode cli = r.reportJson().path("cli");
+    if (!cli.isMissingNode()) {
+      putIfPresent(event, "cli_version", cli, "cli_version");
+      putIfPresent(event, "models_version", cli, "models_version");
+      putIfPresent(event, "py_version", cli, "py_version");
+      putIfPresent(event, "mem_info", cli, "mem_info");
+      putIfPresent(event, "peak_memory_usage", cli, "peak_memory_usage");
+      putIfPresent(event, "peak_disk_usage", cli, "peak_disk_usage");
+      if (!cli.path("thread_count").isMissingNode()) {
+        event.put("thread_count", cli.path("thread_count").asLong());
+      }
+      if (!cli.path("peak_thread_count").isMissingNode()) {
+        event.put("peak_thread_count", cli.path("peak_thread_count").asLong());
+      }
+    }
+
+    event.put("events_produced", r.eventsProduced());
+    putLongIfPresent(event, "tables_scanned", r.sourceReport(), "tables_scanned");
+    putLongIfPresent(event, "views_scanned", r.sourceReport(), "views_scanned");
+    putLongIfPresent(event, "schemas_scanned", r.sourceReport(), "schemas_scanned");
+    putLongIfPresent(event, "databases_scanned", r.sourceReport(), "databases_scanned");
+    putLongIfPresent(event, "entities_profiled", r.sourceReport(), "entities_profiled");
+    putLongIfPresent(
+        event,
+        "num_view_definitions_failed_parsing",
+        r.sourceReport(),
+        "num_view_definitions_failed_parsing");
+
+    if (!r.sourceReport().path("ingestion_stage_durations").isMissingNode()) {
+      event.put("ingestion_stage_durations", r.sourceReport().path("ingestion_stage_durations"));
+    }
+    if (!r.sourceReport().path("ingestion_high_stage_seconds").isMissingNode()) {
+      // Remap Python enum names to human-readable values.
+      // Source: metadata-ingestion/src/datahub/ingestion/source_report/ingestion_stage.py
+      // IngestionHighStage._UNDEFINED = "Ingestion", IngestionHighStage.PROFILING = "Profiling"
+      // If the Python enum changes, these keys will silently become stale in Observe logs.
+      Map<String, Object> highStageSeconds = new LinkedHashMap<>();
+      r.sourceReport()
+          .path("ingestion_high_stage_seconds")
+          .fields()
+          .forEachRemaining(
+              entry -> {
+                String key =
+                    entry.getKey().equals("_UNDEFINED")
+                        ? "Ingestion"
+                        : entry.getKey().equals("PROFILING") ? "Profiling" : entry.getKey();
+                highStageSeconds.put(key, entry.getValue().asDouble());
+              });
+      event.put("ingestion_high_stage_seconds", highStageSeconds);
+    }
+
+    event.put("warnings_count", r.warningsCount());
+    event.put("failures_count", r.failuresCount());
+    event.put("failures", extractLogEntries(r.sourceReport(), "failures"));
+    event.put("warnings", extractLogEntries(r.sourceReport(), "warnings"));
+    event.put("infos", extractLogEntries(r.sourceReport(), "infos"));
+
+    event.put("records_written", r.recordsWritten());
+    event.put("sink_failures_count", r.sinkFailuresCount());
+    event.put("sink_failures", extractLogEntries(r.sinkReport(), "failures"));
+    putDoubleIfPresent(
+        event, "records_written_per_second", r.sinkReport(), "records_written_per_second");
+    putLongIfPresent(event, "pending_requests", r.sinkReport(), "pending_requests");
+    putIfPresent(event, "gms_version", r.sinkReport(), "gms_version");
+    putIfPresent(event, "sink_mode", r.sinkReport(), "mode");
+
+    return event;
+  }
+
+  /** Adds a string field to the event map if present and non-null in the JSON node. */
+  private void putIfPresent(
+      @Nonnull Map<String, Object> event,
+      @Nonnull String key,
+      @Nonnull JsonNode node,
+      @Nonnull String field) {
+    JsonNode value = node.path(field);
+    if (!value.isMissingNode() && !value.isNull()) {
+      event.put(key, value.asText());
+    }
+  }
+
+  /** Adds a long field to the event map if present and numeric in the JSON node. */
+  private void putLongIfPresent(
+      @Nonnull Map<String, Object> event,
+      @Nonnull String key,
+      @Nonnull JsonNode node,
+      @Nonnull String field) {
+    JsonNode value = node.path(field);
+    if (!value.isMissingNode() && value.isNumber()) {
+      event.put(key, value.asLong());
+    }
+  }
+
+  private void putDoubleIfPresent(
+      @Nonnull Map<String, Object> event,
+      @Nonnull String key,
+      @Nonnull JsonNode node,
+      @Nonnull String field) {
+    JsonNode value = node.path(field);
+    if (!value.isMissingNode() && value.isNumber()) {
+      event.put(key, value.asDouble());
     }
   }
 
@@ -723,13 +551,16 @@ public class IngestionMetricsHook implements MetadataChangeLogHook {
     return entries;
   }
 
-  /** Sanitizes tag values to ensure they are valid for Prometheus. */
+  /**
+   * Sanitizes tag values for Prometheus. Note: different inputs may map to the same output (e.g.,
+   * "my:platform" and "my_platform" both become "my_platform"). This is acceptable since tag values
+   * in practice (platform names, customer IDs) do not contain special characters.
+   */
   @Nonnull
   private String sanitizeTagValue(@Nullable String value) {
     if (value == null || value.isEmpty()) {
       return "unknown";
     }
-    // Replace non-alphanumeric characters (except underscore, dash, dot) with underscore
     return value.replaceAll("[^a-zA-Z0-9_.-]", "_");
   }
 

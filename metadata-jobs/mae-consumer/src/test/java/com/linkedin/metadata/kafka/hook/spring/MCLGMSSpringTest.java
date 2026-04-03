@@ -6,6 +6,7 @@ import com.linkedin.gms.factory.config.ConfigurationProvider;
 import com.linkedin.metadata.kafka.hook.UpdateIndicesHook;
 import com.linkedin.metadata.kafka.hook.event.PlatformEventGeneratorHook;
 import com.linkedin.metadata.kafka.hook.incident.IncidentsSummaryHook;
+import com.linkedin.metadata.kafka.hook.ingestion.IngestionMetricsHook;
 import com.linkedin.metadata.kafka.hook.ingestion.IngestionSchedulerHook;
 import com.linkedin.metadata.kafka.hook.siblings.SiblingAssociationHook;
 import com.linkedin.metadata.kafka.listener.mcl.MCLKafkaListenerRegistrar;
@@ -26,6 +27,7 @@ import org.testng.annotations.Test;
     },
     properties = {
       "ingestionScheduler.enabled=false",
+      "ingestionMetrics.hook.enabled=true",
       "configEntityRegistry.path=../../metadata-jobs/mae-consumer/src/test/resources/test-entity-registry.yml",
       "kafka.schemaRegistry.type=INTERNAL"
     })
@@ -56,6 +58,11 @@ public class MCLGMSSpringTest extends AbstractTestNGSpringContextTests {
         1,
         registrar.getEnabledHooks().stream()
             .filter(hook -> hook instanceof IncidentsSummaryHook)
+            .count());
+    assertEquals(
+        1,
+        registrar.getEnabledHooks().stream()
+            .filter(hook -> hook instanceof IngestionMetricsHook)
             .count());
   }
 

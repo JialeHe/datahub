@@ -11,6 +11,7 @@ import com.linkedin.metadata.kafka.hook.UpdateIndicesHook;
 import com.linkedin.metadata.kafka.hook.event.PlatformEventGeneratorHook;
 import com.linkedin.metadata.kafka.hook.form.FormAssignmentHook;
 import com.linkedin.metadata.kafka.hook.incident.IncidentsSummaryHook;
+import com.linkedin.metadata.kafka.hook.ingestion.IngestionMetricsHook;
 import com.linkedin.metadata.kafka.hook.ingestion.IngestionSchedulerHook;
 import com.linkedin.metadata.kafka.hook.siblings.SiblingAssociationHook;
 import com.linkedin.metadata.search.EntitySearchService;
@@ -26,7 +27,7 @@ import org.testng.annotations.Test;
 @ActiveProfiles("test")
 @SpringBootTest(
     classes = {MaeConsumerApplication.class, MaeConsumerApplicationTestConfiguration.class},
-    properties = "PE_CONSUMER_ENABLED=true")
+    properties = "PE_CONSUMER_ENABLED=true", "ingestionMetrics.hook.enabled=true"})
 public class MaeConsumerApplicationTest extends AbstractTestNGSpringContextTests {
 
   @Autowired private KafkaHealthIndicator kafkaHealthIndicator;
@@ -59,7 +60,8 @@ public class MaeConsumerApplicationTest extends AbstractTestNGSpringContextTests
             FormAssignmentHook.class,
             IncidentsSummaryHook.class,
             SiblingAssociationHook.class,
-            IncidentsSummaryHook.class);
+            IncidentsSummaryHook.class,
+            IngestionMetricsHook.class);
 
     for (Class<?> hookClazz : expectedHooks) {
       assertTrue(

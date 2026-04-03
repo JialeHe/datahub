@@ -1,40 +1,23 @@
 package com.linkedin.metadata.kafka.hook.ingestion;
 
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
+import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertNotNull;
 import static org.testng.Assert.assertTrue;
 
-import com.google.common.collect.ImmutableSet;
-import com.linkedin.common.GlobalTags;
-import com.linkedin.common.TagAssociation;
-import com.linkedin.common.TagAssociationArray;
-import com.linkedin.common.urn.TagUrn;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.linkedin.common.urn.Urn;
-import com.linkedin.common.urn.UrnUtils;
-import com.linkedin.data.template.StringMap;
-import com.linkedin.entity.Aspect;
-import com.linkedin.entity.EntityResponse;
-import com.linkedin.entity.EnvelopedAspect;
-import com.linkedin.entity.EnvelopedAspectMap;
-import com.linkedin.entity.client.SystemEntityClient;
 import com.linkedin.events.metadata.ChangeType;
-import com.linkedin.execution.ExecutionRequestInput;
 import com.linkedin.execution.ExecutionRequestResult;
-import com.linkedin.execution.ExecutionRequestSource;
 import com.linkedin.execution.StructuredExecutionReport;
-import com.linkedin.ingestion.DataHubIngestionSourceConfig;
-import com.linkedin.ingestion.DataHubIngestionSourceInfo;
 import com.linkedin.metadata.utils.GenericRecordUtils;
 import com.linkedin.mxe.MetadataChangeLog;
-import io.datahubproject.metadata.context.OperationContext;
 import io.datahubproject.test.metadata.context.TestOperationContexts;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.DistributionSummary;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
-import org.mockito.Mockito;
+import java.util.List;
+import java.util.Map;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
@@ -51,8 +34,8 @@ public class IngestionMetricsHookTest {
   @BeforeMethod
   public void setup() {
     meterRegistry = new SimpleMeterRegistry();
-    // Pass null for entityClient in tests - ingestion_source will default to "unknown"
-    hook = new IngestionMetricsHook(meterRegistry, null, true);
+    // Pass null for entityClient in tests — no entity client RPCs in the current implementation
+    hook = new IngestionMetricsHook(meterRegistry, true);
     hook.init(TestOperationContexts.systemContextNoSearchAuthorization());
   }
 
@@ -64,33 +47,45 @@ public class IngestionMetricsHookTest {
 
     // Verify run counter
     Counter runsCounter = meterRegistry.find("com.datahub.ingest.runs").counter();
-    assertTrue(runsCounter != null && runsCounter.count() == 1.0);
+    assertNotNull(runsCounter);
+    assertEquals(runsCounter.count(), 1.0);
 
     // Verify duration was recorded
     DistributionSummary durationSummary =
         meterRegistry.find("com.datahub.ingest.duration_ms").summary();
-    assertTrue(durationSummary != null && durationSummary.totalAmount() == 1000.0);
+    assertNotNull(durationSummary);
+    assertEquals(durationSummary.totalAmount(), 1000.0);
 
     // Verify events_produced counter
     Counter eventsCounter = meterRegistry.find("com.datahub.ingest.events_produced").counter();
-    assertTrue(eventsCounter != null && eventsCounter.count() == 100.0);
+    assertNotNull(eventsCounter);
+    assertEquals(eventsCounter.count(), 100.0);
 
     // Verify records_written counter
     Counter recordsCounter = meterRegistry.find("com.datahub.ingest.records_written").counter();
-    assertTrue(recordsCounter != null && recordsCounter.count() == 5.0);
+    assertNotNull(recordsCounter);
+    assertEquals(recordsCounter.count(), 5.0);
 
     // Verify warnings counter
     Counter warningsCounter = meterRegistry.find("com.datahub.ingest.warnings").counter();
-    assertTrue(warningsCounter != null && warningsCounter.count() == 2.0);
+    assertNotNull(warningsCounter);
+    assertEquals(warningsCounter.count(), 2.0);
 
     // Verify failures counter
     Counter failuresCounter = meterRegistry.find("com.datahub.ingest.failures").counter();
-    assertTrue(failuresCounter != null && failuresCounter.count() == 3.0);
+    assertNotNull(failuresCounter);
+    assertEquals(failuresCounter.count(), 3.0);
+
+    // Verify platform tag extracted from CLI format (Source (file) → platform=file)
+    Counter platformCounter =
+        meterRegistry.find("com.datahub.ingest.runs").tag("platform", "file").counter();
+    assertNotNull(platformCounter);
+    assertEquals(platformCounter.count(), 1.0);
   }
 
   @Test
   public void testInvokeSkipsWhenDisabled() throws Exception {
-    IngestionMetricsHook disabledHook = new IngestionMetricsHook(meterRegistry, null, false);
+    IngestionMetricsHook disabledHook = new IngestionMetricsHook(meterRegistry, false);
     disabledHook.init(TestOperationContexts.systemContextNoSearchAuthorization());
 
     MetadataChangeLog event = createTestEvent("SUCCEEDED", 1000L, 100, 5, 0, 0);
@@ -100,6 +95,99 @@ public class IngestionMetricsHookTest {
     // Verify no metrics recorded
     Counter runsCounter = meterRegistry.find("com.datahub.ingest.runs").counter();
     assertTrue(runsCounter == null || runsCounter.count() == 0.0);
+  }
+
+  @Test
+  public void testInvokeWithCreateChangeType() throws Exception {
+    MetadataChangeLog event = createTestEvent("SUCCEEDED", 1000L, 100, 5, 0, 0);
+    event.setChangeType(ChangeType.CREATE);
+
+    hook.invoke(event);
+
+    Counter runsCounter = meterRegistry.find("com.datahub.ingest.runs").counter();
+    assertNotNull(runsCounter);
+    assertEquals(runsCounter.count(), 1.0);
+  }
+
+  @Test
+  public void testInvokeWithMalformedJsonDoesNotThrow() throws Exception {
+    ExecutionRequestResult result = new ExecutionRequestResult();
+    result.setStatus("SUCCEEDED");
+
+    StructuredExecutionReport structuredReport = new StructuredExecutionReport();
+    structuredReport.setType("CLI_INGEST");
+    structuredReport.setSerializedValue("{invalid json{{");
+    structuredReport.setContentType("application/json");
+    result.setStructuredReport(structuredReport);
+
+    MetadataChangeLog event = new MetadataChangeLog();
+    event.setEntityType(ENTITY_TYPE);
+    event.setAspectName(ASPECT_NAME);
+    event.setChangeType(ChangeType.UPSERT);
+    event.setAspect(GenericRecordUtils.serializeAspect(result));
+    event.setEntityUrn(Urn.createFromString(TEST_EXECUTION_REQUEST_URN));
+
+    // Should not throw — parseStructuredReport returns null, hook warns and returns
+    hook.invoke(event);
+
+    Counter runsCounter = meterRegistry.find("com.datahub.ingest.runs").counter();
+    assertTrue(runsCounter == null || runsCounter.count() == 0.0);
+  }
+
+  @Test
+  public void testInvokeSkipsNullAspect() throws Exception {
+    MetadataChangeLog event = new MetadataChangeLog();
+    event.setEntityType(ENTITY_TYPE);
+    event.setAspectName(ASPECT_NAME);
+    event.setChangeType(ChangeType.UPSERT);
+    event.setEntityUrn(Urn.createFromString(TEST_EXECUTION_REQUEST_URN));
+    // aspect is null — not set
+
+    hook.invoke(event);
+
+    Counter runsCounter = meterRegistry.find("com.datahub.ingest.runs").counter();
+    assertTrue(runsCounter == null || runsCounter.count() == 0.0);
+  }
+
+  @Test
+  public void testInvokeSkipsNullEntityUrn() throws Exception {
+    MetadataChangeLog event = new MetadataChangeLog();
+    event.setEntityType(ENTITY_TYPE);
+    event.setAspectName(ASPECT_NAME);
+    event.setChangeType(ChangeType.UPSERT);
+    event.setAspect(GenericRecordUtils.serializeAspect(new ExecutionRequestResult()));
+    // entityUrn is null — not set
+
+    hook.invoke(event);
+
+    Counter runsCounter = meterRegistry.find("com.datahub.ingest.runs").counter();
+    assertTrue(runsCounter == null || runsCounter.count() == 0.0);
+  }
+
+  @Test
+  public void testNullStatusDefaultsToUnknown() throws Exception {
+    ExecutionRequestResult result = new ExecutionRequestResult();
+    // status not set — getStatus() returns null
+
+    StructuredExecutionReport structuredReport = new StructuredExecutionReport();
+    structuredReport.setType("CLI_INGEST");
+    structuredReport.setSerializedValue("{}");
+    structuredReport.setContentType("application/json");
+    result.setStructuredReport(structuredReport);
+
+    MetadataChangeLog event = new MetadataChangeLog();
+    event.setEntityType(ENTITY_TYPE);
+    event.setAspectName(ASPECT_NAME);
+    event.setChangeType(ChangeType.UPSERT);
+    event.setAspect(GenericRecordUtils.serializeAspect(result));
+    event.setEntityUrn(Urn.createFromString(TEST_EXECUTION_REQUEST_URN));
+
+    hook.invoke(event);
+
+    Counter runsCounter =
+        meterRegistry.find("com.datahub.ingest.runs").tag("status", "unknown").counter();
+    assertNotNull(runsCounter);
+    assertEquals(runsCounter.count(), 1.0);
   }
 
   @Test
@@ -138,29 +226,35 @@ public class IngestionMetricsHookTest {
 
     // Verify run counter
     Counter runsCounter = meterRegistry.find("com.datahub.ingest.runs").counter();
-    assertTrue(runsCounter != null && runsCounter.count() == 1.0);
+    assertNotNull(runsCounter);
+    assertEquals(runsCounter.count(), 1.0);
 
     // Verify duration was recorded
     DistributionSummary durationSummary =
         meterRegistry.find("com.datahub.ingest.duration_ms").summary();
-    assertTrue(durationSummary != null && durationSummary.totalAmount() == 2000.0);
+    assertNotNull(durationSummary);
+    assertEquals(durationSummary.totalAmount(), 2000.0);
 
     // Verify events_produced counter
     Counter eventsCounter = meterRegistry.find("com.datahub.ingest.events_produced").counter();
-    assertTrue(eventsCounter != null && eventsCounter.count() == 500.0);
+    assertNotNull(eventsCounter);
+    assertEquals(eventsCounter.count(), 500.0);
 
     // Verify records_written counter
     Counter recordsCounter = meterRegistry.find("com.datahub.ingest.records_written").counter();
-    assertTrue(recordsCounter != null && recordsCounter.count() == 50.0);
+    assertNotNull(recordsCounter);
+    assertEquals(recordsCounter.count(), 50.0);
 
     // Verify warnings counter
     Counter warningsCounter = meterRegistry.find("com.datahub.ingest.warnings").counter();
-    assertTrue(warningsCounter != null && warningsCounter.count() == 1.0);
+    assertNotNull(warningsCounter);
+    assertEquals(warningsCounter.count(), 1.0);
 
     // Verify platform tag is extracted correctly
     Counter platformCounter =
         meterRegistry.find("com.datahub.ingest.runs").tag("platform", "snowflake").counter();
-    assertTrue(platformCounter != null && platformCounter.count() == 1.0);
+    assertNotNull(platformCounter);
+    assertEquals(platformCounter.count(), 1.0);
   }
 
   @Test
@@ -171,7 +265,8 @@ public class IngestionMetricsHookTest {
 
     Counter failedRunsCounter =
         meterRegistry.find("com.datahub.ingest.runs").tag("status", "FAILURE").counter();
-    assertTrue(failedRunsCounter != null && failedRunsCounter.count() == 1.0);
+    assertNotNull(failedRunsCounter);
+    assertEquals(failedRunsCounter.count(), 1.0);
 
     // Test with SUCCEEDED status
     MetadataChangeLog successEvent = createTestEvent("SUCCEEDED", 1000L, 100, 10, 0, 0);
@@ -179,7 +274,8 @@ public class IngestionMetricsHookTest {
 
     Counter succeededRunsCounter =
         meterRegistry.find("com.datahub.ingest.runs").tag("status", "SUCCEEDED").counter();
-    assertTrue(succeededRunsCounter != null && succeededRunsCounter.count() == 1.0);
+    assertNotNull(succeededRunsCounter);
+    assertEquals(succeededRunsCounter.count(), 1.0);
   }
 
   @Test
@@ -195,10 +291,12 @@ public class IngestionMetricsHookTest {
     // Verify counters accumulated
     Counter runsCounter =
         meterRegistry.find("com.datahub.ingest.runs").tag("status", "SUCCEEDED").counter();
-    assertTrue(runsCounter != null && runsCounter.count() == 2.0);
+    assertNotNull(runsCounter);
+    assertEquals(runsCounter.count(), 2.0);
 
     Counter eventsCounter = meterRegistry.find("com.datahub.ingest.events_produced").counter();
-    assertTrue(eventsCounter != null && eventsCounter.count() == 300.0); // 100 + 200
+    assertNotNull(eventsCounter);
+    assertEquals(eventsCounter.count(), 300.0); // 100 + 200
   }
 
   @Test
@@ -226,125 +324,8 @@ public class IngestionMetricsHookTest {
 
     // Verify run counter was still recorded
     Counter runsCounter = meterRegistry.find("com.datahub.ingest.runs").counter();
-    assertTrue(runsCounter != null && runsCounter.count() == 1.0);
-  }
-
-  @Test
-  public void testIngestionSourceExtractedFromEntityClient() throws Exception {
-    SystemEntityClient mockClient = Mockito.mock(SystemEntityClient.class);
-    Urn execUrn = UrnUtils.getUrn(TEST_EXECUTION_REQUEST_URN);
-    String ingestionSourceUrnStr = "urn:li:dataHubIngestionSource:my-snowflake-source";
-
-    mockExecutionRequestInput(mockClient, execUrn, ingestionSourceUrnStr);
-
-    when(mockClient.getV2(
-            any(OperationContext.class),
-            eq("dataHubIngestionSource"),
-            any(Urn.class),
-            eq(ImmutableSet.of("globalTags"))))
-        .thenReturn(new EntityResponse());
-
-    IngestionMetricsHook hookWithClient = new IngestionMetricsHook(meterRegistry, mockClient, true);
-    hookWithClient.init(TestOperationContexts.systemContextNoSearchAuthorization());
-
-    hookWithClient.invoke(createTestEvent("SUCCEEDED", 1000L, 100, 5, 0, 0));
-
-    Counter sourceCounter =
-        meterRegistry
-            .find("com.datahub.ingest.runs")
-            .tag("ingestion_source", "my-snowflake-source")
-            .counter();
-    assertTrue(sourceCounter != null && sourceCounter.count() == 1.0);
-  }
-
-  @Test
-  public void testCriticalityExtractedFromGlobalTags() throws Exception {
-    SystemEntityClient mockClient = Mockito.mock(SystemEntityClient.class);
-    Urn execUrn = UrnUtils.getUrn(TEST_EXECUTION_REQUEST_URN);
-    String ingestionSourceUrnStr = "urn:li:dataHubIngestionSource:critical-source";
-
-    mockExecutionRequestInput(mockClient, execUrn, ingestionSourceUrnStr);
-    mockGlobalTags(mockClient, "critical");
-
-    IngestionMetricsHook hookWithClient = new IngestionMetricsHook(meterRegistry, mockClient, true);
-    hookWithClient.init(TestOperationContexts.systemContextNoSearchAuthorization());
-
-    hookWithClient.invoke(createTestEvent("SUCCEEDED", 1000L, 100, 5, 0, 0));
-
-    Counter critCounter =
-        meterRegistry.find("com.datahub.ingest.runs").tag("criticality", "critical").counter();
-    assertTrue(critCounter != null && critCounter.count() == 1.0);
-  }
-
-  @Test
-  public void testAlertDisabledCriticality() throws Exception {
-    SystemEntityClient mockClient = Mockito.mock(SystemEntityClient.class);
-    Urn execUrn = UrnUtils.getUrn(TEST_EXECUTION_REQUEST_URN);
-
-    mockExecutionRequestInput(mockClient, execUrn, "urn:li:dataHubIngestionSource:disabled-source");
-    mockGlobalTags(mockClient, "alert-disabled");
-
-    IngestionMetricsHook hookWithClient = new IngestionMetricsHook(meterRegistry, mockClient, true);
-    hookWithClient.init(TestOperationContexts.systemContextNoSearchAuthorization());
-
-    hookWithClient.invoke(createTestEvent("SUCCEEDED", 1000L, 100, 5, 0, 0));
-
-    Counter counter =
-        meterRegistry
-            .find("com.datahub.ingest.runs")
-            .tag("criticality", "alert-disabled")
-            .counter();
-    assertTrue(counter != null && counter.count() == 1.0);
-  }
-
-  @Test
-  public void testCriticalityCacheAvoidsDuplicateRpcs() throws Exception {
-    SystemEntityClient mockClient = Mockito.mock(SystemEntityClient.class);
-    Urn execUrn = UrnUtils.getUrn(TEST_EXECUTION_REQUEST_URN);
-    String ingestionSourceUrnStr = "urn:li:dataHubIngestionSource:cached-source";
-    Urn ingestionSourceUrn = UrnUtils.getUrn(ingestionSourceUrnStr);
-
-    mockExecutionRequestInput(mockClient, execUrn, ingestionSourceUrnStr);
-
-    GlobalTags tags = new GlobalTags();
-    TagAssociation tag = new TagAssociation();
-    tag.setTag(new TagUrn("warning"));
-    tags.setTags(new TagAssociationArray(tag));
-
-    EnvelopedAspectMap tagAspects = new EnvelopedAspectMap();
-    tagAspects.put("globalTags", new EnvelopedAspect().setValue(new Aspect(tags.data())));
-    EntityResponse tagResponse = new EntityResponse();
-    tagResponse.setAspects(tagAspects);
-
-    when(mockClient.getV2(
-            any(OperationContext.class),
-            eq("dataHubIngestionSource"),
-            eq(ingestionSourceUrn),
-            eq(ImmutableSet.of("globalTags"))))
-        .thenReturn(tagResponse);
-
-    IngestionMetricsHook hookWithClient = new IngestionMetricsHook(meterRegistry, mockClient, true);
-    hookWithClient.init(TestOperationContexts.systemContextNoSearchAuthorization());
-
-    hookWithClient.invoke(createTestEvent("SUCCEEDED", 1000L, 100, 5, 0, 0));
-    hookWithClient.invoke(createTestEvent("SUCCEEDED", 2000L, 200, 10, 0, 0));
-
-    // globalTags fetched only once (cached for second call)
-    verify(mockClient, times(1))
-        .getV2(
-            any(OperationContext.class),
-            eq("dataHubIngestionSource"),
-            eq(ingestionSourceUrn),
-            eq(ImmutableSet.of("globalTags")));
-
-    // ExecutionRequestInput fetched each time (not cached — each execution request URN is unique in
-    // production)
-    verify(mockClient, times(2))
-        .getV2(
-            any(OperationContext.class),
-            eq(execUrn.getEntityType()),
-            eq(execUrn),
-            eq(ImmutableSet.of("dataHubExecutionRequestInput")));
+    assertNotNull(runsCounter);
+    assertEquals(runsCounter.count(), 1.0);
   }
 
   @Test
@@ -385,86 +366,184 @@ public class IngestionMetricsHookTest {
     hook.invoke(event);
 
     Counter sinkFailuresCounter = meterRegistry.find("com.datahub.ingest.sink_failures").counter();
-    assertTrue(sinkFailuresCounter != null && sinkFailuresCounter.count() == 2.0);
+    assertNotNull(sinkFailuresCounter);
+    assertEquals(sinkFailuresCounter.count(), 2.0);
   }
 
   @Test
-  public void testVersionExtractedFromCliField() throws Exception {
-    // Executor format includes cli.cli_version
+  public void testExecutorFormatProcessed() throws Exception {
+    // Executor format (RUN_INGEST) is processed correctly — version is log-only, not a metric label
     MetadataChangeLog event = createExecutorTestEvent("SUCCEEDED", 2000L, 500, 50, 0, 0);
 
     hook.invoke(event);
 
-    Counter versionCounter =
-        meterRegistry.find("com.datahub.ingest.runs").tag("version", "1.3.1").counter();
-    assertTrue(versionCounter != null && versionCounter.count() == 1.0);
+    Counter runsCounter = meterRegistry.find("com.datahub.ingest.runs").counter();
+    assertNotNull(runsCounter);
+    assertEquals(runsCounter.count(), 1.0);
+    Counter eventsCounter = meterRegistry.find("com.datahub.ingest.events_produced").counter();
+    assertNotNull(eventsCounter);
+    assertEquals(eventsCounter.count(), 500.0);
   }
 
   @Test
-  public void testVersionExtractedFromCliFormat() throws Exception {
-    // CLI format also includes cli.cli_version
+  public void testCliFormatProcessed() throws Exception {
+    // CLI format (CLI_INGEST) is processed correctly — version is log-only, not a metric label
     MetadataChangeLog event = createTestEvent("SUCCEEDED", 1000L, 100, 5, 0, 0);
 
     hook.invoke(event);
 
-    Counter versionCounter =
-        meterRegistry.find("com.datahub.ingest.runs").tag("version", "0.14.0").counter();
-    assertTrue(versionCounter != null && versionCounter.count() == 1.0);
+    Counter runsCounter = meterRegistry.find("com.datahub.ingest.runs").counter();
+    assertNotNull(runsCounter);
+    assertEquals(runsCounter.count(), 1.0);
   }
 
   @Test
-  public void testSinkHostExtractedFromRecipe() throws Exception {
-    SystemEntityClient mockClient = Mockito.mock(SystemEntityClient.class);
-    Urn execUrn = UrnUtils.getUrn(TEST_EXECUTION_REQUEST_URN);
-    String ingestionSourceUrnStr = "urn:li:dataHubIngestionSource:my-source";
+  public void testSourceReportMissingNestedReportReturnsZeroCounts() throws Exception {
+    // Executor format with source present but no nested source.report — previously returned
+    // the source parent node, causing all numeric lookups to silently return 0.
+    // Now correctly returns missingNode so metrics reflect the data actually available.
+    String reportJson =
+        "{"
+            + "\"cli\": {\"cli_version\": \"1.3.1\"},"
+            + "\"source\": {"
+            + "  \"type\": \"snowflake\""
+            + "},"
+            + "\"sink\": {"
+            + "  \"type\": \"datahub-rest\","
+            + "  \"report\": {"
+            + "    \"total_records_written\": 100,"
+            + "    \"failures\": []"
+            + "  }"
+            + "}"
+            + "}";
 
-    mockExecutionRequestInput(mockClient, execUrn, ingestionSourceUrnStr);
-    mockGlobalTags(mockClient, "warning");
-    mockIngestionSourceInfo(
-        mockClient, "{\"sink\":{\"config\":{\"server\":\"https://customer1.example.com\"}}}");
+    ExecutionRequestResult result = new ExecutionRequestResult();
+    result.setStatus("SUCCEEDED");
+    result.setDurationMs(1000L);
+    result.setStartTimeMs(System.currentTimeMillis() - 1000L);
 
-    IngestionMetricsHook hookWithClient = new IngestionMetricsHook(meterRegistry, mockClient, true);
-    hookWithClient.init(TestOperationContexts.systemContextNoSearchAuthorization());
+    StructuredExecutionReport structuredReport = new StructuredExecutionReport();
+    structuredReport.setType("RUN_INGEST");
+    structuredReport.setSerializedValue(reportJson);
+    structuredReport.setContentType("application/json");
+    result.setStructuredReport(structuredReport);
 
-    hookWithClient.invoke(createTestEvent("SUCCEEDED", 1000L, 100, 5, 0, 0));
+    MetadataChangeLog event = new MetadataChangeLog();
+    event.setEntityType(ENTITY_TYPE);
+    event.setAspectName(ASPECT_NAME);
+    event.setChangeType(ChangeType.UPSERT);
+    event.setAspect(GenericRecordUtils.serializeAspect(result));
+    event.setEntityUrn(Urn.createFromString(TEST_EXECUTION_REQUEST_URN));
 
-    Counter sinkHostCounter =
-        meterRegistry
-            .find("com.datahub.ingest.runs")
-            .tag("sink_host", "customer1.example.com")
-            .counter();
-    assertTrue(sinkHostCounter != null && sinkHostCounter.count() == 1.0);
+    // Should not throw and should still record the run
+    hook.invoke(event);
+
+    Counter runsCounter = meterRegistry.find("com.datahub.ingest.runs").counter();
+    assertNotNull(runsCounter);
+    assertEquals(runsCounter.count(), 1.0);
+
+    // events_produced should be 0 (missingNode fallback, not silently reading source.type etc.)
+    Counter eventsCounter = meterRegistry.find("com.datahub.ingest.events_produced").counter();
+    assertTrue(eventsCounter == null || eventsCounter.count() == 0.0);
+
+    // records_written from sink should still work
+    Counter recordsCounter = meterRegistry.find("com.datahub.ingest.records_written").counter();
+    assertNotNull(recordsCounter);
+    assertEquals(recordsCounter.count(), 100.0);
   }
 
   @Test
-  public void testSinkHostCacheAvoidsDuplicateRpcs() throws Exception {
-    SystemEntityClient mockClient = Mockito.mock(SystemEntityClient.class);
-    Urn execUrn = UrnUtils.getUrn(TEST_EXECUTION_REQUEST_URN);
-    String ingestionSourceUrnStr = "urn:li:dataHubIngestionSource:cached-sink-host-source";
-    Urn ingestionSourceUrn = UrnUtils.getUrn(ingestionSourceUrnStr);
+  public void testTablesScannedRecorded() throws Exception {
+    String reportJson =
+        "{"
+            + "\"cli\": {\"cli_version\": \"0.14.0\"},"
+            + "\"Source (snowflake)\": {"
+            + "  \"events_produced\": 100,"
+            + "  \"tables_scanned\": 20,"
+            + "  \"warnings\": [],"
+            + "  \"failures\": [],"
+            + "  \"platform\": \"snowflake\""
+            + "},"
+            + "\"Sink (datahub-rest)\": {"
+            + "  \"total_records_written\": 90,"
+            + "  \"failures\": []"
+            + "}"
+            + "}";
 
-    mockExecutionRequestInput(mockClient, execUrn, ingestionSourceUrnStr);
-    mockGlobalTags(mockClient, "warning");
-    mockIngestionSourceInfo(
-        mockClient, "{\"sink\":{\"config\":{\"server\":\"https://customer2.example.com\"}}}");
+    ExecutionRequestResult result = new ExecutionRequestResult();
+    result.setStatus("SUCCEEDED");
+    result.setDurationMs(1000L);
+    result.setStartTimeMs(System.currentTimeMillis() - 1000L);
 
-    IngestionMetricsHook hookWithClient = new IngestionMetricsHook(meterRegistry, mockClient, true);
-    hookWithClient.init(TestOperationContexts.systemContextNoSearchAuthorization());
+    StructuredExecutionReport structuredReport = new StructuredExecutionReport();
+    structuredReport.setType("CLI_INGEST");
+    structuredReport.setSerializedValue(reportJson);
+    structuredReport.setContentType("application/json");
+    result.setStructuredReport(structuredReport);
 
-    hookWithClient.invoke(createTestEvent("SUCCEEDED", 1000L, 100, 5, 0, 0));
-    hookWithClient.invoke(createTestEvent("SUCCEEDED", 2000L, 200, 10, 0, 0));
+    MetadataChangeLog event = new MetadataChangeLog();
+    event.setEntityType(ENTITY_TYPE);
+    event.setAspectName(ASPECT_NAME);
+    event.setChangeType(ChangeType.UPSERT);
+    event.setAspect(GenericRecordUtils.serializeAspect(result));
+    event.setEntityUrn(Urn.createFromString(TEST_EXECUTION_REQUEST_URN));
 
-    // dataHubIngestionSourceInfo fetched only once (cached for second call)
-    verify(mockClient, times(1))
-        .getV2(
-            any(OperationContext.class),
-            eq("dataHubIngestionSource"),
-            eq(ingestionSourceUrn),
-            eq(ImmutableSet.of("dataHubIngestionSourceInfo")));
+    hook.invoke(event);
+
+    DistributionSummary tablesScannedSummary =
+        meterRegistry.find("com.datahub.ingest.tables_scanned").summary();
+    assertNotNull(tablesScannedSummary);
+    assertEquals(tablesScannedSummary.totalAmount(), 20.0);
+  }
+
+  @Test
+  public void testViewParseFailuresRecorded() throws Exception {
+    String reportJson =
+        "{"
+            + "\"cli\": {\"cli_version\": \"0.14.0\"},"
+            + "\"Source (snowflake)\": {"
+            + "  \"events_produced\": 100,"
+            + "  \"num_view_definitions_failed_parsing\": 3,"
+            + "  \"warnings\": [],"
+            + "  \"failures\": [],"
+            + "  \"platform\": \"snowflake\""
+            + "},"
+            + "\"Sink (datahub-rest)\": {"
+            + "  \"total_records_written\": 90,"
+            + "  \"failures\": []"
+            + "}"
+            + "}";
+
+    ExecutionRequestResult result = new ExecutionRequestResult();
+    result.setStatus("SUCCEEDED");
+    result.setDurationMs(1000L);
+    result.setStartTimeMs(System.currentTimeMillis() - 1000L);
+
+    StructuredExecutionReport structuredReport = new StructuredExecutionReport();
+    structuredReport.setType("CLI_INGEST");
+    structuredReport.setSerializedValue(reportJson);
+    structuredReport.setContentType("application/json");
+    result.setStructuredReport(structuredReport);
+
+    MetadataChangeLog event = new MetadataChangeLog();
+    event.setEntityType(ENTITY_TYPE);
+    event.setAspectName(ASPECT_NAME);
+    event.setChangeType(ChangeType.UPSERT);
+    event.setAspect(GenericRecordUtils.serializeAspect(result));
+    event.setEntityUrn(Urn.createFromString(TEST_EXECUTION_REQUEST_URN));
+
+    hook.invoke(event);
+
+    Counter viewParseFailuresCounter =
+        meterRegistry.find("com.datahub.ingest.view_parse_failures").counter();
+    assertNotNull(viewParseFailuresCounter);
+    assertEquals(viewParseFailuresCounter.count(), 3.0);
   }
 
   @Test
   public void testRestateChangeTypeIgnored() throws Exception {
+    // RESTATE is excluded intentionally: reindex operations replay historical MCLs as RESTATE,
+    // which would double-count all ingestion metrics. Only UPSERT and CREATE are processed.
     MetadataChangeLog event = createTestEvent("SUCCEEDED", 1000L, 100, 5, 0, 0);
     event.setChangeType(ChangeType.RESTATE);
 
@@ -472,6 +551,117 @@ public class IngestionMetricsHookTest {
 
     Counter runsCounter = meterRegistry.find("com.datahub.ingest.runs").counter();
     assertTrue(runsCounter == null || runsCounter.count() == 0.0);
+  }
+
+  // buildRunEventMap tests
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testBuildRunEventMapHighStageSecondsEnumRemapping() throws Exception {
+    ObjectMapper mapper = new ObjectMapper();
+    String reportJsonStr =
+        "{"
+            + "\"source\": {"
+            + "  \"type\": \"snowflake\","
+            + "  \"report\": {"
+            + "    \"events_produced\": 100,"
+            + "    \"ingestion_high_stage_seconds\": {\"_UNDEFINED\": 5.0, \"PROFILING\": 2.0, \"CUSTOM_STAGE\": 1.0},"
+            + "    \"warnings\": [], \"failures\": []"
+            + "  }"
+            + "},"
+            + "\"sink\": {"
+            + "  \"type\": \"datahub-rest\","
+            + "  \"report\": {\"total_records_written\": 90, \"failures\": []}"
+            + "}"
+            + "}";
+    JsonNode reportJson = mapper.readTree(reportJsonStr);
+    JsonNode sourceReport = reportJson.path("source").path("report");
+    JsonNode sinkReport = reportJson.path("sink").path("report");
+
+    IngestionMetricsHook.RunEvent runEvent =
+        new IngestionMetricsHook.RunEvent(
+            Urn.createFromString(TEST_EXECUTION_REQUEST_URN),
+            "snowflake",
+            "SUCCEEDED",
+            1000L,
+            100L,
+            90L,
+            0,
+            0,
+            0,
+            reportJson,
+            sourceReport,
+            sinkReport);
+
+    Map<String, Object> event = hook.buildRunEventMap(runEvent);
+
+    Map<String, Object> highStage = (Map<String, Object>) event.get("ingestion_high_stage_seconds");
+    assertNotNull(highStage);
+    assertTrue(highStage.containsKey("Ingestion")); // _UNDEFINED → Ingestion
+    assertTrue(highStage.containsKey("Profiling")); // PROFILING → Profiling
+    assertTrue(highStage.containsKey("CUSTOM_STAGE")); // unknown keys pass through unchanged
+    assertTrue(!highStage.containsKey("_UNDEFINED"));
+    assertTrue(!highStage.containsKey("PROFILING"));
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testBuildRunEventMapExtractLogEntriesStringAndObject() throws Exception {
+    ObjectMapper mapper = new ObjectMapper();
+    // Source failures are StructuredLogEntry objects; sink failures are plain strings.
+    String reportJsonStr =
+        "{"
+            + "\"cli\": {\"cli_version\": \"0.14.0\"},"
+            + "\"Source (snowflake)\": {"
+            + "  \"events_produced\": 50,"
+            + "  \"failures\": [{\"title\": \"Schema error\", \"message\": \"bad schema\","
+            + "    \"context\": [\"Table: foo\"], \"log_category\": \"SCHEMA\"}],"
+            + "  \"warnings\": [], \"infos\": [],"
+            + "  \"platform\": \"snowflake\""
+            + "},"
+            + "\"Sink (datahub-rest)\": {"
+            + "  \"total_records_written\": 45,"
+            + "  \"failures\": [\"write timeout\", \"connection reset\"]"
+            + "}"
+            + "}";
+    JsonNode reportJson = mapper.readTree(reportJsonStr);
+    JsonNode sourceReport = reportJson.path("Source (snowflake)");
+    JsonNode sinkReport = reportJson.path("Sink (datahub-rest)");
+
+    IngestionMetricsHook.RunEvent runEvent =
+        new IngestionMetricsHook.RunEvent(
+            Urn.createFromString(TEST_EXECUTION_REQUEST_URN),
+            "snowflake",
+            "FAILURE",
+            500L,
+            50L,
+            45L,
+            0,
+            1,
+            2,
+            reportJson,
+            sourceReport,
+            sinkReport);
+
+    Map<String, Object> event = hook.buildRunEventMap(runEvent);
+
+    // Source failures: StructuredLogEntry with title, message, context, category
+    List<Map<String, Object>> failures = (List<Map<String, Object>>) event.get("failures");
+    assertNotNull(failures);
+    assertEquals(failures.size(), 1);
+    assertEquals(failures.get(0).get("title"), "Schema error");
+    assertEquals(failures.get(0).get("message"), "bad schema");
+    assertEquals(failures.get(0).get("category"), "SCHEMA");
+    List<String> context = (List<String>) failures.get(0).get("context");
+    assertNotNull(context);
+    assertEquals(context.get(0), "Table: foo");
+
+    // Sink failures: plain strings serialized under "message"
+    List<Map<String, Object>> sinkFailures = (List<Map<String, Object>>) event.get("sink_failures");
+    assertNotNull(sinkFailures);
+    assertEquals(sinkFailures.size(), 2);
+    assertEquals(sinkFailures.get(0).get("message"), "write timeout");
+    assertEquals(sinkFailures.get(1).get("message"), "connection reset");
   }
 
   // Helper methods
@@ -630,82 +820,5 @@ public class IngestionMetricsHookTest {
     event.setEntityUrn(Urn.createFromString(TEST_EXECUTION_REQUEST_URN));
 
     return event;
-  }
-
-  /** Mocks getV2 for ExecutionRequestInput, returning an input with the given ingestion source. */
-  private void mockExecutionRequestInput(
-      SystemEntityClient mockClient, Urn execUrn, String ingestionSourceUrnStr) throws Exception {
-    ExecutionRequestSource source = new ExecutionRequestSource();
-    source.setType("INGESTION_SOURCE");
-    source.setIngestionSource(UrnUtils.getUrn(ingestionSourceUrnStr));
-
-    ExecutionRequestInput input = new ExecutionRequestInput();
-    input.setTask("RUN_INGEST");
-    input.setArgs(new StringMap());
-    input.setExecutorId("default");
-    input.setRequestedAt(System.currentTimeMillis());
-    input.setSource(source);
-
-    EnvelopedAspectMap aspects = new EnvelopedAspectMap();
-    aspects.put(
-        "dataHubExecutionRequestInput", new EnvelopedAspect().setValue(new Aspect(input.data())));
-    EntityResponse response = new EntityResponse();
-    response.setAspects(aspects);
-
-    when(mockClient.getV2(
-            any(OperationContext.class),
-            eq(execUrn.getEntityType()),
-            eq(execUrn),
-            eq(ImmutableSet.of("dataHubExecutionRequestInput"))))
-        .thenReturn(response);
-  }
-
-  /** Mocks getV2 for GlobalTags on any dataHubIngestionSource, returning the given tag name. */
-  private void mockGlobalTags(SystemEntityClient mockClient, String tagName) throws Exception {
-    TagAssociation tagAssoc = new TagAssociation();
-    tagAssoc.setTag(new TagUrn(tagName));
-    GlobalTags tags = new GlobalTags();
-    tags.setTags(new TagAssociationArray(tagAssoc));
-
-    EnvelopedAspectMap aspects = new EnvelopedAspectMap();
-    aspects.put("globalTags", new EnvelopedAspect().setValue(new Aspect(tags.data())));
-    EntityResponse response = new EntityResponse();
-    response.setAspects(aspects);
-
-    when(mockClient.getV2(
-            any(OperationContext.class),
-            eq("dataHubIngestionSource"),
-            any(Urn.class),
-            eq(ImmutableSet.of("globalTags"))))
-        .thenReturn(response);
-  }
-
-  /**
-   * Mocks getV2 for DataHubIngestionSourceInfo on any dataHubIngestionSource, returning the given
-   * recipe JSON.
-   */
-  private void mockIngestionSourceInfo(SystemEntityClient mockClient, String recipeJson)
-      throws Exception {
-    DataHubIngestionSourceConfig config = new DataHubIngestionSourceConfig();
-    config.setRecipe(recipeJson);
-
-    DataHubIngestionSourceInfo sourceInfo = new DataHubIngestionSourceInfo();
-    sourceInfo.setName("test-source");
-    sourceInfo.setType("snowflake");
-    sourceInfo.setConfig(config);
-
-    EnvelopedAspectMap aspects = new EnvelopedAspectMap();
-    aspects.put(
-        "dataHubIngestionSourceInfo",
-        new EnvelopedAspect().setValue(new Aspect(sourceInfo.data())));
-    EntityResponse response = new EntityResponse();
-    response.setAspects(aspects);
-
-    when(mockClient.getV2(
-            any(OperationContext.class),
-            eq("dataHubIngestionSource"),
-            any(Urn.class),
-            eq(ImmutableSet.of("dataHubIngestionSourceInfo"))))
-        .thenReturn(response);
   }
 }
