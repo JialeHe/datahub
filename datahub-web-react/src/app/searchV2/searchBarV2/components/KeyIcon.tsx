@@ -15,10 +15,8 @@ const IconContainer = styled.div`
     }
 `;
 
-type PhosphorIcon = React.FC<{ size?: number | string }>;
-
 interface Props {
-    icon: PhosphorIcon;
+    icon: React.ElementType;
 }
 
 export default function KeyIcon({ icon }: Props) {
