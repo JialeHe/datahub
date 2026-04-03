@@ -27,7 +27,7 @@ import org.testng.annotations.Test;
 @ActiveProfiles("test")
 @SpringBootTest(
     classes = {MaeConsumerApplication.class, MaeConsumerApplicationTestConfiguration.class},
-    properties = "PE_CONSUMER_ENABLED=true", "ingestionMetrics.hook.enabled=true"})
+    properties = {"PE_CONSUMER_ENABLED=true", "ingestionMetrics.hook.enabled=true"})
 public class MaeConsumerApplicationTest extends AbstractTestNGSpringContextTests {
 
   @Autowired private KafkaHealthIndicator kafkaHealthIndicator;
