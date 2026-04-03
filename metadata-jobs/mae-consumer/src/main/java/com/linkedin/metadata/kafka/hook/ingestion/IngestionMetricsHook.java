@@ -78,7 +78,7 @@ public class IngestionMetricsHook implements MetadataChangeLogHook {
 
   @Autowired
   public IngestionMetricsHook(
-      @Nonnull final MeterRegistry meterRegistry,
+      @Nullable final MeterRegistry meterRegistry,
       @Value("${ingestionMetrics.hook.enabled:false}") final boolean isEnabled,
       @Nonnull @Value("${ingestionMetrics.hook.consumerGroupSuffix:}")
           final String consumerGroupSuffix,
@@ -149,6 +149,11 @@ public class IngestionMetricsHook implements MetadataChangeLogHook {
 
   private void recordMetrics(
       @Nonnull ExecutionRequestResult result, @Nonnull Urn executionRequestUrn) {
+    if (meterRegistry == null) {
+      log.warn("MeterRegistry not available, skipping metrics recording");
+      return;
+    }
+
     try {
       JsonNode reportJson = parseStructuredReport(result);
       if (reportJson == null) {
@@ -568,6 +573,7 @@ public class IngestionMetricsHook implements MetadataChangeLogHook {
   }
 
   @VisibleForTesting
+  @Nullable
   MeterRegistry getMeterRegistry() {
     return meterRegistry;
   }
