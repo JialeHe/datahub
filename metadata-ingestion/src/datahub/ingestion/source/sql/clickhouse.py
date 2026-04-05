@@ -787,9 +787,11 @@ ORDER BY event_time ASC
                 user=CorpUserUrn(user) if user else None,
                 # Don't pass current_database as default_db. ClickHouse uses 2-level
                 # naming (database.table), but sqlglot expects 3-level (database.schema.table).
-                # Passing current_database causes sqlglot to prepend it to already-qualified
-                # names, creating incorrect URNs like "default.analytics_marts.table".
+                # Passing current_database as default_schema (not default_db) correctly fills
+                # the schema level: unqualified "table" -> "current_db.table", while
+                # already-qualified "other_db.table" stays unchanged.
                 default_db=None,
+                default_schema=row.get("current_database"),
                 query_hash=str(row.get("normalized_query_hash", "")),
             )
         except Exception as e:
