@@ -7,7 +7,7 @@
 
 ## Summary
 
-Add multi-profile configuration support to the DataHub CLI, enabling users to manage connections to multiple DataHub instances (dev, staging, production) and easily switch between them. This replaces the single-profile `~/.datahubenv` file with a flexible `~/.datahub/config.yaml` system while maintaining full backward compatibility.
+Add multi-profile configuration support to the DataHub CLI, enabling users to manage connections to multiple DataHub instances (dev, staging, production) and easily switch between them. This replaces the single-profile `~/.datahubenv` file with a flexible `~/.datahub/config.yaml` system that supports ancestor-walk config resolution — any directory in the ancestor chain can provide a `.datahub/config.yaml` (full config or profile pointer), enabling concurrent agent and git-worktree workflows while maintaining full backward compatibility.
 
 ## Basic example
 
@@ -27,8 +27,11 @@ datahub profile add prod \
   --require-confirmation \
   --description "Production - USE WITH CAUTION"
 
-# Set the default profile for the session
+# Pin this repository/worktree to the dev profile
 datahub profile use dev
+
+# Set the global default profile (used when no local pointer exists)
+datahub profile set-default dev
 ```
 
 **Using profiles:**
@@ -87,6 +90,45 @@ profiles:
     description: "Production - USE WITH CAUTION"
 ```
 
+**Worktree / agent isolation:**
+
+```bash
+# In worktree A: pin to staging
+cd ~/worktrees/feature-a
+datahub profile use staging
+# creates .datahub/config.yaml with "profile: staging"
+
+# In worktree B: pin to prod
+cd ~/worktrees/hotfix-b
+datahub profile use prod
+# creates .datahub/config.yaml with "profile: prod"
+
+# Both agents run concurrently — no conflicts
+# CLI walks up from CWD to find nearest .datahub/config.yaml
+# Agent A auto-routes to staging, Agent B auto-routes to prod
+```
+
+**Local config file (`.datahub/config.yaml` — two forms):**
+
+```yaml
+# Form 1: Profile pointer (simple — references a named profile from ~/.datahub/config.yaml)
+# Safe to commit — contains no secrets.
+profile: staging
+```
+
+```yaml
+# Form 2: Full config (self-contained — e.g. for CI or custom instances)
+version: "1.0"
+current_profile: ci
+profiles:
+  ci:
+    server: https://staging.datahub.com
+    token: ${DATAHUB_STAGING_TOKEN}   # use env var refs to keep secrets out of files
+    description: "CI environment"
+```
+
+The CLI walks up from the current working directory looking for the nearest `.datahub/config.yaml`. The first one found wins — `~/.datahub/config.yaml` is the ultimate fallback since `~` is an ancestor of every directory.
+
 ## Motivation
 
 ### Current Pain Points
@@ -118,6 +160,8 @@ profiles:
    - No visibility into which profile is currently active
    - Difficult to share standard configurations across teams
 
+6. **Agent and Worktree Isolation**: When multiple AI agents (Claude Code, Cursor, Codex, Devin) or developers use separate git worktrees to work on the same repository concurrently, they often need to target different DataHub instances (e.g., one agent ingests to staging while another validates in prod). The current single-profile model forces all concurrent processes to share one configuration, leading to race conditions or requiring fragile per-process environment variable management.
+
 ### Use Cases This Supports
 
 1. **Multi-Environment Development**: Engineers can maintain separate profiles for dev, staging, and production environments, switching between them with a single command.
@@ -132,6 +176,8 @@ profiles:
 
 6. **Cross-Project Work**: Developers working on multiple projects with different DataHub instances can maintain isolated profiles per project.
 
+7. **Concurrent Agent Workflows**: AI coding agents operating in separate git worktrees can each target a different DataHub instance without environment variable coordination. Each worktree carries a local pointer file that auto-routes commands to the correct profile.
+
 ### Expected Outcomes
 
 - **Reduced context-switching overhead**: Switching environments becomes a one-line command
@@ -140,6 +186,7 @@ profiles:
 - **Better developer experience**: Clear visibility into active profile, standardized configuration management
 - **Team productivity gains**: Shareable profile templates reduce onboarding time and configuration errors
 - **Backward compatibility**: Existing users continue working without any changes to their workflows
+- **Agent-safe concurrency**: Multiple processes in different worktrees resolve profiles independently with no shared mutable state
 
 ## Requirements
 
@@ -155,16 +202,23 @@ profiles:
 
    - Command-line flag: `--profile <name>` (highest priority)
    - Environment variable: `DATAHUB_PROFILE=<name>`
-   - Current profile setting in config: `current_profile: <name>`
-   - Profile named "default" (fallback)
+   - Nearest ancestor `.datahub/config.yaml` (walk from CWD toward `~`):
+     - If file has `profiles:` key → full config, use directly
+     - If file has `profile: <name>` key → pointer, resolve named profile from `~/.datahub/config.yaml`
+   - `~/.datahub/config.yaml` fallback chain: `current_profile` → profile named `"default"`
    - Legacy `~/.datahubenv` file (backward compatibility)
+
+   Note: The ancestor walk naturally reaches `~/.datahub/config.yaml` as the ultimate fallback since `~` is an ancestor of every directory. Steps 3 and 4 are listed separately because the home config has additional fallback behavior (`current_profile`, `"default"` profile).
+
+   Note: `DATAHUB_GMS_URL` and `DATAHUB_GMS_TOKEN` environment variables override the *connection details* of whichever profile is resolved, but do not participate in profile *selection*.
 
 3. **Profile Management Commands**
 
    - `datahub profile list` - List all profiles
    - `datahub profile current` - Show active profile
    - `datahub profile show <name>` - Display profile details
-   - `datahub profile use <name>` - Set current profile
+   - `datahub profile use <name>` - Pin current directory to a named profile (writes `.datahub/config.yaml` in CWD)
+   - `datahub profile set-default <name>` - Set the global default profile (`current_profile` in `~/.datahub/config.yaml`)
    - `datahub profile add <name>` - Add/update profile
    - `datahub profile remove <name>` - Delete profile
    - `datahub profile test <name>` - Test connection
@@ -199,28 +253,37 @@ profiles:
    - No breaking changes to existing CLI commands
    - Migration path from legacy to new config format
 
+8. **Ancestor-Walk Config Resolution**
+   - The CLI walks up from the current working directory looking for `.datahub/config.yaml`
+   - First match wins (closest ancestor); `~/.datahub/config.yaml` is the ultimate fallback
+   - The local file can be a **full config** (same schema as global, with `profiles:`) or a **profile pointer** (`profile: <name>` referencing the home config)
+   - Detection is unambiguous: `profiles:` key = full config, `profile:` key = pointer
+   - No git dependency — works in any directory (git repos, worktrees, bare directories, CI containers)
+   - No merging across ancestor levels — closest config wins completely
+   - Warn (don't block) when a non-home config contains literal token values; nudge toward `${VAR}` interpolation
+
 ### Non-Functional Requirements
 
-8. **Performance**
+9. **Performance**
 
    - Profile loading adds negligible overhead to CLI commands (< 50ms)
    - Configuration file parsing is efficient for typical sizes (< 100 profiles)
 
-9. **Usability**
+10. **Usability**
 
-   - Clear, actionable error messages with suggestions
-   - Consistent command-line interface patterns
-   - Visual indicators for current profile
-   - Color-coded output for different environments (dev=green, staging=yellow, prod=red)
+    - Clear, actionable error messages with suggestions
+    - Consistent command-line interface patterns
+    - Visual indicators for current profile
+    - Color-coded output for different environments (dev=green, staging=yellow, prod=red)
 
-10. **Testability**
+11. **Testability**
 
     - Comprehensive unit tests for all profile operations
     - Integration tests for end-to-end workflows
-    - Tests for precedence ordering
+    - Tests for precedence ordering (including local pointer)
     - Tests for edge cases (missing files, invalid YAML, etc.)
 
-11. **Documentation**
+12. **Documentation**
     - Updated CLI documentation with profile examples
     - Migration guide from legacy configuration
     - Best practices for credential management
@@ -228,14 +291,14 @@ profiles:
 
 ### Extensibility
 
-12. **Future-Proof Design**
+13. **Future-Proof Design**
 
     - Profile model uses Pydantic, allowing easy addition of new fields
     - Configuration format version field (`version: "1.0"`) enables future migrations
     - Plugin architecture for additional profile validation rules
     - Extensible confirmation prompt system for other operation types
 
-13. **SDK Integration**
+14. **SDK Integration**
     - Python SDK can use profile configuration: `DataHubClient.from_env(profile="staging")`
     - Profile system accessible via public API for custom tools
     - Configuration models exported for external use
@@ -254,7 +317,7 @@ The following are explicitly **out of scope** for this initial RFC:
 
 5. **GUI Configuration**: A web-based or desktop GUI for profile management. This RFC focuses solely on CLI tooling.
 
-6. **Automatic Profile Detection**: Inferring which profile to use based on current directory, git repo, or other context. Profile selection is always explicit.
+6. **Automatic Merge of Ancestor Configs**: The ancestor walk finds the nearest `.datahub/config.yaml` and uses it as the complete truth. It does NOT merge configs from multiple ancestor levels. Closest wins completely, like `.editorconfig` or `.nvmrc`. If you need settings from a parent config, copy or reference them explicitly.
 
 7. **Profile Analytics**: Tracking which profiles are used, usage statistics, or telemetry. This could be added later if needed.
 
@@ -277,12 +340,26 @@ The profile system adds a new configuration layer to the DataHub CLI without dis
                         │    • Context object (ctx.obj["profile"])
                         │
 ┌───────────────────────▼─────────────────────────────────────┐
+│                  Config Discovery Layer                      │
+│  (config_utils.py)                                          │
+│                                                              │
+│  find_nearest_config() → Optional[Tuple[Path, dict]]       │
+│  Walks CWD → ~ looking for .datahub/config.yaml            │
+│  First match wins (closest ancestor)                        │
+│                                                              │
+│  Precedence: --profile flag > DATAHUB_PROFILE env var >    │
+│    nearest .datahub/config.yaml > current_profile > default │
+└───────────────────────┬─────────────────────────────────────┘
+                        │
+┌───────────────────────▼─────────────────────────────────────┐
 │                  Profile Loading Layer                       │
 │  (config_utils.py)                                          │
 │                                                              │
-│  • load_profile_config(profile_name) → DatahubClientConfig │
-│  • Handles precedence: flag > env > current > default      │
-│  • Applies environment variable overrides                   │
+│  load_profile_config(profile_name) → DatahubClientConfig   │
+│  • Full config (profiles: key) → use directly              │
+│  • Pointer (profile: key) → resolve from ~/.datahub/       │
+│  • Applies DATAHUB_GMS_URL / DATAHUB_GMS_TOKEN overrides   │
+│  • Warns on literal tokens in non-home configs             │
 └───────────────────────┬─────────────────────────────────────┘
                         │
                         ├──> Reads from:
@@ -290,10 +367,17 @@ The profile system adds a new configuration layer to the DataHub CLI without dis
 ┌───────────────────────▼─────────────────────────────────────┐
 │                Configuration Storage                         │
 │                                                              │
-│  ~/.datahub/config.yaml (new)    ~/.datahubenv (legacy)   │
-│  • YAML format                     • INI-like format        │
-│  • Multiple profiles               • Single profile         │
-│  • Env var interpolation          • Direct values          │
+│  Ancestor walk (CWD → ~):                                   │
+│    ./datahub/config.yaml           (CWD)                   │
+│    ../.datahub/config.yaml         (parent)                │
+│    ...                              (ancestors)             │
+│    ~/.datahub/config.yaml          (home — ultimate)       │
+│                                                              │
+│  Each can be:                                               │
+│  • Full config (profiles + creds, env var interpolation)   │
+│  • Profile pointer (profile: <name>)                       │
+│                                                              │
+│  ~/.datahubenv                     (legacy fallback)        │
 └───────────────────────┬─────────────────────────────────────┘
                         │
                         ├──> Parsed into:
@@ -313,6 +397,9 @@ The profile system adds a new configuration layer to the DataHub CLI without dis
 │  ├── timeout_sec: int                                       │
 │  ├── description: Optional[str]                            │
 │  └── require_confirmation: bool                            │
+│                                                              │
+│  LocalProfilePointer                                        │
+│  └── profile: str                                           │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -321,11 +408,11 @@ The profile system adds a new configuration layer to the DataHub CLI without dis
 ```
 src/datahub/
 ├── configuration/
-│   ├── config.py                    # NEW: Pydantic models (ProfileConfig, DataHubConfig)
+│   ├── config.py                    # NEW: Pydantic models (ProfileConfig, DataHubConfig, LocalProfilePointer)
 │   └── env_vars.py                  # MODIFIED: Add DATAHUB_PROFILE env var
 ├── cli/
-│   ├── profile_cli.py               # NEW: Profile management commands
-│   ├── config_utils.py              # MODIFIED: Profile loading functions
+│   ├── profile_cli.py               # NEW: Profile management commands (incl. use, set-default)
+│   ├── config_utils.py              # MODIFIED: Profile resolution + loading, find_nearest_config()
 │   ├── entrypoints.py               # MODIFIED: Global --profile flag
 │   ├── delete_cli.py                # MODIFIED: Add confirmation prompts
 │   ├── get_cli.py                   # MODIFIED: Profile parameter support
@@ -337,286 +424,131 @@ src/datahub/
 tests/unit/
 ├── test_config.py                   # NEW: Test config models
 └── cli/
-    ├── test_config_utils_profiles.py # NEW: Test profile functions
+    ├── test_config_utils_profiles.py # NEW: Test profile functions (incl. local pointer resolution)
     └── test_profile_cli.py           # NEW: Test CLI commands
 ```
 
-### Core Implementation Details
+Ancestor-walk config resolution (any level):
 
-#### 1. Configuration Models (`configuration/config.py`)
-
-```python
-from typing import Dict, Optional
-from pydantic import Field, field_validator
-from datahub.ingestion.graph.config import DatahubClientConfig
-
-class ProfileConfig(DatahubClientConfig):
-    """Single profile configuration."""
-
-    description: Optional[str] = Field(
-        default=None,
-        description="Human-readable description"
-    )
-
-    require_confirmation: bool = Field(
-        default=False,
-        description="Require confirmation for destructive operations"
-    )
-
-    @field_validator("server", "token", mode="before")
-    @classmethod
-    def interpolate_env_vars(cls, v: Optional[str]) -> Optional[str]:
-        """Interpolate ${VAR} references."""
-        if v is None:
-            return v
-        return interpolate_env_vars(v)
-
-class DataHubConfig(ConfigModel):
-    """Root configuration with multiple profiles."""
-
-    version: str = Field(default="1.0")
-    current_profile: Optional[str] = None
-    profiles: Dict[str, ProfileConfig] = Field(default_factory=dict)
-
-    def get_profile(self, name: str) -> ProfileConfig:
-        """Get profile by name, with helpful error on not found."""
-        if name not in self.profiles:
-            available = ", ".join(self.profiles.keys()) or "none"
-            raise KeyError(
-                f"Profile '{name}' not found. Available profiles: {available}"
-            )
-        return self.profiles[name]
+```
+~/.datahub/config.yaml                        # User-level (ultimate fallback)
+~/work/.datahub/config.yaml                   # Company-wide defaults (optional)
+~/work/project/.datahub/config.yaml           # Repo-level config or pointer
+~/work/project/worktree/.datahub/config.yaml  # Worktree-level (rare)
 ```
 
-Key design decisions:
+Each `.datahub/config.yaml` can be a full config (with `profiles:`) or a pointer (`profile: <name>`).
 
-- **Extends existing models**: `ProfileConfig` extends `DatahubClientConfig` for compatibility
-- **Environment variable interpolation**: Happens at validation time via pydantic validators
-- **Version field**: Enables future migrations with backward compatibility
-- **Clear error messages**: Include available profiles in error to guide users
+### Core Design Details
 
-#### 2. Profile Loading with Precedence (`config_utils.py`)
+#### Profile Configuration Model
 
-```python
-def load_profile_config(profile_name: Optional[str] = None) -> DatahubClientConfig:
-    """
-    Load profile configuration with full precedence handling.
+Each profile contains connection details for a DataHub instance:
 
-    Precedence order (highest to lowest):
-    1. Explicit profile_name parameter (from --profile flag)
-    2. DATAHUB_PROFILE environment variable
-    3. current_profile setting in config.yaml
-    4. Profile named "default"
-    5. Legacy ~/.datahubenv file
-    6. Error if no config found
-    """
+| Field | Required | Description |
+|-------|----------|-------------|
+| `server` | Yes | DataHub GMS server URL |
+| `token` | No | Authentication token (supports `${VAR}` interpolation) |
+| `timeout_sec` | No | Connection timeout in seconds |
+| `description` | No | Human-readable description |
+| `require_confirmation` | No | If `true`, prompt before destructive operations |
+| `extra_headers` | No | Additional HTTP headers |
+| `ca_certificate_path` | No | Path to CA certificate |
+| `disable_ssl_verification` | No | Disable SSL verification |
 
-    # 1. Check explicit profile parameter
-    if profile_name is not None:
-        selected_profile = profile_name
+Profile fields extend the existing `DatahubClientConfig`, so all current connection options are supported.
 
-    # 2. Check DATAHUB_PROFILE env var
-    elif (env_profile := os.getenv("DATAHUB_PROFILE")) is not None:
-        selected_profile = env_profile
+#### Config File Detection
 
-    # 3. Check current_profile in config
-    elif (config := _load_config_file()) and config.current_profile:
-        selected_profile = config.current_profile
+When the CLI finds a `.datahub/config.yaml`, it determines the file type by key presence:
 
-    # 4. Check for "default" profile
-    elif config and "default" in config.profiles:
-        selected_profile = "default"
+- **`profiles:` key present** → Full config (same schema as `~/.datahub/config.yaml`). Use directly.
+- **`profile:` key present** → Pointer. Resolve the named profile from `~/.datahub/config.yaml`.
+- **Neither key** → Error with a message explaining the expected format.
+- **Both keys** → Error. A file should be one or the other.
 
-    # 5. Fall back to legacy config
-    elif _legacy_config_exists():
-        return _load_legacy_config()
+#### Config Resolution Behavior
 
-    # 6. No config found
-    else:
-        raise ConfigurationError(
-            "No DataHub configuration found. "
-            "Run 'datahub init' or 'datahub profile add' to get started."
-        )
+The resolution process follows these steps:
 
-    # Load selected profile
-    profile_config = config.get_profile(selected_profile)
+1. If `--profile <name>` flag is provided, use that profile name.
+2. Else if `DATAHUB_PROFILE` environment variable is set, use that profile name.
+3. Else walk up the directory tree from CWD toward `~`, looking for `.datahub/config.yaml`:
+   - If a **full config** is found, select a profile from it using its `current_profile` or `"default"`.
+   - If a **pointer** is found, use the named profile from `~/.datahub/config.yaml`.
+4. If no config was found in the walk (including at `~`), fall back to legacy `~/.datahubenv`.
+5. If nothing found, show an error suggesting `datahub init` or `datahub profile add`.
 
-    # Apply environment variable overrides (for backward compatibility)
-    if gms_url := os.getenv("DATAHUB_GMS_URL"):
-        profile_config.server = gms_url
-    if gms_token := os.getenv("DATAHUB_GMS_TOKEN"):
-        profile_config.token = gms_token
+After profile selection, `DATAHUB_GMS_URL` and `DATAHUB_GMS_TOKEN` environment variables override the resolved profile's connection details (maintaining backward compatibility).
 
-    return profile_config
+#### Literal Token Warnings
+
+When a `.datahub/config.yaml` outside of `~` contains a literal token value (not a `${VAR}` reference), the CLI emits a warning on stderr:
+
+```
+WARNING: Profile 'ci' in /path/to/repo/.datahub/config.yaml has a literal token.
+Use ${VAR} syntax to avoid committing secrets.
 ```
 
-Key design decisions:
+This is a warning, not an error — it does not block execution. The check operates on the raw YAML before environment variable interpolation, so `${VAR}` references do not trigger it.
 
-- **Clear precedence chain**: Each step is explicit and documented
-- **Backward compatible**: Legacy config and env vars still work
-- **Helpful defaults**: "default" profile provides good UX
-- **Override semantics**: Environment variables override profile settings (maintains current behavior)
+#### Profile Management Commands
 
-#### 3. Profile Management Commands (`profile_cli.py`)
+All `datahub profile` commands follow consistent patterns:
 
-All commands follow consistent patterns:
+- Validate inputs before making changes
+- Provide clear success/error messages with context (server URL, description)
+- Redact tokens in output (show last 4 characters only)
 
-- Accept profile name as argument or use current profile
-- Provide clear success/error messages
-- Show helpful context (server URL, description)
-- Redact sensitive information (tokens)
+**`datahub profile use <name>`** — Creates `.datahub/config.yaml` in the current working directory with `profile: <name>`. Validates the profile exists in `~/.datahub/config.yaml` first.
 
-Example command structure:
+**`datahub profile set-default <name>`** — Sets `current_profile` in `~/.datahub/config.yaml`. Used when no local config or flags are present.
 
-```python
-@profile.command()
-@click.argument("profile_name")
-def show(profile_name: str) -> None:
-    """Show profile configuration details."""
-    try:
-        prof = config_utils.get_profile(profile_name)
+**`datahub profile show <name>`** — Displays profile details with token redaction. Indicates whether a token comes from an environment variable or is stored directly.
 
-        click.echo(f"Profile: {profile_name}")
-        click.echo(f"Server: {prof.server}")
+**`datahub profile current`** — Shows the active profile and how it was resolved (which file, which precedence layer).
 
-        if prof.token:
-            # Redact token, show if it's from env var
-            if prof.token.startswith("${"):
-                click.echo(f"Token: {prof.token} (from environment)")
-            else:
-                click.echo(f"Token: ****{prof.token[-4:]} (stored in config)")
+#### Production Safety
 
-        if prof.description:
-            click.echo(f"Description: {prof.description}")
+When a profile has `require_confirmation: true`, destructive operations (delete, etc.) trigger a confirmation prompt:
 
-        if prof.require_confirmation:
-            click.secho("⚠️  Requires confirmation for destructive operations", fg="yellow")
-
-    except KeyError as e:
-        click.secho(f"Error: {e}", fg="red", err=True)
-        raise click.Abort() from e
 ```
+⚠️  DESTRUCTIVE OPERATION WARNING
+Profile: prod
+Server: https://datahub.company.com
+Operation: delete entities by filter
 
-#### 4. Production Safety with Confirmation Prompts
-
-```python
-def confirm_destructive_operation(
-    operation: str,
-    profile_name: Optional[str] = None,
-    force: bool = False,
-    extra_info: Optional[str] = None,
-) -> bool:
-    """
-    Prompt user to confirm destructive operations.
-
-    Returns True if user confirms, False if they cancel.
-    """
-
-    # Check if profile requires confirmation
-    if not config_utils.requires_confirmation(profile_name):
-        return True  # No confirmation needed
-
-    if force:
-        return True  # --force flag bypasses confirmation
-
-    # Get profile details for context
-    profile = config_utils.get_profile(profile_name)
-
-    # Show warning with full context
-    click.secho("\n⚠️  DESTRUCTIVE OPERATION WARNING", fg="red", bold=True)
-    click.echo(f"Profile: {profile_name}")
-    click.echo(f"Server: {profile.server}")
-    click.echo(f"Operation: {operation}")
-    if extra_info:
-        click.echo(f"Details: {extra_info}")
-    click.echo()
-
-    # Require typing profile name in uppercase
-    confirmation_text = profile_name.upper()
-    click.secho(
-        f"This operation cannot be undone. Type '{confirmation_text}' to confirm:",
-        fg="yellow"
-    )
-
-    user_input = click.prompt("", type=str, default="")
-
-    if user_input == confirmation_text:
-        return True
-    else:
-        click.echo("Confirmation did not match. Operation cancelled.")
-        return False
+This operation cannot be undone. Type 'PROD' to confirm:
 ```
 
 Key safety features:
 
 - **Profile-specific**: Only applies to profiles with `require_confirmation: true`
-- **Clear context**: Shows exactly what will be affected
-- **Explicit confirmation**: Must type profile name (not just "yes")
-- **Bypass for automation**: `--force` flag for CI/CD pipelines
+- **Clear context**: Shows exactly what will be affected (profile, server, operation)
+- **Explicit confirmation**: User must type the profile name in uppercase (not just "yes")
+- **Bypass for automation**: `--force` flag skips the prompt for CI/CD pipelines
 
-#### 5. Global `--profile` Flag Integration
+#### Global `--profile` Flag
 
-```python
-# entrypoints.py
-@click.group()
-@click.option(
-    "--profile",
-    type=str,
-    default=None,
-    envvar="DATAHUB_PROFILE",
-    help="Profile to use for this command",
-)
-@click.pass_context
-def datahub(ctx: click.Context, profile: Optional[str], ...) -> None:
-    """DataHub CLI"""
-    ctx.ensure_object(dict)
-    ctx.obj["profile"] = profile  # Store in context for subcommands
-
-# Individual commands
-@delete.command()
-@click.pass_context
-def by_filter(ctx: click.Context, ...) -> None:
-    """Delete entities by filter."""
-    profile_name = ctx.obj.get("profile") if ctx.obj else None
-    graph = get_default_graph(ClientMode.CLI, profile=profile_name)
-    # ... command logic
-```
-
-This pattern is applied consistently across all CLI commands.
+The `--profile` flag is available on the top-level `datahub` command and applies to all subcommands. It also reads from the `DATAHUB_PROFILE` environment variable. This flag takes the highest precedence in the resolution chain.
 
 ### Environment Variable Interpolation
 
-The interpolation function supports standard shell-like syntax:
+Config values support standard shell-like variable substitution, resolved at config load time:
 
-```python
-def interpolate_env_vars(value: str) -> str:
-    """
-    Interpolate environment variables.
+| Syntax | Behavior |
+|--------|----------|
+| `${VAR}` | Replace with value of `VAR`, or empty string if unset |
+| `${VAR:-default}` | Replace with value of `VAR`, or `default` if unset |
+| `${VAR:?error message}` | Replace with value of `VAR`, or raise an error with the message if unset |
 
-    Formats:
-    - ${VAR}              → os.getenv("VAR", "")
-    - ${VAR:-default}     → os.getenv("VAR", "default")
-    - ${VAR:?error_msg}   → os.getenv("VAR") or raise ValueError
-    """
-    pattern = r"\$\{([^}]+)\}"
+Example:
 
-    def replace_var(match: re.Match) -> str:
-        expr = match.group(1)
-
-        if ":?" in expr:
-            var_name, error_msg = expr.split(":?", 1)
-            value = os.getenv(var_name)
-            if value is None:
-                raise ValueError(f"Required environment variable not set: {error_msg}")
-            return value
-
-        if ":-" in expr:
-            var_name, default = expr.split(":-", 1)
-            return os.getenv(var_name, default)
-
-        return os.getenv(expr, "")
-
-    return re.sub(pattern, replace_var, value)
+```yaml
+profiles:
+  prod:
+    server: https://datahub.company.com
+    token: ${DATAHUB_PROD_TOKEN:?Set DATAHUB_PROD_TOKEN before using the prod profile}
 ```
 
 ### Configuration File Format
@@ -660,64 +592,69 @@ profiles:
 - **Version field**: Enables future format migrations
 - **Location**: `~/.datahub/config.yaml` (standard for CLI tools)
 
+### Local Config File Format
+
+Any `.datahub/config.yaml` in the ancestor chain can take one of two forms:
+
+**Form 1: Profile pointer** (simple — references a named profile from `~/.datahub/config.yaml`):
+
+```yaml
+# Safe to commit — contains no secrets.
+profile: staging
+```
+
+**Form 2: Full config** (self-contained — same schema as the home config):
+
+```yaml
+version: "1.0"
+current_profile: ci
+profiles:
+  ci:
+    server: https://staging.datahub.com
+    token: ${DATAHUB_STAGING_TOKEN}   # use env var refs to keep secrets out
+    description: "CI environment"
+```
+
+**Detection heuristic**: If the file has a `profiles:` key, it's a full config. If it has a `profile:` key, it's a pointer. The keys don't overlap, so detection is unambiguous.
+
+**Literal token warning**: When loading a non-home config that contains a literal token (not a `${VAR}` reference), the CLI emits a warning:
+
+```
+WARNING: Profile 'ci' in /path/to/repo/.datahub/config.yaml has a literal token.
+Use ${VAR} syntax to avoid committing secrets.
+```
+
+**Design decisions:**
+
+- **Same filename everywhere**: All levels use `.datahub/config.yaml`. The ancestor walk naturally resolves the right one based on proximity.
+- **Two modes, one file**: Rather than requiring separate file formats for different levels, the same file can be a full config or a lightweight pointer. This reduces cognitive overhead.
+- **Warn, don't block**: Literal tokens in non-home configs are warned about, not rejected. This supports valid use cases (local dev, air-gapped environments, temporary debugging) while nudging toward best practices.
+- **Future extensibility**: The `.datahub/` directory at any level could later hold other config (ingestion recipes, custom assertions, etc.), but that is out of scope for this RFC.
+
 ### Migration from Legacy Configuration
 
-Users can migrate manually or use the automatic detection:
+Users can migrate from `~/.datahubenv` manually or through automatic detection:
 
-**Automatic Migration (when running `datahub init`):**
+**Automatic migration** happens when running `datahub init` and detects a legacy config:
 
-```python
-def migrate_legacy_config() -> bool:
-    """
-    Migrate ~/.datahubenv to new format.
+1. If `~/.datahub/config.yaml` already exists, migration is skipped
+2. If `~/.datahubenv` exists, its contents are converted to a `"default"` profile in `~/.datahub/config.yaml`
+3. The legacy file is left intact — the user is informed and can delete it manually
 
-    Returns True if migration occurred, False if skipped.
-    """
-    legacy_path = Path.home() / ".datahubenv"
-    new_path = Path.home() / ".datahub" / "config.yaml"
+```
+✓ Migrated configuration to new format
+  Old: ~/.datahubenv
+  New: ~/.datahub/config.yaml
 
-    # Skip if new config already exists
-    if new_path.exists():
-        return False
-
-    # Skip if no legacy config
-    if not legacy_path.exists():
-        return False
-
-    # Load legacy config
-    legacy_config = _load_legacy_config()
-
-    # Create new config with "default" profile
-    new_config = DataHubConfig(
-        version="1.0",
-        current_profile="default",
-        profiles={
-            "default": ProfileConfig(
-                server=legacy_config.server,
-                token=legacy_config.token,
-                timeout_sec=legacy_config.timeout_sec,
-                description="Migrated from legacy config",
-            )
-        }
-    )
-
-    # Save new config
-    save_profile_config(new_config)
-
-    click.echo("✓ Migrated configuration to new format")
-    click.echo(f"  Old: {legacy_path}")
-    click.echo(f"  New: {new_path}")
-    click.echo("\nYou can safely delete the old config file.")
-
-    return True
+You can safely delete the old config file.
 ```
 
 **Key migration features:**
 
 - Non-destructive: Legacy file remains intact
 - Automatic detection: Happens transparently on first use
-- Clear communication: User informed about migration
-- "default" profile: Preserves existing behavior
+- Clear communication: User informed about what happened
+- "default" profile: Preserves existing behavior exactly
 
 ### Error Handling and User Feedback
 
@@ -760,10 +697,17 @@ The implementation includes comprehensive tests:
 1. **Unit Tests** (`tests/unit/`)
 
    - Configuration model validation (25 tests)
-   - Profile loading with precedence (44 tests)
+   - Profile loading with precedence, including ancestor walk
    - CLI command functionality (28 tests)
    - Environment variable interpolation
    - Error handling and edge cases
+   - Ancestor walk: finds nearest config, stops at `~`, handles missing files
+   - Full config mode (`profiles:` key) vs pointer mode (`profile:` key)
+   - Invalid config file (neither key) → clear error
+   - Literal token warning for non-home configs
+   - `datahub profile use` writes pointer to CWD
+   - `datahub profile set-default` always modifies home config
+   - Concurrent resolution from different working directories (simulating worktrees)
 
 2. **Integration Tests** (future work)
 
@@ -771,6 +715,7 @@ The implementation includes comprehensive tests:
    - Tests with real DataHub instance
    - Migration scenarios
    - Multi-command workflows
+   - Multi-worktree profile isolation
 
 3. **Test Coverage**
    - Target: >90% coverage for new code
@@ -788,6 +733,7 @@ This feature impacts multiple audiences:
 3. **CI/CD Engineers**: Can use profiles in automated pipelines
 4. **Support Engineers**: Can maintain multiple customer profile configurations
 5. **New Users**: Get clearer onboarding with `datahub init` and profile setup
+6. **AI Agent Operators**: Teams running multiple AI agents in parallel git worktrees can isolate each agent's DataHub target without environment variable coordination
 
 ### Naming and Terminology
 
@@ -877,51 +823,51 @@ Existing users experience a seamless transition:
 
 Example documentation:
 
-````markdown
-## Upgrading to Profile-Based Configuration
+Example upgrade guide:
 
-### What's New?
+> **Do I Need to Change Anything?** No! Your existing configuration continues to work. The CLI automatically detects your `~/.datahubenv` file.
+>
+> **How to Upgrade:**
+> 1. Migrate your existing config: `datahub profile migrate`
+> 2. Add additional profiles: `datahub profile add staging --server https://staging.datahub.com`
+> 3. Switch between profiles: `datahub profile use staging`
+>
+> Your old config file remains unchanged as a backup.
 
-DataHub CLI now supports multiple profiles, making it easier to work with
-different DataHub instances.
+### Teaching the Worktree / Agent Workflow
 
-### Do I Need to Change Anything?
+For teams using git worktrees or AI agents that operate in parallel:
 
-**No!** Your existing configuration continues to work. The CLI automatically
-detects your `~/.datahubenv` file.
+```bash
+# One-time setup: create profiles in the global config
+datahub profile add staging --server https://staging.datahub.com --token-env DATAHUB_STAGING_TOKEN
+datahub profile add prod --server https://prod.datahub.com --token-env DATAHUB_PROD_TOKEN --require-confirmation
 
-### Why Upgrade?
+# In each worktree, pin a profile
+cd ~/worktrees/feature-branch
+datahub profile use staging
+# Creates .datahub/config.yaml with: profile: staging
 
-Profiles give you:
+cd ~/worktrees/hotfix-branch
+datahub profile use prod
+# Creates .datahub/config.yaml with: profile: prod
 
-- Easy switching between dev/staging/prod
-- Better security with environment variable support
-- Safety confirmations for production operations
-- Clearer visibility into your current environment
+# Now any datahub command in each worktree auto-targets the right instance
+# No environment variables needed, no --profile flag needed
+cd ~/worktrees/feature-branch
+datahub get --urn "urn:li:dataset:..."   # -> hits staging
 
-### How to Upgrade
+cd ~/worktrees/hotfix-branch
+datahub get --urn "urn:li:dataset:..."   # -> hits prod
+```
 
-1. Migrate your existing config:
-   ```bash
-   datahub profile migrate
-   ```
-````
-
-2. Add additional profiles:
-
-   ```bash
-   datahub profile add staging --server https://staging.datahub.com
-   datahub profile add prod --server https://prod.datahub.com --require-confirmation
-   ```
-
-3. Switch between profiles:
-   ```bash
-   datahub profile use staging
-   ```
-
-Your old config file remains unchanged as a backup.
-
-````
+**Key points to teach:**
+- The CLI uses ancestor-walk discovery — it walks up from CWD to `~` to find the nearest `.datahub/config.yaml`
+- A profile pointer (`profile: staging`) is safe to commit (no credentials). A full local config should use `${VAR}` references for tokens.
+- Each worktree resolves its config independently — no global state mutation
+- The `--profile` flag and `DATAHUB_PROFILE` env var still take precedence if set
+- Users not using worktrees can ignore this feature entirely — `current_profile` and `set-default` work as before
+- Intermediate-level configs are also supported (e.g., `~/work/.datahub/config.yaml` for company-wide defaults)
 
 ## Drawbacks
 
@@ -997,6 +943,18 @@ Your old config file remains unchanged as a backup.
 
 **Impact**: Low - Short-term increase, but profile system simplifies long-term maintenance.
 
+### 7. Ancestor Walk Complexity
+
+**Concern**: The ancestor-walk discovery means a `.datahub/config.yaml` anywhere in the directory tree could affect CLI behavior, potentially in surprising ways (e.g., a forgotten config in a parent directory).
+
+**Mitigation**:
+- `datahub profile current` shows the full resolution chain — which file was found, at what path, and whether it's a full config or pointer
+- The walk stops at `~` (never goes above the home directory)
+- Closest wins with no merging — the mental model is simple
+- This is an established pattern used by `.editorconfig`, `.nvmrc`, Dagster's `dg.toml`, etc.
+
+**Impact**: Low - The pattern is well-understood by developers and the diagnostic tooling makes it easy to debug.
+
 ## Alternatives
 
 ### Alternative 1: Environment Variables Only
@@ -1012,7 +970,7 @@ export DATAHUB_GMS_TOKEN=$DEV_TOKEN
 # Prod
 export DATAHUB_GMS_URL=https://prod.datahub.com
 export DATAHUB_GMS_TOKEN=$PROD_TOKEN
-````
+```
 
 **Pros**:
 
@@ -1078,13 +1036,11 @@ project2/.datahub/config  # Points to staging
 
 **Cons**:
 
-- Doesn't work for global tools
 - Secrets in project directories are dangerous
-- No cross-project profile sharing
-- Complex precedence rules (global vs. local)
-- Doesn't solve the multi-environment switching problem
+- Full inline configuration per-directory is complex to maintain
+- No cross-project profile sharing if each directory has its own config
 
-**Why Not Chosen**: DataHub CLI is often used globally (not project-specific), and directory-based config introduces more complexity than it solves.
+**Why Partially Adopted**: The original RFC rejected full directory-based configuration, but the agent/worktree use case demonstrated a strong need for directory-scoped config. The adopted design uses ancestor-walk discovery (like `.editorconfig`, Dagster's `dg.toml`) where any directory can provide a `.datahub/config.yaml` — either a lightweight profile pointer or a full config. To mitigate credential risks, the CLI warns when non-home configs contain literal tokens and nudges toward `${VAR}` interpolation.
 
 ### Alternative 4: Config File with Environment Selection
 
@@ -1154,7 +1110,8 @@ The proposed profile system strikes the right balance:
 4. **Discoverable**: `datahub profile list` makes profiles visible
 5. **Industry Standard**: Follows patterns from AWS CLI, kubectl, gcloud, etc.
 6. **Backward Compatible**: Doesn't break existing workflows
-7. **Future-Proof**: Extensible configuration model
+7. **Agent/Worktree Safe**: Ancestor-walk config resolution enables concurrent processes without conflicts
+8. **Future-Proof**: Extensible configuration model
 
 ## Rollout / Adoption Strategy
 
@@ -1163,7 +1120,8 @@ The proposed profile system strikes the right balance:
 1. **Code Review**: RFC approved and implementation reviewed by core team
 2. **Documentation**: Complete all documentation (CLI reference, guides, migration docs)
 3. **Internal Dogfooding**: DataHub team tests profiles in daily work
-4. **Fix Issues**: Address any bugs or UX issues discovered
+4. **Worktree Testing**: Test local pointer resolution across git worktrees to verify concurrent isolation
+5. **Fix Issues**: Address any bugs or UX issues discovered
 
 ### Phase 2: Beta Release (Week 3-4)
 
@@ -1198,6 +1156,7 @@ The proposed profile system strikes the right balance:
 3. **Opt-in Migration**: Users migrate when ready via `datahub profile migrate`
 4. **Environment Variable Overrides**: All existing env vars (`DATAHUB_GMS_URL`, etc.) continue to work
 5. **Deprecation Timeline**: Legacy support maintained for at least 2 major versions (minimum 1 year)
+6. **No Worktree Required**: Ancestor-walk config resolution is entirely opt-in. Users who don't place `.datahub/config.yaml` files in their directories are unaffected — `current_profile` and `set-default` in `~/.datahub/config.yaml` provide the same single-profile switching experience as before.
 
 ### Migration Tools
 
@@ -1462,6 +1421,21 @@ profiles:
 
 **Benefits**: Better understanding of usage patterns, identify issues proactively.
 
+### 11. Per-Repository DataHub Configuration
+
+**Use Case**: Repositories may want to store additional DataHub configuration beyond the profile pointer — for example, default ingestion recipes, custom assertion rules, or metadata model extensions.
+
+**Foundation**: The ancestor-walk model naturally supports this — `.datahub/` directories at any level can hold additional config. Future work could add:
+- `.datahub/recipes/` for ingestion recipes
+- `.datahub/assertions.yaml` for custom data quality rules
+- `.datahub/metadata/` for local metadata definitions
+
+Intermediate-level `.datahub/` directories (e.g., `~/work/.datahub/`) could hold company-wide defaults for recipes and assertions, just as they can hold company-wide profile configs today.
+
+**Note**: This is explicitly out of scope for this RFC. The `.datahub/` directory currently contains only `config.yaml`.
+
+**Benefits**: Standardized per-repo DataHub configuration, better CI/CD integration, shareable team configurations.
+
 ## Unresolved questions
 
 ### 1. Profile Name Validation
@@ -1659,6 +1633,60 @@ profiles:
 **Recommendation**: Option A - Document recommended patterns in best practices guide, but don't enforce.
 
 **Decision Needed**: For documentation phase.
+
+---
+
+### 11. Should `datahub profile current` Show Resolution Chain?
+
+**Question**: When displaying the active profile, should the command also show *why* it was selected (which precedence layer resolved it)?
+
+**Example output**:
+
+```
+Active profile: staging
+Resolved via: ancestor walk (/Users/me/worktree-a/.datahub/config.yaml)
+Config type: profile pointer
+Server: https://staging.datahub.com
+```
+
+**Recommendation**: Yes — this is invaluable for debugging, especially in agent/worktree workflows where the user did not explicitly pass `--profile`.
+
+**Decision Needed**: Before GA release.
+
+---
+
+### 12. Where Should `datahub profile use` Write?
+
+**Question**: Should `datahub profile use <name>` write `.datahub/config.yaml` to CWD, or try to find the nearest git root first?
+
+**Options**:
+
+- **Option A**: Always write to CWD (simplest, works everywhere)
+- **Option B**: Write to git root if in a repo, CWD otherwise (more predictable for repos)
+
+**Recommendation**: Option A — CWD is the simplest behavior and the ancestor walk naturally finds it. Users who want it at the repo root can `cd` there first. This keeps the implementation git-agnostic.
+
+**Decision Needed**: Before implementation.
+
+---
+
+### 13. Should the Ancestor Walk Support a Stop Marker?
+
+**Question**: Should a `.datahub/config.yaml` be able to declare itself as a "root" to prevent the walk from continuing above it?
+
+**Example**:
+
+```yaml
+# Stop the ancestor walk here — don't look in parent directories
+root: true
+profiles:
+  dev:
+    server: http://localhost:8080
+```
+
+**Recommendation**: Not for v1. The walk already stops at `~`, and the "closest wins" semantic is simple enough. Add a stop marker if users request it.
+
+**Decision Needed**: Post-launch based on user feedback.
 
 ---
 
