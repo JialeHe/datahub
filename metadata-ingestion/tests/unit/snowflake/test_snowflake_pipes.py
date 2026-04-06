@@ -226,13 +226,14 @@ class TestSnowflakePipesExtractor:
         assert len(io.outputDatasets) == 1
         assert "target_table" in io.outputDatasets[0]
 
-    def test_external_stage_pipe_resolves_s3_url(self) -> None:
+    def test_external_stage_pipe_uses_resolved_s3_urn(self) -> None:
         pipe = _make_pipe(definition="COPY INTO target_table FROM @ext_stage/data/")
         ext_stage = _make_external_stage("ext_stage", "s3://my-bucket/data/")
         stage_lookup = {
             "TEST_DB.PUBLIC.EXT_STAGE": StageLookupEntry(
                 stage=ext_stage,
                 container_key=MagicMock(),
+                dataset_urn="urn:li:dataset:(urn:li:dataPlatform:s3,my-bucket/data/,PROD)",
             ),
         }
         wus = _collect_workunits([pipe], stage_lookup)

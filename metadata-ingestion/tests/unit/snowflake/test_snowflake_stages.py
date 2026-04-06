@@ -156,10 +156,11 @@ class TestSnowflakeStagesExtractor:
         ]
         assert len(dataset_props) == 0
 
-        # Lookup entry should NOT have dataset_urn
+        # Lookup entry should have a resolved S3 dataset_urn
         entry = extractor.get_stage_lookup_entry("TEST_DB.PUBLIC.EXT_STAGE")
         assert entry is not None
-        assert entry.dataset_urn is None
+        assert entry.dataset_urn is not None
+        assert "s3" in entry.dataset_urn
         assert entry.stage.url == "s3://my-bucket/data/"
 
     def test_external_stage_container_has_url_in_properties(self) -> None:
@@ -189,11 +190,13 @@ class TestSnowflakeStagesExtractor:
         assert report.stages_scanned == 2
         assert len(extractor.stage_lookup) == 2
 
-        # Internal has dataset, external does not
         int_entry = extractor.get_stage_lookup_entry("TEST_DB.PUBLIC.INT_STG")
         ext_entry = extractor.get_stage_lookup_entry("TEST_DB.PUBLIC.EXT_STG")
         assert int_entry is not None and int_entry.dataset_urn is not None
-        assert ext_entry is not None and ext_entry.dataset_urn is None
+        assert ext_entry is not None and ext_entry.dataset_urn is not None
+        # Internal resolves to snowflake platform, external to s3
+        assert "snowflake" in int_entry.dataset_urn
+        assert "s3" in ext_entry.dataset_urn
 
     def test_stage_pattern_filtering(self) -> None:
         config = _make_config()
