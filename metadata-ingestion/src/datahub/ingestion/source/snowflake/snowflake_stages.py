@@ -11,8 +11,15 @@ from datahub.emitter.mce_builder import (
     make_group_urn,
 )
 from datahub.emitter.mcp import MetadataChangeProposalWrapper
-from datahub.emitter.mcp_builder import ContainerKey, SchemaKey, gen_containers
+from datahub.emitter.mcp_builder import (
+    ContainerKey,
+    SchemaKey,
+    add_dataset_to_container,
+    gen_containers,
+)
 from datahub.ingestion.api.workunit import MetadataWorkUnit
+from datahub.ingestion.source.aws.s3_util import make_s3_urn_for_lineage
+from datahub.ingestion.source.azure.abs_utils import make_abs_urn
 from datahub.ingestion.source.common.subtypes import (
     DatasetContainerSubTypes,
     DatasetSubTypes,
@@ -46,7 +53,7 @@ class StageKey(ContainerKey):
 class StageLookupEntry:
     stage: SnowflakeStage
     container_key: StageKey
-    dataset_urn: Optional[str] = None  # Only for internal stages
+    dataset_urn: Optional[str] = None
 
 
 @dataclass
@@ -89,14 +96,12 @@ class SnowflakeStagesExtractor:
                 container_key=stage_key,
             )
 
-            # Emit stage container
             yield from self._gen_stage_container(
                 stage=stage,
                 stage_key=stage_key,
                 parent_key=schema_container_key,
             )
 
-            # For internal stages, emit a placeholder dataset
             if stage.stage_type.upper() == "INTERNAL":
                 dataset_urn = self._gen_internal_stage_dataset_urn(stage)
                 lookup_entry.dataset_urn = dataset_urn
@@ -105,6 +110,8 @@ class SnowflakeStagesExtractor:
                     dataset_urn=dataset_urn,
                     stage_key=stage_key,
                 )
+            else:
+                lookup_entry.dataset_urn = self._resolve_external_stage_url(stage.url)
 
             self.stage_lookup[stage_identifier] = lookup_entry
 
@@ -181,10 +188,8 @@ class SnowflakeStagesExtractor:
             aspect=StatusClass(removed=False),
         ).as_workunit()
 
-        # Add container relationship
         yield from self._add_dataset_to_stage_container(dataset_urn, stage_key)
 
-        # Add platform instance
         if self.config.platform_instance:
             yield MetadataChangeProposalWrapper(
                 entityUrn=dataset_urn,
@@ -199,12 +204,33 @@ class SnowflakeStagesExtractor:
     def _add_dataset_to_stage_container(
         self, dataset_urn: str, stage_key: StageKey
     ) -> Iterable[MetadataWorkUnit]:
-        from datahub.emitter.mcp_builder import add_dataset_to_container
-
         yield from add_dataset_to_container(
             container_key=stage_key,
             dataset_urn=dataset_urn,
         )
+
+    def _resolve_external_stage_url(self, url: Optional[str]) -> Optional[str]:
+        if not url:
+            return None
+        if url.startswith("s3://"):
+            return make_s3_urn_for_lineage(url, self.config.env)
+        if url.startswith("gcs://"):
+            # Snowflake uses gcs:// but DataHub GCS platform expects the path without prefix
+            path = url[len("gcs://") :]
+            if path.endswith("/"):
+                path = path[:-1]
+            return make_dataset_urn_with_platform_instance(
+                platform="gcs",
+                name=path,
+                env=self.config.env,
+                platform_instance=None,
+            )
+        if url.startswith("azure://"):
+            # Snowflake stores azure://<account>.blob.core.windows.net/<container>/<path>
+            abs_url = url.replace("azure://", "https://", 1)
+            return make_abs_urn(abs_url, self.config.env)
+        logger.debug(f"Unsupported external stage URL scheme: {url}")
+        return None
 
     def get_stage_lookup_entry(self, stage_fqn: str) -> Optional[StageLookupEntry]:
         return self.stage_lookup.get(stage_fqn.upper())

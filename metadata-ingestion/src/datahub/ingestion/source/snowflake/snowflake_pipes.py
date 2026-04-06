@@ -10,7 +10,6 @@ from datahub.emitter.mce_builder import (
 )
 from datahub.emitter.mcp import MetadataChangeProposalWrapper
 from datahub.ingestion.api.workunit import MetadataWorkUnit
-from datahub.ingestion.source.aws.s3_util import make_s3_urn_for_lineage
 from datahub.ingestion.source.common.subtypes import (
     DataJobSubTypes,
     FlowContainerSubTypes,
@@ -76,13 +75,11 @@ def parse_copy_into(
     if not target_match or not stage_match:
         return None, None
 
-    # Target table
     target_db = target_match.group(1) or default_db
     target_schema = target_match.group(2) or default_schema
     target_table = target_match.group(3)
     target_fqn = f"{target_db}.{target_schema}.{target_table}".upper()
 
-    # Stage reference
     stage_db = stage_match.group(1) or default_db
     stage_schema = stage_match.group(2) or default_schema
     stage_name = stage_match.group(3)
@@ -108,7 +105,6 @@ class SnowflakePipesExtractor:
         if not pipes:
             return
 
-        # Filter pipes first to avoid emitting empty DataFlows
         allowed_pipes = [
             pipe
             for pipe in pipes
@@ -129,7 +125,6 @@ class SnowflakePipesExtractor:
             platform_instance=self.config.platform_instance,
         )
 
-        # Emit the DataFlow (per-schema grouping)
         yield from self._gen_data_flow(flow_urn, db_name, schema_name)
 
         for pipe in allowed_pipes:
@@ -183,7 +178,6 @@ class SnowflakePipesExtractor:
         job_id = self.identifiers.snowflake_identifier(pipe.name)
         job_urn = make_data_job_urn_with_flow(flow_urn, job_id)
 
-        # Parse COPY INTO to get target table and stage
         target_fqn, stage_fqn = parse_copy_into(pipe.definition, db_name, schema_name)
         if not target_fqn and pipe.definition:
             self.report.warning(
@@ -201,7 +195,6 @@ class SnowflakePipesExtractor:
         if stage_fqn:
             custom_properties["stage_name"] = stage_fqn
 
-        # Determine stage type for custom properties
         stage_entry = (
             self.stages_extractor.get_stage_lookup_entry(stage_fqn)
             if stage_fqn
@@ -210,7 +203,6 @@ class SnowflakePipesExtractor:
         if stage_entry:
             custom_properties["stage_type"] = stage_entry.stage.stage_type
 
-        # DataJobInfo
         yield MetadataChangeProposalWrapper(
             entityUrn=job_urn,
             aspect=DataJobInfoClass(
@@ -221,7 +213,6 @@ class SnowflakePipesExtractor:
             ),
         ).as_workunit()
 
-        # SubTypes
         yield MetadataChangeProposalWrapper(
             entityUrn=job_urn,
             aspect=SubTypesClass(
@@ -229,17 +220,14 @@ class SnowflakePipesExtractor:
             ),
         ).as_workunit()
 
-        # Status
         yield MetadataChangeProposalWrapper(
             entityUrn=job_urn,
             aspect=StatusClass(removed=False),
         ).as_workunit()
 
-        # DataJobInputOutput — lineage
         input_datasets: List[str] = []
         output_datasets: List[str] = []
 
-        # Downstream: target table
         if target_fqn:
             target_dataset_identifier = self.identifiers.snowflake_identifier(
                 target_fqn
@@ -247,17 +235,8 @@ class SnowflakePipesExtractor:
             target_urn = self.identifiers.gen_dataset_urn(target_dataset_identifier)
             output_datasets.append(target_urn)
 
-        # Upstream: depends on stage type
-        if stage_entry:
-            if stage_entry.stage.stage_type.upper() == "INTERNAL":
-                # Internal stage: use placeholder dataset
-                if stage_entry.dataset_urn:
-                    input_datasets.append(stage_entry.dataset_urn)
-            elif stage_entry.stage.url:
-                # External stage: resolve URL to S3/GCS/Azure dataset URN
-                upstream_urn = self._resolve_external_stage_url(stage_entry.stage.url)
-                if upstream_urn:
-                    input_datasets.append(upstream_urn)
+        if stage_entry and stage_entry.dataset_urn:
+            input_datasets.append(stage_entry.dataset_urn)
 
         if input_datasets or output_datasets:
             yield MetadataChangeProposalWrapper(
@@ -269,7 +248,6 @@ class SnowflakePipesExtractor:
                 ),
             ).as_workunit()
 
-        # Ownership
         if pipe.owner:
             yield MetadataChangeProposalWrapper(
                 entityUrn=job_urn,
@@ -282,15 +260,3 @@ class SnowflakePipesExtractor:
                     ]
                 ),
             ).as_workunit()
-
-    def _resolve_external_stage_url(self, url: str) -> Optional[str]:
-        """Resolve an external stage URL to a dataset URN.
-
-        Consistent with existing SnowflakeLineageExtractor.get_external_upstreams()
-        which always resolves S3 URLs via make_s3_urn_for_lineage().
-        """
-        if url.startswith("s3://"):
-            return make_s3_urn_for_lineage(url, self.config.env)
-        # TODO: Add GCS and Azure support when utilities are available
-        logger.debug(f"Unsupported external stage URL scheme: {url}")
-        return None

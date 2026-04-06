@@ -52,7 +52,6 @@ class SnowflakeTasksExtractor:
         if not tasks:
             return
 
-        # Filter tasks first to avoid emitting empty DataFlows
         allowed_tasks = [
             task
             for task in tasks
@@ -73,10 +72,8 @@ class SnowflakeTasksExtractor:
             platform_instance=self.config.platform_instance,
         )
 
-        # Emit the DataFlow (per-schema grouping)
         yield from self._gen_data_flow(flow_urn, db_name, schema_name)
 
-        # Build a map of task name -> task for predecessor resolution
         task_name_map: Dict[str, SnowflakeTask] = {
             task.name.upper(): task for task in tasks
         }
@@ -148,7 +145,6 @@ class SnowflakeTasksExtractor:
         if task.definition:
             custom_properties["definition"] = task.definition[:4000]
 
-        # DataJobInfo
         yield MetadataChangeProposalWrapper(
             entityUrn=job_urn,
             aspect=DataJobInfoClass(
@@ -159,7 +155,6 @@ class SnowflakeTasksExtractor:
             ),
         ).as_workunit()
 
-        # SubTypes
         yield MetadataChangeProposalWrapper(
             entityUrn=job_urn,
             aspect=SubTypesClass(
@@ -167,13 +162,11 @@ class SnowflakeTasksExtractor:
             ),
         ).as_workunit()
 
-        # Status
         yield MetadataChangeProposalWrapper(
             entityUrn=job_urn,
             aspect=StatusClass(removed=False),
         ).as_workunit()
 
-        # DataJobInputOutput — predecessor tasks
         input_datajobs: List[str] = []
         for predecessor_name in task.predecessors:
             pred_name_upper = predecessor_name.strip().upper()
@@ -195,7 +188,6 @@ class SnowflakeTasksExtractor:
                 ),
             ).as_workunit()
 
-        # Ownership
         if task.owner:
             yield MetadataChangeProposalWrapper(
                 entityUrn=job_urn,
