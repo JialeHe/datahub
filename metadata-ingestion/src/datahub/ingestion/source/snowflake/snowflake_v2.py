@@ -734,17 +734,19 @@ class SnowflakeV2Source(
                 identifiers=self.identifiers,
             )
 
-        if stages_extractor and self.config.stages.enabled:
+        if stages_extractor:
             for db in databases:
                 for schema in db.schemas:
                     schema_container_key = self.identifiers.gen_schema_key(
                         db.name, schema.name
                     )
-                    yield from stages_extractor.get_workunits(
+                    for wu in stages_extractor.get_workunits(
                         db_name=db.name,
                         schema_name=schema.name,
                         schema_container_key=schema_container_key,
-                    )
+                    ):
+                        if self.config.stages.enabled:
+                            yield wu
 
         if self.config.tasks.enabled:
             tasks_extractor = SnowflakeTasksExtractor(
