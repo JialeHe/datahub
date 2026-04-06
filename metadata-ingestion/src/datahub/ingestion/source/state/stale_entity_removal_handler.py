@@ -357,6 +357,9 @@ stateful_ingestion:\
                 self.add_entity_to_state("", urn)
             return
 
+        report = self.source.get_report()
+        assert isinstance(report, StaleEntityRemovalSourceReport)
+
         # Everything looks good, emit the soft-deletion workunits
         for urn in last_checkpoint_state.get_urns_not_in(
             type="*", other_checkpoint_state=cur_checkpoint_state
