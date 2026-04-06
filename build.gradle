@@ -2,7 +2,7 @@ import org.apache.tools.ant.filters.ReplaceTokens
 
 
 buildscript {
-  ext.jdkVersionDefault = 17
+  ext.jdkVersionDefault = 21
   ext.javaClassVersionDefault = 17
 
   def springModules = ['mae-consumer', 'mce-consumer', 'pe-consumer']
