@@ -7,6 +7,7 @@ from tests.utils import execute_graphql, get_root_urn, with_test_retry
 
 logger = logging.getLogger(__name__)
 TEST_POLICY_NAME = "Updated Platform Policy"
+TEST_DENY_POLICY_NAME = "Test Deny Policy"
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -147,6 +148,71 @@ def test_frontend_policy_operations(auth_session):
     assert len(list(result)) == 0
 
 
+def test_frontend_deny_policy_operations(auth_session):
+    """Verify that a DENY policy can be created, listed, and deleted."""
+    create_policy_query = """mutation createPolicy($input: PolicyUpdateInput!) {
+            createPolicy(input: $input) }"""
+    create_policy_variables: Dict[str, Any] = {
+        "input": {
+            "type": "METADATA",
+            "name": TEST_DENY_POLICY_NAME,
+            "description": "A deny policy for smoke testing",
+            "state": "ACTIVE",
+            "effect": "DENY",
+            "resources": {"type": "dataset", "allResources": True},
+            "privileges": ["EDIT_ENTITY_TAGS"],
+            "actors": {
+                "users": [get_root_urn()],
+                "resourceOwners": False,
+                "allUsers": False,
+                "allGroups": False,
+            },
+        }
+    }
+
+    res_data = execute_graphql(
+        auth_session, create_policy_query, create_policy_variables
+    )
+
+    assert res_data["data"]["createPolicy"]
+    deny_urn = res_data["data"]["createPolicy"]
+
+    _ensure_deny_policy_present(auth_session, deny_urn)
+
+    # Clean up
+    delete_policy_query = """mutation deletePolicy($urn: String!) {
+            deletePolicy(urn: $urn) }"""
+    execute_graphql(auth_session, delete_policy_query, {"urn": deny_urn})
+
+    res_data = listPolicies(auth_session)
+    result = list(
+        filter(
+            lambda x: x["urn"] == deny_urn,
+            res_data["data"]["listPolicies"]["policies"],
+        )
+    )
+    assert len(result) == 0
+
+
+@with_test_retry()
+def _ensure_deny_policy_present(auth_session, deny_urn):
+    res_data = listPolicies(auth_session)
+
+    assert res_data
+    assert res_data["data"]
+    assert res_data["data"]["listPolicies"]
+
+    result = list(
+        filter(
+            lambda x: x["urn"] == deny_urn,
+            res_data["data"]["listPolicies"]["policies"],
+        )
+    )
+    assert len(result) == 1
+    assert result[0]["name"] == TEST_DENY_POLICY_NAME
+    assert result[0]["effect"] == "DENY"
+
+
 def listPolicies(auth_session):
     query = """query listPolicies($input: ListPoliciesInput!) {
             listPolicies(input: $input) {
@@ -159,6 +225,7 @@ def listPolicies(auth_session):
                     name
                     description
                     state
+                    effect
                     resources {
                       type
                       allResources
