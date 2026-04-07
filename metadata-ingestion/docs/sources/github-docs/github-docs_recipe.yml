@@ -1,0 +1,13 @@
+source:
+  type: github-docs
+  config:
+    repo: "my-org/my-repo"
+    token: "${GITHUB_TOKEN}"
+    branch: main
+    path_prefix: "docs"
+    file_extensions:
+      - ".md"
+      - ".txt"
+
+sink:
+  # sink configs

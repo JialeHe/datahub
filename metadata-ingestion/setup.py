@@ -1051,6 +1051,7 @@ entry_points = {
         "feast = datahub.ingestion.source.feast:FeastRepositorySource",
         "flink = datahub.ingestion.source.flink.source:FlinkSource",
         "grafana = datahub.ingestion.source.grafana.grafana_source:GrafanaSource",
+        "github-docs = datahub.ingestion.source.github_docs.github_docs_source:GitHubDocsSource",
         "glue = datahub.ingestion.source.aws.glue:GlueSource",
         "sagemaker = datahub.ingestion.source.aws.sagemaker:SagemakerSource",
         "hana = datahub.ingestion.source.sql.hana:HanaSource",
