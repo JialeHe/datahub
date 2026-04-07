@@ -1,6 +1,7 @@
 import json
 from datetime import datetime, timezone
-from typing import cast
+from pathlib import Path
+from typing import Any, cast
 from unittest import mock
 
 import pytest
@@ -16,7 +17,7 @@ from tests.integration.snowflake.common import default_query_results
 pytestmark = pytest.mark.integration_batch_5
 
 
-def _base_config(**overrides) -> SnowflakeV2Config:
+def _base_config(**overrides: Any) -> SnowflakeV2Config:
     defaults = dict(
         account_id="ABC12345.ap-south-1.aws",
         username="TST_USR",
@@ -34,7 +35,7 @@ def _base_config(**overrides) -> SnowflakeV2Config:
     return SnowflakeV2Config(**defaults)
 
 
-def _run_pipeline(config: SnowflakeV2Config, output_file) -> SnowflakeV2Report:
+def _run_pipeline(config: SnowflakeV2Config, output_file: Path) -> SnowflakeV2Report:
     with mock.patch("snowflake.connector.connect") as mock_connect:
         sf_connection = mock.MagicMock()
         sf_cursor = mock.MagicMock()
