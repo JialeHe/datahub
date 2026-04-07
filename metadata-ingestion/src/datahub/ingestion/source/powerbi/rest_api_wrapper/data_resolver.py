@@ -339,16 +339,6 @@ class DataResolverBase(ABC):
 
         return reports
 
-    def get_report(self, workspace: Workspace, report_id: str) -> Optional[Report]:
-        reports: List[Report] = self.get_reports(
-            workspace, _filter=f"id eq '{report_id}'"
-        )
-
-        if len(reports) == 0:
-            return None
-
-        return reports[0]
-
     def get_tiles(self, workspace: Workspace, dashboard: Dashboard) -> List[Tile]:
         """
         Get the list of tiles from PowerBi for the given workspace identifier
