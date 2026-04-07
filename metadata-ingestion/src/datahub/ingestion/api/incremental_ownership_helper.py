@@ -17,7 +17,7 @@ def convert_ownership_to_patch(
     aspect: OwnershipClass,
     system_metadata: Optional[SystemMetadataClass] = None,
 ) -> MetadataWorkUnit:
-    patch_builder = create_dataset_owners_patch_builder(urn, aspect)
+    patch_builder = create_dataset_owners_patch_builder(urn, aspect, system_metadata)
     mcp = next(iter(patch_builder.build()))
     return MetadataWorkUnit(id=MetadataWorkUnit.generate_workunit_id(mcp), mcp_raw=mcp)
 

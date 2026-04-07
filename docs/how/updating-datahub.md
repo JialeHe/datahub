@@ -39,6 +39,7 @@ This file documents any backwards-incompatible changes in DataHub and assists pe
   - **JVM metrics:** Some built-in JVM metric **names** changed to align with OpenMetrics (for example, memory-related series). Update Grafana panels, recording rules, and alerts that referenced the old names. See the [client_java JVM migration notes](https://prometheus.github.io/client_java/migration/simpleclient/#jvm-metrics).
   - **Labels:** When multiple MBeans map to the same metric name, series may include an **`_objectname`** label; adjust queries or aggregations if you previously assumed a single series per name.
 - #16723 (Ingestion) Dataplex source configuration cleanup: `filter_config.entries.dataset_pattern` was removed, use `filter_config.entries.pattern` instead; `entries_location` was removed, use `entries_locations` (list) instead.
+- #16873 (Ingestion) Unity Catalog (Databricks) connector now emits ownership and datasetProperties as UPSERT (full replace) by default, instead of incremental PATCH. This means each ingestion run will re-state the complete ownership and properties for each dataset. If you rely on the previous additive/merge behavior (e.g., manually added owners surviving ingestion runs), set `incremental_ownership: true` and/or `incremental_properties: true` in your recipe config.
 
 ### Known Issues
 
