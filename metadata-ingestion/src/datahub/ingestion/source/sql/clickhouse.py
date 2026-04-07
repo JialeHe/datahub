@@ -943,7 +943,10 @@ ORDER BY event_time ASC
           FROM system.tables
          WHERE engine IN ('Distributed')
         UNION ALL
-        SELECT extract(create_table_query, 'DB ''(.*?)''')    AS source_schema
+        SELECT CASE WHEN extract(create_table_query, 'DB ''(.*?)''') != ''
+                    THEN extract(create_table_query, 'DB ''(.*?)''')
+                    ELSE database
+               END                                            AS source_schema
              , extract(create_table_query, 'TABLE ''(.*?)''') AS source_table
              , database                                       AS target_schema
              , name                                           AS target_table
