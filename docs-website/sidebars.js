@@ -104,14 +104,68 @@ module.exports = {
           },
           items: [
             {
-              label: "Langchain",
-              type: "doc",
-              id: "docs/dev-guides/agent-context/langchain",
+              label: "Snowflake",
+              type: "category",
+              collapsible: true,
+              collapsed: true,
+              items: [
+                {
+                  label: "Cortex Agents",
+                  type: "doc",
+                  id: "docs/dev-guides/agent-context/snowflake",
+                },
+                {
+                  label: "Cortex Code",
+                  type: "doc",
+                  id: "docs/dev-guides/agent-context/snowflake-cortex-code",
+                },
+              ],
             },
             {
-              label: "Snowflake",
+              label: "Google",
+              type: "category",
+              collapsible: true,
+              collapsed: true,
+              items: [
+                {
+                  label: "Gemini CLI",
+                  type: "doc",
+                  id: "docs/dev-guides/agent-context/gemini-cli",
+                },
+                {
+                  label: "Agent Development Kit (ADK)",
+                  type: "doc",
+                  id: "docs/dev-guides/agent-context/google-adk",
+                },
+                {
+                  label: "Vertex AI",
+                  type: "doc",
+                  id: "docs/dev-guides/agent-context/google-vertex-ai",
+                },
+              ],
+            },
+            {
+              label: "Databricks",
+              type: "category",
+              collapsible: true,
+              collapsed: true,
+              items: [
+                {
+                  label: "Genie Code",
+                  type: "doc",
+                  id: "docs/dev-guides/agent-context/databricks-genie-code",
+                },
+                {
+                  label: "Agent Bricks",
+                  type: "doc",
+                  id: "docs/dev-guides/agent-context/databricks-agent-bricks",
+                },
+              ],
+            },
+            {
+              label: "LangChain",
               type: "doc",
-              id: "docs/dev-guides/agent-context/snowflake",
+              id: "docs/dev-guides/agent-context/langchain",
             },
             {
               label: "Cursor",
@@ -124,24 +178,9 @@ module.exports = {
               id: "docs/dev-guides/agent-context/claude",
             },
             {
-              label: "Gemini CLI",
-              type: "doc",
-              id: "docs/dev-guides/agent-context/gemini-cli",
-            },
-            {
               label: "Microsoft Copilot Studio",
               type: "doc",
               id: "docs/dev-guides/agent-context/copilot-studio",
-            },
-            {
-              label: "Google Vertex AI",
-              type: "doc",
-              id: "docs/dev-guides/agent-context/google-vertex-ai",
-            },
-            {
-              label: "Google ADK",
-              type: "doc",
-              id: "docs/dev-guides/agent-context/google-adk",
             },
           ],
         },
@@ -1077,10 +1116,11 @@ module.exports = {
       label: "DataHub CLI",
       link: { type: "doc", id: "docs/cli" },
       items: [
-        "docs/cli-commands/dataset",
-        "docs/cli-commands/graphql",
-        "docs/cli-commands/search",
-        "docs/datahub_lite",
+        { type: "doc", id: "docs/cli-commands/search", label: "search" },
+        { type: "doc", id: "docs/cli-commands/graphql", label: "graphql" },
+        { type: "doc", id: "docs/cli-commands/dataset", label: "dataset" },
+        { type: "doc", id: "docs/cli-commands/datapack", label: "datapack" },
+        { type: "doc", id: "docs/datahub_lite", label: "lite" },
       ],
     },
     {
