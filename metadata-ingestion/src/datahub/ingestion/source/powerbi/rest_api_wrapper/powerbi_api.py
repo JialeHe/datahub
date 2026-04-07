@@ -9,6 +9,7 @@ from datahub.ingestion.source.powerbi.config import (
     Constant,
     PowerBiDashboardSourceConfig,
     PowerBiDashboardSourceReport,
+    PowerBiEnvironment,
 )
 from datahub.ingestion.source.powerbi.rest_api_wrapper import data_resolver
 from datahub.ingestion.source.powerbi.rest_api_wrapper.data_classes import (
@@ -270,11 +271,18 @@ class PowerBiAPI:
             self.log_http_error(message="Unable to fetch list of workspaces")
             # raise  # we want this exception to bubble up
 
+        base_web_url = (
+            "https://app.powerbigov.us"
+            if self.__config.environment == PowerBiEnvironment.GOVERNMENT
+            else "https://app.powerbi.com"
+        )
+
         workspaces = [
             Workspace(
                 id=workspace[Constant.ID],
                 name=workspace[Constant.NAME],
                 type=workspace[Constant.TYPE],
+                webUrl=f"{base_web_url}/groups/{workspace[Constant.ID]}",
                 datasets={},
                 dashboards={},
                 reports={},
