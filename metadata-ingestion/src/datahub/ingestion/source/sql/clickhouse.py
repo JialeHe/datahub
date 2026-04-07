@@ -1017,6 +1017,24 @@ ORDER BY event_time ASC
             self._lineage_map = defaultdict()
 
         if self.config.include_tables:
+            # Log raw DDL for dictionaries to aid debugging source lineage extraction
+            url = self.config.get_sql_alchemy_url()
+            engine = create_engine(url, **self.config.options)
+            try:
+                for row in engine.execute(
+                    text(
+                        "SELECT database, name, create_table_query"
+                        " FROM system.tables"
+                        " WHERE engine = 'Dictionary'"
+                    )
+                ):
+                    logger.debug(
+                        f"Dictionary DDL: {row['database']}.{row['name']}: "
+                        f"{row['create_table_query']}"
+                    )
+            except Exception as e:
+                logger.debug(f"Failed to log dictionary DDL: {e}")
+
             # Populate table level lineage for dictionaries and distributed tables
             self._populate_lineage_map(
                 query=table_lineage_query, lineage_type=LineageCollectorType.TABLE
