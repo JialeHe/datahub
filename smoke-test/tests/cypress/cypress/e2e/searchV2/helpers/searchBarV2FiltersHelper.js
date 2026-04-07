@@ -21,7 +21,9 @@ export class SearchBarV2FiltersHelper {
 
   search(filterName, text) {
     this.getDropdown(filterName).within(() => {
-      cy.clearTextInTestId(this.filterSearchInputTestId);
+      cy.getWithTestId(this.filterSearchInputTestId).within(() => {
+        cy.get('input').first().clear();
+      });
       cy.enterTextInTestId(this.filterSearchInputTestId, text);
     });
   }
