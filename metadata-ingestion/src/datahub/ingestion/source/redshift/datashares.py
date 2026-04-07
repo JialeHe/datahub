@@ -1,3 +1,4 @@
+import logging
 from typing import Dict, Iterable, List, Optional, Union
 
 from pydantic import BaseModel
@@ -22,6 +23,8 @@ from datahub.ingestion.source.redshift.redshift_schema import (
 from datahub.ingestion.source.redshift.report import RedshiftReport
 from datahub.sql_parsing.sql_parsing_aggregator import KnownLineageMapping
 from datahub.utilities.search_utils import LogicalOperator
+
+logger = logging.getLogger(__name__)
 
 
 class OutboundSharePlatformResource(BaseModel):
@@ -144,7 +147,17 @@ class RedshiftDatasharesHelper:
                 "set the top-level datahub_api config in the recipe",
             )
         else:
+            lookup_key = (
+                share.get_key()
+                if isinstance(share, InboundDatashare)
+                else f"{share.producer_namespace_prefix}* (partial)"
+            )
+            logger.info(
+                f"Looking up PlatformResource for inbound share: {share.get_description()}, "
+                f"lookup_key={lookup_key}"
+            )
             resources = self.get_platform_resources(self.graph, share)
+            logger.info(f"PlatformResource search returned {len(resources)} result(s)")
 
             if len(resources) == 0 or (
                 not any(
@@ -172,9 +185,15 @@ class RedshiftDatasharesHelper:
                             resource.resource_info is not None
                             and resource.resource_info.value is not None
                         )
-                        return resource.resource_info.value.as_pydantic_object(
+                        upstream = resource.resource_info.value.as_pydantic_object(
                             OutboundSharePlatformResource, True
                         )
+                        logger.info(
+                            f"Matched upstream share: platform_instance={upstream.platform_instance}, "
+                            f"env={upstream.env}, source_database={upstream.source_database}, "
+                            f"share_name={upstream.share_name}, namespace={upstream.namespace}"
+                        )
+                        return upstream
                     except Exception as e:
                         self.report.warning(
                             title="Upstream lineage of inbound datashare will be missing",

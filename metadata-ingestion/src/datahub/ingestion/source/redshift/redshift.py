@@ -385,6 +385,21 @@ class RedshiftSource(StatefulIngestionSourceBase, TestableSource):
         database = self.config.database
         logger.info(f"Processing db {database}")
 
+        if self.config.include_share_lineage:
+            try:
+                all_dbs = self.data_dictionary.get_all_databases(connection)
+                logger.info(
+                    "All databases visible on this cluster: %s",
+                    [
+                        f"{db.name} (type={db.type}, options={db.options})"
+                        for db in all_dbs
+                    ],
+                )
+            except Exception:
+                logger.info(
+                    "Could not list all databases (may lack permissions on svv_redshift_databases)"
+                )
+
         self.db = self.data_dictionary.get_database_details(connection, database)
         self.report.is_shared_database = (
             self.db is not None and self.db.is_shared_database()
@@ -974,6 +989,9 @@ class RedshiftSource(StatefulIngestionSourceBase, TestableSource):
             )
 
             if self.db and self.db.is_shared_database():
+                logger.info(
+                    f"Database '{database}' is shared — will attempt bridge lineage"
+                )
                 inbound_share = self.db.get_inbound_share()
                 if inbound_share is None:
                     self.report.warning(
@@ -982,10 +1000,28 @@ class RedshiftSource(StatefulIngestionSourceBase, TestableSource):
                         context=f"Database: {database}, Options {self.db.options}",
                     )
                 else:
+                    logger.info(
+                        f"Inbound share resolved: type={type(inbound_share).__name__}, "
+                        f"share_name={inbound_share.share_name}, "
+                        f"consumer_database={inbound_share.consumer_database}, "
+                        f"description={inbound_share.get_description()}"
+                    )
+                    lineage_count = 0
                     for known_lineage in self.datashares_helper.generate_lineage(
                         inbound_share, self.get_all_tables()[database]
                     ):
                         lineage_extractor.aggregator.add(known_lineage)
+                        lineage_count += 1
+                    logger.info(
+                        f"Generated {lineage_count} bridge lineage mappings "
+                        f"from datashare '{inbound_share.share_name}'"
+                    )
+            else:
+                logger.info(
+                    f"Database '{database}' is local (type={self.db.type if self.db else 'N/A'}) "
+                    f"— skipping bridge lineage. To generate bridge lineage, "
+                    f"create a recipe targeting the shared database."
+                )
 
         # TODO: distinguish between definition level lineage and audit log based lineage.
         # Definition level lineage should never be skipped

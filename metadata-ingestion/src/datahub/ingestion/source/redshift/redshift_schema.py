@@ -294,12 +294,33 @@ class RedshiftDataDictionary:
 
         row = cursor.fetchone()
         if row is None:
+            logger.info(f"Database '{database}' not found in svv_redshift_databases")
             return None
-        return RedshiftDatabase(
+        db = RedshiftDatabase(
             name=database,
             type=row[1],
             options=row[2],
         )
+        logger.info(
+            f"Database details: name={db.name}, type={db.type}, "
+            f"is_shared={db.is_shared_database()}, options={db.options}"
+        )
+        return db
+
+    @staticmethod
+    def get_all_databases(
+        conn: redshift_connector.Connection,
+    ) -> List["RedshiftDatabase"]:
+        """Fetch all databases visible to the current user for diagnostic logging."""
+        cursor = RedshiftDataDictionary.get_query_result(
+            conn,
+            "SELECT database_name, database_type, database_options "
+            "FROM svv_redshift_databases ORDER BY database_type",
+        )
+        results = []
+        for row in cursor.fetchall():
+            results.append(RedshiftDatabase(name=row[0], type=row[1], options=row[2]))
+        return results
 
     @staticmethod
     def get_schemas(
@@ -686,12 +707,20 @@ class RedshiftDataDictionary:
         cursor = RedshiftDataDictionary.get_query_result(
             conn=conn, query=RedshiftCommonQuery.list_outbound_datashares()
         )
-        for item in cursor.fetchall():
-            yield OutboundDatashare(
+        rows = cursor.fetchall()
+        logger.info(f"Found {len(rows)} outbound datashares")
+        for item in rows:
+            share = OutboundDatashare(
                 share_name=item[1],
                 producer_namespace=item[2],
                 source_database=item[3],
             )
+            logger.info(
+                f"Outbound datashare: share_name={share.share_name}, "
+                f"producer_namespace={share.producer_namespace}, "
+                f"source_database={share.source_database}"
+            )
+            yield share
 
     # NOTE: this is not used right now as it requires superuser privilege
     # We can use this in future if the permissions are lowered.
