@@ -49,6 +49,7 @@ export default function DomainFilter({ fieldName, facetState, appliedFilters, on
     return (
         <NestedSelect
             initialValues={initialValues}
+            values={values}
             onUpdate={onSelectUpdate}
             onSearch={onSearch}
             options={options}
