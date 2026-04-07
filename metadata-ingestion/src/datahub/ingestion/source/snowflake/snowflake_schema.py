@@ -1881,13 +1881,19 @@ class SnowflakeDataDictionary(SupportsAsObj):
                         raw_inputs = graph_info.get("inputs")
                         if raw_inputs:
                             # INPUTS is ARRAY of OBJECTs [{name, kind}, ...]; may be a JSON string.
-                            if isinstance(raw_inputs, str):
-                                raw_inputs = json.loads(raw_inputs)
-                            upstream_tables = [
-                                inp["name"]
-                                for inp in raw_inputs
-                                if isinstance(inp, dict) and inp.get("name")
-                            ]
+                            try:
+                                if isinstance(raw_inputs, str):
+                                    raw_inputs = json.loads(raw_inputs)
+                                upstream_tables = [
+                                    inp["name"]
+                                    for inp in raw_inputs
+                                    if isinstance(inp, dict) and inp.get("name")
+                                ]
+                            except json.JSONDecodeError as e:
+                                logger.warning(
+                                    f"Failed to parse INPUTS for dynamic table "
+                                    f"{db_name}.{schema_name}.{dt_name}: {e}"
+                                )
 
                     dynamic_tables[schema_name].append(
                         SnowflakeDynamicTable(

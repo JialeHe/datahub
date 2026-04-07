@@ -619,21 +619,29 @@ class SnowflakeSchemaGenerator(SnowflakeStructuredReportMixin):
                             ),
                             context=f"{db_name}.{schema_name}.{table.name}",
                         )
-
-                    # Table-level lineage from DYNAMIC_TABLE_GRAPH_HISTORY().INPUTS —
-                    # supplements SQL parsing when DDL is available, sole source when not.
-                    for upstream_qualified_name in table.upstream_tables:
-                        upstream_identifier = (
-                            self.identifiers.get_dataset_identifier_from_qualified_name(
+                        # Fall back to table-level lineage from DYNAMIC_TABLE_GRAPH_HISTORY().INPUTS
+                        # when DDL is unavailable. Skipped when DDL is present because SQL parsing
+                        # produces accurate column-level lineage; identity CLL from INPUTS would be
+                        # wrong for aliased/aggregated columns (e.g. SUM(amount) AS total).
+                        for upstream_qualified_name in table.upstream_tables:
+                            upstream_identifier = self.identifiers.get_dataset_identifier_from_qualified_name(
                                 upstream_qualified_name
                             )
-                        )
-                        self.aggregator.add_known_lineage_mapping(
-                            upstream_urn=self.identifiers.gen_dataset_urn(
-                                upstream_identifier
-                            ),
-                            downstream_urn=downstream_urn,
-                        )
+                            if not self.filters.is_dataset_pattern_allowed(
+                                upstream_identifier, SnowflakeObjectDomain.TABLE
+                            ):
+                                logger.debug(
+                                    f"Skipping dynamic table upstream {upstream_qualified_name}: "
+                                    f"filtered by database/schema/table pattern"
+                                )
+                                continue
+                            self.aggregator.add_known_lineage_mapping(
+                                upstream_urn=self.identifiers.gen_dataset_urn(
+                                    upstream_identifier
+                                ),
+                                downstream_urn=downstream_urn,
+                                lineage_type=DatasetLineageTypeClass.VIEW,
+                            )
 
                 table_wu_generator = self._process_table(
                     table, snowflake_schema, db_name

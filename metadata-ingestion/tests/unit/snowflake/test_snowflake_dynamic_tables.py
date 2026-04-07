@@ -132,6 +132,61 @@ def test_get_dynamic_tables_with_definitions_inputs_as_json_string(
     assert dt.upstream_tables == ["TEST_DB.PUBLIC.SOURCE_TABLE"]
 
 
+def test_get_dynamic_tables_with_definitions_malformed_inputs_json(
+    mock_snowflake_data_dictionary,
+):
+    """A malformed INPUTS JSON value for one table doesn't skip remaining dynamic tables."""
+    mock_snowflake_data_dictionary.get_dynamic_table_graph_info = MagicMock(
+        return_value={
+            "TEST_DB.PUBLIC.BAD_TABLE": {
+                "inputs": "{not valid json",
+                "target_lag_type": None,
+                "target_lag_sec": None,
+            },
+            "TEST_DB.PUBLIC.GOOD_TABLE": {
+                "inputs": [{"name": "TEST_DB.PUBLIC.SOURCE_TABLE", "kind": "TABLE"}],
+                "target_lag_type": None,
+                "target_lag_sec": None,
+            },
+        }
+    )
+
+    mock_cursor = MagicMock()
+    mock_cursor.__iter__.return_value = [
+        {
+            "name": "BAD_TABLE",
+            "schema_name": "PUBLIC",
+            "created_on": "2024-01-01 00:00:00",
+            "text": None,
+            "target_lag": None,
+            "bytes": 0,
+            "rows": 0,
+            "comment": None,
+        },
+        {
+            "name": "GOOD_TABLE",
+            "schema_name": "PUBLIC",
+            "created_on": "2024-01-01 00:00:00",
+            "text": None,
+            "target_lag": None,
+            "bytes": 0,
+            "rows": 0,
+            "comment": None,
+        },
+    ]
+    mock_snowflake_data_dictionary.connection.query.return_value = mock_cursor
+
+    result = mock_snowflake_data_dictionary.get_dynamic_tables_with_definitions(
+        "TEST_DB"
+    )
+
+    assert len(result["PUBLIC"]) == 2
+    bad_dt = next(t for t in result["PUBLIC"] if t.name == "BAD_TABLE")
+    good_dt = next(t for t in result["PUBLIC"] if t.name == "GOOD_TABLE")
+    assert bad_dt.upstream_tables == []
+    assert good_dt.upstream_tables == ["TEST_DB.PUBLIC.SOURCE_TABLE"]
+
+
 def test_populate_dynamic_table_definitions(mock_snowflake_data_dictionary):
     mock_snowflake_data_dictionary.get_dynamic_tables_with_definitions = MagicMock(
         return_value={
