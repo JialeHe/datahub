@@ -385,25 +385,12 @@ class RedshiftSource(StatefulIngestionSourceBase, TestableSource):
         database = self.config.database
         logger.info(f"Processing db {database}")
 
-        if self.config.include_share_lineage:
-            try:
-                all_dbs = self.data_dictionary.get_all_databases(connection)
-                logger.info(
-                    "All databases visible on this cluster: %s",
-                    [
-                        f"{db.name} (type={db.type}, options={db.options})"
-                        for db in all_dbs
-                    ],
-                )
-            except Exception:
-                logger.info(
-                    "Could not list all databases (may lack permissions on svv_redshift_databases)"
-                )
-
         self.db = self.data_dictionary.get_database_details(connection, database)
         self.report.is_shared_database = (
             self.db is not None and self.db.is_shared_database()
         )
+        if self.db:
+            self.report.target_database_options = self.db.options
         with self.report.new_stage(METADATA_EXTRACTION):
             self.db_tables[database] = defaultdict()
             self.db_views[database] = defaultdict()
@@ -983,6 +970,34 @@ class RedshiftSource(StatefulIngestionSourceBase, TestableSource):
         lineage_extractor: RedshiftSqlLineage,
     ) -> Iterable[MetadataWorkUnit]:
         if self.config.include_share_lineage:
+            try:
+                all_dbs = self.data_dictionary.get_all_databases(connection)
+                db_summary = {db.name: db.type for db in all_dbs}
+                self.report.all_databases_on_cluster = db_summary
+                logger.info(
+                    "All databases visible on this cluster: %s",
+                    [
+                        f"{db.name} (type={db.type}, options={db.options})"
+                        for db in all_dbs
+                    ],
+                )
+                shared_dbs = [db for db in all_dbs if db.is_shared_database()]
+                if shared_dbs:
+                    logger.info(
+                        "Shared databases available for bridge lineage: %s",
+                        [f"{db.name} (options={db.options})" for db in shared_dbs],
+                    )
+                else:
+                    logger.info(
+                        "No shared databases found on this cluster. "
+                        "Bridge lineage requires a shared database created from an inbound datashare."
+                    )
+            except Exception:
+                logger.warning(
+                    "Could not list all databases — may lack permissions on svv_redshift_databases",
+                    exc_info=True,
+                )
+
             outbound_shares = self.data_dictionary.get_outbound_datashares(connection)
             yield from auto_workunit(
                 self.datashares_helper.to_platform_resource(list(outbound_shares))
@@ -990,7 +1005,8 @@ class RedshiftSource(StatefulIngestionSourceBase, TestableSource):
 
             if self.db and self.db.is_shared_database():
                 logger.info(
-                    f"Database '{database}' is shared — will attempt bridge lineage"
+                    f"Database '{database}' is shared (options={self.db.options}) "
+                    f"— will attempt bridge lineage"
                 )
                 inbound_share = self.db.get_inbound_share()
                 if inbound_share is None:
@@ -1020,7 +1036,7 @@ class RedshiftSource(StatefulIngestionSourceBase, TestableSource):
                 logger.info(
                     f"Database '{database}' is local (type={self.db.type if self.db else 'N/A'}) "
                     f"— skipping bridge lineage. To generate bridge lineage, "
-                    f"create a recipe targeting the shared database."
+                    f"create a recipe targeting a shared database instead."
                 )
 
         # TODO: distinguish between definition level lineage and audit log based lineage.

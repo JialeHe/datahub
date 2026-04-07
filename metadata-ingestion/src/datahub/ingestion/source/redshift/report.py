@@ -60,6 +60,8 @@ class RedshiftReport(
 
     is_shared_database: bool = False
     outbound_shares_count: Optional[int] = None
+    all_databases_on_cluster: Optional[Dict[str, str]] = None
+    target_database_options: Optional[str] = None
 
     def report_dropped(self, key: str) -> None:
         self.filtered.append(key)
