@@ -82,6 +82,33 @@ tables_and_views AS (
     WHERE table_schema <> 'INFORMATION_SCHEMA'
 ),
 
+-- Job 3B-2: Extract view definitions (INFORMATION_SCHEMA.VIEWS has view_definition)
+views AS (
+    SELECT
+        table_catalog::VARCHAR AS database_name,
+        table_schema::VARCHAR AS schema_name,
+        table_name::VARCHAR AS table_name,
+        NULL::VARCHAR AS column_name,
+        'VIEW'::VARCHAR AS table_type,
+        NULL::NUMBER AS column_ordinal,
+        NULL::VARCHAR AS data_type,
+        NULL::VARCHAR AS is_nullable,
+        NULL::VARCHAR AS column_default,
+        NULL::VARCHAR AS column_comment,
+        NULL::VARCHAR AS constraint_name,
+        NULL::VARCHAR AS constraint_type,
+        NULL::VARCHAR AS fk_table_name,
+        created::TIMESTAMP_NTZ AS created,
+        last_altered::TIMESTAMP_NTZ AS last_altered,
+        comment::VARCHAR AS comment,
+        OBJECT_CONSTRUCT_KEEP_NULL(
+            'view_definition', view_definition
+        ) AS properties,
+        'VIEW_DEFINITION'::VARCHAR AS metadata_source
+    FROM {database_name}.INFORMATION_SCHEMA.VIEWS
+    WHERE table_schema <> 'INFORMATION_SCHEMA'
+),
+
 -- Job 3C: Extract columns
 columns AS (
     SELECT
@@ -116,6 +143,8 @@ SELECT * FROM schemas
 UNION ALL
 SELECT * FROM tables_and_views
 UNION ALL
+SELECT * FROM views
+UNION ALL
 SELECT * FROM columns
 ORDER BY
     schema_name,
@@ -123,7 +152,8 @@ ORDER BY
     CASE metadata_source
         WHEN 'SCHEMA' THEN 0
         WHEN 'TABLE_META' THEN 1
-        WHEN 'COLUMN_META' THEN 2
+        WHEN 'VIEW_DEFINITION' THEN 2
+        WHEN 'COLUMN_META' THEN 3
         ELSE 99
     END,
     column_ordinal,

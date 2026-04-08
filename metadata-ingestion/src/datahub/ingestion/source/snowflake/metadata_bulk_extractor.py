@@ -9,11 +9,10 @@ import logging
 import os
 import tempfile
 import time
-import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from queue import Queue
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import pandas as pd
 
@@ -57,6 +56,16 @@ class BulkMetadataExtractor:
       If bulk extraction fails (permission error, SQL timeout, etc.),
       caller must fall back to sequential queries via SnowflakeDataDictionary.
     """
+
+    _UNPACK_FIELDS = [
+        "numeric_precision",
+        "numeric_scale",
+        "character_maximum_length",
+        "bytes",
+        "row_count",
+        "clustering_key",
+        "view_definition",
+    ]
 
     def __init__(
         self,
@@ -124,7 +133,7 @@ class BulkMetadataExtractor:
         Returns:
             List of database names
         """
-        logger.debug("🔍 Discovering databases...")
+        logger.debug("Discovering databases...")
         cursor = self.connection.query("SHOW DATABASES")
         databases = []
         for i, row in enumerate(cursor):
@@ -215,13 +224,13 @@ class BulkMetadataExtractor:
 
         try:
             # Execute database-level extraction (optimized SQL)
-            logger.debug("📍 Step 1: Executing database-level extraction...")
+            logger.debug("Step 1: Executing database-level extraction...")
             local_file = self._execute_database_extraction(
                 stage_name=None, file_format="PARQUET", database_name=database_name
             )
 
             # Parse and return
-            logger.debug("📍 Step 2: Parsing metadata...")
+            logger.debug("Step 2: Parsing metadata...")
             df = self._parse_metadata_file(local_file)
 
             # Add database_name column if not present
@@ -234,7 +243,7 @@ class BulkMetadataExtractor:
             return df
 
         except Exception as e:
-            logger.error(f"❌ Failed to extract {database_name}: {e}")
+            logger.error(f"Failed to extract {database_name}: {e}")
             raise
 
     def extract_all_metadata(
@@ -282,7 +291,7 @@ class BulkMetadataExtractor:
 
         # Skip schema discovery - extraction SQL already gets schemas via INFORMATION_SCHEMA
         # This avoids hitting trial account LISTING limits from SHOW SCHEMAS queries
-        logger.debug("⏭️ Schema discovery via SQL (no SHOW commands)")
+        logger.debug("Schema discovery via SQL (no SHOW commands)")
 
         # Skip table counting - default to database-level extraction
         # This is safer and avoids additional SHOW queries that hit trial account limits
@@ -393,7 +402,7 @@ class BulkMetadataExtractor:
                     # Check interrupt flag before each database
                     with result_lock:
                         if should_stop["value"]:
-                            logger.info(f"⛔ Interrupted before extracting {db}")
+                            logger.info(f"Interrupted before extracting {db}")
                             break
 
                     conn = None
@@ -413,11 +422,11 @@ class BulkMetadataExtractor:
                                 with result_lock:
                                     dfs.append(df)
                                     extraction_stats["success"] += 1
-                                    logger.debug(f"✅ {db} ({len(df)} rows)")
+                                    logger.debug(f"{db} ({len(df)} rows)")
                             else:
                                 with result_lock:
                                     extraction_stats["failed"] += 1
-                                    logger.warning(f"⚠️ {db} returned empty")
+                                    logger.warning(f"{db} returned empty")
                         finally:
                             # Return connection to pool (don't close it)
                             self._connection_pool.put(conn)
@@ -428,7 +437,7 @@ class BulkMetadataExtractor:
                             self._connection_pool.put(conn)
                         with result_lock:
                             extraction_stats["failed"] += 1
-                            logger.warning(f"⚠️ {db} failed: {e}")
+                            logger.warning(f"{db} failed: {e}")
 
             except Exception as e:
                 logger.error(f"Worker error: {e}")
@@ -528,7 +537,7 @@ class BulkMetadataExtractor:
 
             # Enrich with constraints (skip if interrupted)
             if not should_stop["value"]:
-                logger.info("📍 Fetching constraints for all databases...")
+                logger.info("Fetching constraints for all databases...")
                 try:
                     combined_df = self._merge_constraints_all_databases(combined_df)
                 except Exception as e:
@@ -547,15 +556,13 @@ class BulkMetadataExtractor:
             return combined_df
 
         except KeyboardInterrupt:
-            logger.error("⛔ Extraction cancelled by user")
+            logger.error("Extraction cancelled by user")
             raise
 
-    @staticmethod
-    def _unpack_properties(properties: object) -> dict:
+    def _unpack_properties(self, properties: object) -> dict:
         """Unpack numeric metadata from a properties dict or JSON string.
 
-        Returns a dict with keys: numeric_precision, numeric_scale,
-        character_maximum_length, bytes, row_count.  Missing fields are None.
+        Returns a dict with keys from _UNPACK_FIELDS. Missing fields are None.
         """
         import json
 
@@ -568,54 +575,56 @@ class BulkMetadataExtractor:
         elif isinstance(properties, dict):
             parsed = properties
 
-        return {
-            "numeric_precision": parsed.get("numeric_precision"),
-            "numeric_scale": parsed.get("numeric_scale"),
-            "character_maximum_length": parsed.get("character_maximum_length"),
-            "bytes": parsed.get("bytes"),
-            "row_count": parsed.get("row_count"),
-        }
+        return {field: parsed.get(field) for field in self._UNPACK_FIELDS}
 
     def _unpack_properties_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
         """Unpack the JSON 'properties' column into top-level DataFrame columns.
 
         Extracts numeric_precision, numeric_scale, character_maximum_length,
-        bytes, row_count, and clustering_key from the packed JSON column and
-        merges them as top-level columns, then drops the 'properties' column.
+        bytes, row_count, clustering_key, and view_definition from the packed
+        JSON column and merges them as top-level columns.
         """
-        import json
-
-        _fields = [
-            "numeric_precision",
-            "numeric_scale",
-            "character_maximum_length",
-            "bytes",
-            "row_count",
-            "clustering_key",
-            "view_definition",
-        ]
-
-        def _parse_one(val: object) -> dict:
-            parsed: dict = {}
-            if isinstance(val, str):
-                try:
-                    parsed = json.loads(val)
-                except (ValueError, TypeError):
-                    parsed = {}
-            elif isinstance(val, dict):
-                parsed = val
-            return {field: parsed.get(field) for field in _fields}
-
-        unpacked = df["properties"].apply(_parse_one)
+        unpacked = df["properties"].apply(self._unpack_properties)
         unpacked_df = pd.DataFrame(unpacked.tolist(), index=df.index)
 
         # Only add columns that don't already exist to avoid overwriting data
-        for col in _fields:
+        for col in self._UNPACK_FIELDS:
             if col not in df.columns:
                 df[col] = unpacked_df[col]
 
         df = df.drop(columns=["properties"])
         return df
+
+    @staticmethod
+    def _build_constraint_row_base(
+        database_name: str,
+        schema_name: Optional[str],
+        table_name: str,
+        column_name: Optional[str],
+        constraint_name: Optional[str],
+        constraint_type: str,
+        properties: Optional[dict],
+    ) -> dict:
+        """Build the common structure for PK/FK constraint rows."""
+        return {
+            "database_name": database_name,
+            "schema_name": schema_name,
+            "table_name": table_name,
+            "column_name": column_name,
+            "table_type": None,
+            "column_ordinal": None,
+            "data_type": None,
+            "is_nullable": None,
+            "column_default": None,
+            "column_comment": None,
+            "constraint_name": constraint_name,
+            "constraint_type": constraint_type,
+            "fk_table_name": None,
+            "created": None,
+            "last_altered": None,
+            "comment": None,
+            **(properties or {}),
+        }
 
     def _merge_constraints_all_databases(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -657,61 +666,42 @@ class BulkMetadataExtractor:
                 try:
                     pk_cursor = conn.query(f'SHOW PRIMARY KEYS IN DATABASE "{db}"')
                     for row in pk_cursor:
-                        pk_rows.append(
-                            {
-                                "database_name": row.get("database_name"),
-                                "schema_name": row.get("schema_name"),
-                                "table_name": row.get("table_name"),
-                                "column_name": row.get("column_name"),
-                                "table_type": None,
-                                "column_ordinal": None,
-                                "data_type": None,
-                                "is_nullable": None,
-                                "column_default": None,
-                                "column_comment": None,
-                                "constraint_name": row.get("constraint_name"),
-                                "constraint_type": "PRIMARY KEY",
-                                "fk_table_name": None,
-                                "created": None,
-                                "last_altered": None,
-                                "comment": None,
-                                **self._unpack_properties(row.get("properties")),
-                                "metadata_source": "PK_CONSTRAINT",
-                            }
+                        base_row = self._build_constraint_row_base(
+                            database_name=row.get("database_name"),
+                            schema_name=row.get("schema_name"),
+                            table_name=row.get("table_name"),
+                            column_name=row.get("column_name"),
+                            constraint_name=row.get("constraint_name"),
+                            constraint_type="PRIMARY KEY",
+                            properties=self._unpack_properties(row.get("properties")),
                         )
+                        base_row["metadata_source"] = "PK_CONSTRAINT"
+                        pk_rows.append(base_row)
                 except Exception as e:
                     logger.debug(f"No PK constraints in {db}: {e}")
 
                 # Fetch FK constraints
                 try:
                     fk_cursor = conn.query(f'SHOW IMPORTED KEYS IN DATABASE "{db}"')
-                    for i, row in enumerate(fk_cursor):
-                        if i == 0:
-                            logger.info(
+                    fk_logged = False
+                    for row in fk_cursor:
+                        if not fk_logged:
+                            logger.debug(
                                 f"SHOW IMPORTED KEYS columns: {list(row.keys()) if hasattr(row, 'keys') else 'N/A'}"
                             )
-                        fk_rows.append(
-                            {
-                                "database_name": db,
-                                "schema_name": row.get("fk_schema_name"),
-                                "table_name": row.get("fk_table_name"),
-                                "column_name": row.get("fk_column_name"),
-                                "table_type": None,
-                                "column_ordinal": None,
-                                "data_type": None,
-                                "is_nullable": None,
-                                "column_default": None,
-                                "column_comment": None,
-                                "constraint_name": row.get("fk_name"),
-                                "constraint_type": "FOREIGN KEY",
-                                "fk_table_name": row.get("pk_table_name"),
-                                "created": None,
-                                "last_altered": None,
-                                "comment": None,
-                                **self._unpack_properties(row.get("properties")),
-                                "metadata_source": "FK_CONSTRAINT",
-                            }
+                            fk_logged = True
+                        base_row = self._build_constraint_row_base(
+                            database_name=db,
+                            schema_name=row.get("fk_schema_name"),
+                            table_name=row.get("fk_table_name"),
+                            column_name=row.get("fk_column_name"),
+                            constraint_name=row.get("fk_name"),
+                            constraint_type="FOREIGN KEY",
+                            properties=self._unpack_properties(row.get("properties")),
                         )
+                        base_row["fk_table_name"] = row.get("pk_table_name")
+                        base_row["metadata_source"] = "FK_CONSTRAINT"
+                        fk_rows.append(base_row)
                 except Exception as e:
                     logger.debug(f"No FK constraints in {db}: {e}")
 
@@ -720,8 +710,24 @@ class BulkMetadataExtractor:
                 # Return connection to pool (don't close it)
                 try:
                     self._connection_pool.put(conn)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.error(f"Failed to return connection to pool for {db}: {e}")
+
+        # Pre-compute table schema lookup for all databases to avoid 67x DataFrame filtering
+        db_to_table_schema_map = {}
+        for db_name in databases:
+            tables_with_schemas = df[
+                (df["metadata_source"] == "TABLE_META")
+                & (df["database_name"] == db_name)
+            ][["table_name", "schema_name"]].drop_duplicates()
+            # Use dict comprehension instead of inefficient iterrows()
+            db_to_table_schema_map[db_name] = dict(
+                zip(
+                    tables_with_schemas["table_name"].str.upper(),
+                    tables_with_schemas["schema_name"],
+                    strict=False,
+                )
+            )
 
         # Parallelize constraint fetching (respect configured worker count)
         with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
@@ -743,22 +749,12 @@ class BulkMetadataExtractor:
                         fk_rows_for_db = [
                             r for r in rows if r["metadata_source"] == "FK_CONSTRAINT"
                         ]
-
-                        # Build lookup from extracted table metadata for this database
-                        tables_with_schemas = df[
-                            (df["metadata_source"] == "TABLE_META")
-                            & (df["database_name"] == db_name)
-                        ][["table_name", "schema_name"]].drop_duplicates()
-
-                        table_schema_map = {}
-                        for _, meta_row in tables_with_schemas.iterrows():
-                            key = (db_name, meta_row["table_name"].upper())
-                            table_schema_map[key] = meta_row["schema_name"]
+                        table_schema_map = db_to_table_schema_map.get(db_name, {})
 
                         fixed_count = 0
                         missed_count = 0
                         for fk_row in fk_rows_for_db:
-                            key = (db_name, fk_row["table_name"].upper())
+                            key = fk_row["table_name"].upper()
                             if key in table_schema_map:
                                 fk_row["schema_name"] = table_schema_map[key]
                                 fixed_count += 1
@@ -784,10 +780,10 @@ class BulkMetadataExtractor:
                     with constraint_rows_lock:
                         constraint_rows.extend(rows)
                     logger.debug(
-                        f"[{completed}/{len(databases)}] ✅ {db_name}: {pk_count} PKs, {fk_count} FKs"
+                        f"[{completed}/{len(databases)}] {db_name}: {pk_count} PKs, {fk_count} FKs"
                     )
                 except Exception as e:
-                    logger.warning(f"[{completed}/{len(databases)}] ⚠️ {db}: {e}")
+                    logger.warning(f"[{completed}/{len(databases)}] {db}: {e}")
 
         # Append constraint rows to metadata DataFrame (with Arrow dtypes for efficiency)
         if constraint_rows:
@@ -795,57 +791,15 @@ class BulkMetadataExtractor:
 
             # Convert string columns to Arrow strings for 30-50% memory reduction
             string_cols = constraint_df.select_dtypes(include=["object"]).columns
-            for col in string_cols:
-                constraint_df[col] = constraint_df[col].astype("string[pyarrow]")
+            constraint_df[string_cols] = constraint_df[string_cols].astype(
+                "string[pyarrow]"
+            )
             df = pd.concat([df, constraint_df], ignore_index=True)
             logger.info(
                 f"✅ Merged {len(constraint_rows)} constraint rows into metadata"
             )
 
         return df
-
-    def _create_stage(self, database: Optional[str] = None) -> str:
-        """Create temporary internal stage for metadata output.
-
-        Uses TEMPORARY to auto-cleanup on session end, even if process crashes.
-
-        Args:
-            database: Database to use for stage context. If None, uses first available database.
-        """
-        stage_name = f"datahub_bulk_{uuid.uuid4().hex[:8]}"
-
-        try:
-            # Set database context first (required for stage creation)
-            if database is None:
-                # Use first discovered database (any works since stage is session-temporary)
-                dbs = self.discover_databases()
-                if not dbs:
-                    raise ValueError("No accessible databases found")
-                database = dbs[0]
-
-            self.connection.query(f"USE DATABASE {database}")
-            logger.info(f"📍 Set database context to: {database}")
-
-            # Create TEMPORARY stage (auto-cleans even on crash)
-            self.connection.query(f"CREATE TEMPORARY STAGE {stage_name}")
-            logger.info(f"✅ Created temporary stage: {stage_name}")
-            return stage_name
-        except Exception as e:
-            error_msg = str(e).lower()
-            if "insufficient privileges" in error_msg or "stage" in error_msg:
-                logger.error(
-                    f"❌ PERMISSION DENIED: Cannot create temporary stage. "
-                    f"Snowflake requires CREATE STAGE privilege for bulk metadata extraction. "
-                    f"Error: {e}\n"
-                    f"Solution: Ask your Snowflake admin to grant CREATE STAGE privilege, "
-                    f"or disable bulk_metadata_extraction in config."
-                )
-                raise SnowflakePermissionError(
-                    f"Insufficient privileges to create stage: {e}"
-                ) from e
-            else:
-                logger.error(f"❌ Failed to create stage: {e}")
-                raise
 
     def _execute_database_extraction(
         self,
@@ -988,14 +942,6 @@ class BulkMetadataExtractor:
             logger.error(f"Failed to parse metadata file {file_path}: {e}")
             raise
 
-    def _cleanup_stage(self, stage_name: str) -> None:
-        """Clean up temporary stage."""
-        try:
-            self.connection.query(f"DROP STAGE IF EXISTS {stage_name}")
-            logger.debug(f"Cleaned up stage: {stage_name}")
-        except Exception as e:
-            logger.warning(f"Failed to clean up stage {stage_name}: {e}")
-
     def close(self) -> None:
         """Clean up resources."""
         import shutil
@@ -1003,60 +949,3 @@ class BulkMetadataExtractor:
         if Path(self._temp_dir).exists():
             shutil.rmtree(self._temp_dir, ignore_errors=True)
             logger.debug(f"Cleaned up temp directory: {self._temp_dir}")
-
-
-class MetadataParser:
-    """Parse bulk metadata DataFrame into DataHub objects."""
-
-    @staticmethod
-    def parse_databases(df: pd.DataFrame) -> List[str]:
-        """Extract unique databases from metadata."""
-        return df["database_name"].unique().tolist()
-
-    @staticmethod
-    def parse_schemas(df: pd.DataFrame, db_name: str) -> List[str]:
-        """Extract schemas for a given database."""
-        db_schemas = df[
-            (df["database_name"] == db_name) & (df["metadata_source"] == "SCHEMA")
-        ]
-        return db_schemas["schema_name"].unique().tolist()
-
-    @staticmethod
-    def parse_tables(df: pd.DataFrame, db_name: str, schema_name: str) -> pd.DataFrame:
-        """Extract tables for a schema."""
-        return df[
-            (df["database_name"] == db_name)
-            & (df["schema_name"] == schema_name)
-            & (df["metadata_source"] == "TABLE_META")
-        ]
-
-    @staticmethod
-    def parse_columns(
-        df: pd.DataFrame, db_name: str, schema_name: str, table_name: str
-    ) -> pd.DataFrame:
-        """Extract columns for a table."""
-        return df[
-            (df["database_name"] == db_name)
-            & (df["schema_name"] == schema_name)
-            & (df["table_name"] == table_name)
-            & (df["metadata_source"] == "COLUMN_META")
-        ].sort_values("column_ordinal")
-
-    @staticmethod
-    def parse_constraints(
-        df: pd.DataFrame, db_name: str, schema_name: str, table_name: str
-    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Extract PK and FK constraints for a table."""
-        pk = df[
-            (df["database_name"] == db_name)
-            & (df["schema_name"] == schema_name)
-            & (df["table_name"] == table_name)
-            & (df["metadata_source"] == "PK_CONSTRAINT")
-        ]
-        fk = df[
-            (df["database_name"] == db_name)
-            & (df["schema_name"] == schema_name)
-            & (df["table_name"] == table_name)
-            & (df["metadata_source"] == "FK_CONSTRAINT")
-        ]
-        return pk, fk
