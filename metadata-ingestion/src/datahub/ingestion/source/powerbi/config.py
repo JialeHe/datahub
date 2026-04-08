@@ -106,6 +106,7 @@ class Constant:
     DASHBOARD_USER_ACCESS_RIGHT = "dashboardUserAccessRight"
     GROUP_USER_ACCESS_RIGHT = "groupUserAccessRight"
     GRAPH_ID = "graphId"
+    USERS = "users"
     WORKSPACES = "workspaces"
     TITLE = "title"
     EMBED_URL = "embedUrl"

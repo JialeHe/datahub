@@ -22,6 +22,7 @@ from datahub.ingestion.source.powerbi.rest_api_wrapper.data_classes import (
     Measure,
     PowerBIDataset,
     Report,
+    ReportType,
     Table,
     User,
     Workspace,
@@ -152,6 +153,103 @@ class PowerBiAPI:
 
         return results
 
+    @staticmethod
+    def _parse_users_from_scan_result(raw_users: List[dict]) -> List[User]:
+        """Parse User objects from scan result user arrays.
+
+        The scan result (with getArtifactUsers=True) includes the same user
+        fields as the /admin/{entity}/{id}/users endpoint, so we can avoid
+        making a separate API call per entity.
+        """
+        return [
+            User(
+                id=raw_user.get(Constant.IDENTIFIER, ""),
+                displayName=raw_user.get(Constant.DISPLAY_NAME, ""),
+                emailAddress=raw_user.get(Constant.EMAIL_ADDRESS, ""),
+                graphId=raw_user.get(Constant.GRAPH_ID, ""),
+                principalType=raw_user.get(Constant.PRINCIPAL_TYPE, ""),
+                datasetUserAccessRight=raw_user.get(Constant.DATASET_USER_ACCESS_RIGHT),
+                reportUserAccessRight=raw_user.get(Constant.REPORT_USER_ACCESS_RIGHT),
+                dashboardUserAccessRight=raw_user.get(
+                    Constant.DASHBOARD_USER_ACCESS_RIGHT
+                ),
+                groupUserAccessRight=raw_user.get(Constant.GROUP_USER_ACCESS_RIGHT),
+            )
+            for raw_user in raw_users
+        ]
+
+    def _get_reports_from_scan_result(self, workspace: Workspace) -> Dict[str, Report]:
+        """
+        Build Report objects directly from the scan result, avoiding redundant
+        GET /admin/groups/{ws}/reports and GET /admin/reports/{id}/users calls
+        when admin_apis_only is enabled.
+
+        The scan result contains: id, name, reportType, datasetId, description,
+        and users (when getArtifactUsers=True).
+        webUrl is not in the scan result but can be constructed from known patterns.
+        Pages are not available via Admin API (returns []) so we set them empty.
+        """
+        reports: Dict[str, Report] = {}
+        scan_result = workspace.scan_result
+        if not scan_result:
+            return reports
+
+        raw_reports: List[dict] = scan_result.get(Constant.REPORTS) or []
+        base_url = self.__config.environment.web_app_base_url
+        parse_users = self.__config.extract_ownership
+
+        for raw_report in raw_reports:
+            report_id = raw_report.get(Constant.ID)
+            if report_id is None:
+                continue
+
+            # Skip app-duplicate reports — same filter as data_resolver.get_reports()
+            if Constant.APP_ID in raw_report:
+                continue
+
+            report_type_str: Optional[str] = raw_report.get(Constant.REPORT_TYPE)
+            try:
+                report_type = (
+                    ReportType[report_type_str]
+                    if report_type_str
+                    else ReportType.PowerBIReport
+                )
+            except KeyError:
+                logger.warning(
+                    f"Unknown report type '{report_type_str}' for report {report_id}, "
+                    f"defaulting to PowerBIReport"
+                )
+                report_type = ReportType.PowerBIReport
+
+            # Construct webUrl from workspace and report IDs
+            if report_type == ReportType.PaginatedReport:
+                web_url = f"{base_url}/groups/{workspace.id}/rdlreports/{report_id}"
+            else:
+                web_url = f"{base_url}/groups/{workspace.id}/reports/{report_id}"
+
+            # Parse users from scan result instead of calling /admin/reports/{id}/users
+            users: List[User] = []
+            if parse_users:
+                raw_users = raw_report.get(Constant.USERS, [])
+                users = self._parse_users_from_scan_result(raw_users)
+
+            report = Report(
+                id=report_id,
+                name=raw_report.get(Constant.NAME, ""),
+                type=report_type,
+                webUrl=web_url,
+                embedUrl="",
+                description=raw_report.get(Constant.DESCRIPTION, ""),
+                pages=[],  # Pages are not available via Admin API
+                dataset_id=raw_report.get(Constant.DATASET_ID),
+                users=users,
+                tags=[],
+                dataset=None,
+            )
+            reports[report_id] = report
+
+        return reports
+
     def _get_resolver(self):
         if self.__config.admin_apis_only:
             return self.__admin_api_resolver
@@ -198,34 +296,52 @@ class PowerBiAPI:
 
     def get_reports(self, workspace: Workspace) -> Dict[str, Report]:
         """
-        Fetch the report from PowerBi for the given Workspace
+        Fetch the report from PowerBi for the given Workspace.
+        If reports were already populated from the scan result (admin_apis_only
+        mode), reuse them instead of making a redundant API call.
         """
-        reports: Dict[str, Report] = {}
-        try:
-            reports = {
-                report.id: report
-                for report in self._get_resolver().get_reports(workspace)
-            }
-            # Fill Report dataset
-            for report in reports.values():
-                if report.dataset_id:
-                    report.dataset = self.dataset_registry.get(report.dataset_id)
-                    if report.dataset is None:
-                        self.reporter.info(
-                            title="Missing Lineage For Report",
-                            message="A cross-workspace reference that failed to be resolved. Please ensure that no global workspace is being filtered out due to the workspace_id_pattern.",
-                            context=f"report-name: {report.name} and dataset-id: {report.dataset_id}",
-                        )
-        except Exception:
-            self.log_http_error(
-                message=f"Unable to fetch reports for workspace {workspace.name}"
+        # In admin_apis_only mode, reports and their users are already built
+        # from the scan result — skip both the report list and per-report user API calls
+        reports_from_scan = self.__config.admin_apis_only
+
+        if reports_from_scan:
+            reports = workspace.reports
+            logger.info(
+                f"Using {len(reports)} reports from scan result for workspace "
+                f"{workspace.name}, skipping redundant API calls"
             )
+        else:
+            reports = {}
+            try:
+                reports = {
+                    report.id: report
+                    for report in self._get_resolver().get_reports(workspace)
+                }
+            except Exception:
+                self.log_http_error(
+                    message=f"Unable to fetch reports for workspace {workspace.name}"
+                )
+
+        # Resolve dataset references from the global registry
+        for report in reports.values():
+            if report.dataset_id:
+                report.dataset = self.dataset_registry.get(report.dataset_id)
+                if report.dataset is None:
+                    self.reporter.info(
+                        title="Missing Lineage For Report",
+                        message="A cross-workspace reference that failed to be resolved. Please ensure that no global workspace is being filtered out due to the workspace_id_pattern.",
+                        context=f"report-name: {report.name} and dataset-id: {report.dataset_id}",
+                    )
 
         def fill_ownership() -> None:
             if self.__config.extract_ownership is False:
                 logger.info(
                     "Skipping user retrieval for report as extract_ownership is set to false"
                 )
+                return
+
+            if reports_from_scan:
+                # Users already parsed from scan result (getArtifactUsers=True)
                 return
 
             for report in reports.values():
@@ -714,6 +830,14 @@ class PowerBiAPI:
                 workspace=cur_workspace,
                 workspace_metadata=workspace_metadata,
             )
+
+            # In admin_apis_only mode, build reports from scan result to avoid
+            # a redundant GET /admin/groups/{ws}/reports call per workspace
+            if self.__config.admin_apis_only and self.__config.extract_reports:
+                cur_workspace.reports = self._get_reports_from_scan_result(
+                    cur_workspace
+                )
+
             workspaces.append(cur_workspace)
 
         return workspaces
