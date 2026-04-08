@@ -316,6 +316,13 @@ class SnowflakeV2Config(
         description="If enabled, populates the snowflake technical schema and descriptions.",
     )
 
+    enable_bulk_metadata_extraction: bool = Field(
+        default=True,
+        description="If enabled, uses bulk metadata extraction (1 server-side query + download) instead of 610+ sequential queries. "
+        "This provides 20-50x speedup for large catalogs. Requires CREATE STAGE privilege. "
+        "If disabled or fails, falls back to sequential queries automatically.",
+    )
+
     include_primary_keys: bool = Field(
         default=True,
         description="If enabled, populates the snowflake primary keys.",
