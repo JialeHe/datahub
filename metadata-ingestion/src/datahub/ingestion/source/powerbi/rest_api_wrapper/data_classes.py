@@ -302,7 +302,7 @@ class Report:
     name: str
     type: ReportType
     webUrl: Optional[str]
-    embedUrl: str
+    embedUrl: Optional[str]
     description: str
     dataset_id: Optional[str]  # dataset_id is coming from REST API response
     dataset: Optional[

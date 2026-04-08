@@ -240,7 +240,7 @@ class PowerBiAPI:
                 name=raw_report.get(Constant.NAME, ""),
                 type=report_type,
                 webUrl=web_url,
-                embedUrl="",
+                embedUrl=None,
                 description=raw_report.get(Constant.DESCRIPTION, ""),
                 pages=[],  # Pages are not available via Admin API
                 dataset_id=raw_report.get(Constant.DATASET_ID),
