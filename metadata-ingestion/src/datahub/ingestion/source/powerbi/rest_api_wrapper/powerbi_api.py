@@ -27,6 +27,7 @@ from datahub.ingestion.source.powerbi.rest_api_wrapper.data_classes import (
     Tile,
     User,
     Workspace,
+    new_powerbi_dataset,
 )
 from datahub.ingestion.source.powerbi.rest_api_wrapper.data_resolver import (
     AdminAPIResolver,
@@ -291,6 +292,8 @@ class PowerBiAPI:
                     report_id=raw_tile.get(Constant.REPORT_ID),
                     dataset=None,
                     report=None,
+                    # In the past we considered that only one of the two report_id or dataset_id would be present
+                    # but we have seen cases where both are present. If both are present, we prioritize the report.
                     createdFrom=(
                         Tile.CreatedFrom.REPORT
                         if raw_tile.get(Constant.REPORT_ID)
@@ -644,13 +647,22 @@ class PowerBiAPI:
 
         logger.debug("Processing scan result for datasets")
 
+        base_url = self.__config.environment.web_app_base_url
+
         for dataset_dict in datasets:
             dataset_id = dataset_dict[Constant.ID]
             try:
-                dataset_instance = self._get_resolver().get_dataset(
-                    workspace=workspace,
-                    dataset_id=dataset_id,
-                )
+                if self.__config.admin_apis_only:
+                    # Build dataset directly from scan result — avoids a
+                    # GET /admin/groups/{ws}/datasets?$filter=id eq '{id}' call per dataset
+                    dataset_instance = new_powerbi_dataset(workspace, dataset_dict)
+                    # webUrl is not in scan result, construct it
+                    dataset_instance.webUrl = f"{base_url}/groups/{workspace.id}/datasets/{dataset_id}/details"
+                else:
+                    dataset_instance = self._get_resolver().get_dataset(
+                        workspace=workspace,
+                        dataset_id=dataset_id,
+                    )
                 if dataset_instance is None:
                     continue
             except Exception as e:
