@@ -10,7 +10,7 @@ export class SearchBarV2FiltersHelper {
   click(filterName) {
     cy.getWithTestId("search-bar-dropdown").within(() => {
       cy.clickOptionWithTestId(this.getTestIdForFilterBase(filterName));
-    })
+    });
   }
 
   getDropdown(filterName) {
