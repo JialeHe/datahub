@@ -1841,9 +1841,9 @@ class SnowflakeDataDictionary(SupportsAsObj):
                         is_nullable=row["is_nullable"] == "YES",
                         data_type=row["data_type"],
                         comment=row.get("column_comment"),
-                        character_maximum_length=None,
-                        numeric_precision=None,
-                        numeric_scale=None,
+                        character_maximum_length=row.get("character_maximum_length"),
+                        numeric_precision=row.get("numeric_precision"),
+                        numeric_scale=row.get("numeric_scale"),
                     )
                 )
 
@@ -1940,7 +1940,7 @@ class SnowflakeDataDictionary(SupportsAsObj):
             assert self._bulk_metadata_df is not None
             df = self._bulk_metadata_df
             view_df = df[
-                (df["database_name"] == db_name)
+                (df["database_name"].str.upper() == db_name.upper())
                 & (df["table_type"] == "VIEW")
                 & (df["metadata_source"] == "TABLE_META")
             ]
@@ -1991,8 +1991,8 @@ class SnowflakeDataDictionary(SupportsAsObj):
             assert self._bulk_metadata_df is not None
             df = self._bulk_metadata_df
             pk_df = df[
-                (df["database_name"] == db_name)
-                & (df["schema_name"] == schema_name)
+                (df["database_name"].str.upper() == db_name.upper())
+                & (df["schema_name"].str.upper() == schema_name.upper())
                 & (df["metadata_source"] == "PK_CONSTRAINT")
             ]
 
@@ -2062,15 +2062,15 @@ class SnowflakeDataDictionary(SupportsAsObj):
             assert self._bulk_metadata_df is not None
             df = self._bulk_metadata_df
             fk_df = df[
-                (df["database_name"] == db_name)
-                & (df["schema_name"] == schema_name)
+                (df["database_name"].str.upper() == db_name.upper())
+                & (df["schema_name"].str.upper() == schema_name.upper())
                 & (df["metadata_source"] == "FK_CONSTRAINT")
             ]
 
             if len(fk_df) == 0:
                 # Debug: check what FK rows exist for this database
                 fk_rows_in_db = df[
-                    (df["database_name"] == db_name)
+                    (df["database_name"].str.upper() == db_name.upper())
                     & (df["metadata_source"] == "FK_CONSTRAINT")
                 ]
                 logger.info(
@@ -2083,16 +2083,42 @@ class SnowflakeDataDictionary(SupportsAsObj):
             constraints: Dict[str, List[SnowflakeFK]] = {}
             fk_constraints_map: Dict[str, SnowflakeFK] = {}
 
+            # Build a map of (db, schema, table) -> (database, schema) from TABLE_META rows
+            # so we can resolve the referred PK table's database and schema.
+            pk_table_location: Dict[
+                tuple, tuple  # (db_upper, schema_upper, table_upper) -> (db, schema)
+            ] = {}
+            table_meta_df = df[df["metadata_source"] == "TABLE_META"]
+            for _, meta_row in table_meta_df.iterrows():
+                key = (
+                    str(meta_row["database_name"]).upper(),
+                    str(meta_row["schema_name"]).upper(),
+                    str(meta_row["table_name"]).upper(),
+                )
+                pk_table_location[key] = (
+                    meta_row["database_name"],
+                    meta_row["schema_name"],
+                )
+
             for _, row in fk_df.iterrows():
                 fk_name = row["constraint_name"]
                 fk_table_name = row["table_name"]
 
                 if fk_name not in fk_constraints_map:
+                    # Look up the referred (PK) table's database and schema
+                    pk_key = (
+                        db_name.upper(),
+                        str(row.get("fk_table_schema", "") or "").upper(),
+                        str(row.get("fk_table_name", "") or "").upper(),
+                    )
+                    referred_db, referred_schema = pk_table_location.get(
+                        pk_key, (None, None)
+                    )
                     fk_constraints_map[fk_name] = SnowflakeFK(
                         name=fk_name,
                         column_names=[],
-                        referred_database=row.get("fk_table_catalog"),
-                        referred_schema=row.get("fk_table_schema"),
+                        referred_database=referred_db,
+                        referred_schema=referred_schema,
                         referred_table=row.get("fk_table_name"),
                         referred_column_names=[],
                     )
