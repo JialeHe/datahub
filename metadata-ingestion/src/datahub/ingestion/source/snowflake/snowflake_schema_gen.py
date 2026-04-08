@@ -256,22 +256,29 @@ class SnowflakeSchemaGenerator(SnowflakeStructuredReportMixin):
                     connection_config=self.config,
                 )
                 try:
-                    bulk_metadata_df = extractor.extract_all_metadata()
-                    bulk_extraction_used = True
-                    self._bulk_extraction_used = True  # Track for timing log
-                    self._bulk_extraction_elapsed = (
-                        time.time() - bulk_extraction_start_time
-                    )  # Track timing
-                    logger.info(
-                        f"✅ BULK EXTRACTION SUCCESSFUL\n"
-                        f"   📈 Rows extracted: {len(bulk_metadata_df):,}\n"
-                        f"   🎯 Impact: DataHub will use bulk-extracted metadata\n"
-                        f"   ⚡ Performance: Sequential queries will NOT be used\n"
-                        + "="
-                        * 70
-                    )
+                    try:
+                        bulk_metadata_df = extractor.extract_all_metadata()
+                        bulk_extraction_used = True
+                        self._bulk_extraction_used = True  # Track for timing log
+                        self._bulk_extraction_elapsed = (
+                            time.time() - bulk_extraction_start_time
+                        )  # Track timing
+                        logger.info(
+                            f"✅ BULK EXTRACTION SUCCESSFUL\n"
+                            f"   📈 Rows extracted: {len(bulk_metadata_df):,}\n"
+                            f"   🎯 Impact: DataHub will use bulk-extracted metadata\n"
+                            f"   ⚡ Performance: Sequential queries will NOT be used\n"
+                            + "="
+                            * 70
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Bulk metadata extraction failed ({type(e).__name__}: {e}), falling back to sequential queries"
+                        )
+                        bulk_metadata_df = None
+                        bulk_extraction_used = False
                 finally:
-                    extractor.close()  # ✅ Clean up temp files (~3-5GB per run)
+                    extractor.close()  # Clean up temp files (~3-5GB per run)
             else:
                 logger.info(
                     "⏭️ Bulk metadata extraction: DISABLED\n"
