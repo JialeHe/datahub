@@ -76,6 +76,7 @@ class Constant:
     DATA_TYPE = "dataType"
     DASHBOARD = "dashboard"
     DASHBOARDS = "dashboards"
+    TILES = "tiles"
     DASHBOARD_KEY = "dashboardKey"
     DESCRIPTION = "description"
     OWNERSHIP = "ownership"

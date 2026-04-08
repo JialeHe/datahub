@@ -1863,10 +1863,13 @@ class PowerBiDashboardSource(StatefulIngestionSourceBase, TestableSource):
 
         yield from auto_workunit(self.emit_app(workspace=workspace))
 
+        dashboards_from_scan = self.source_config.admin_apis_only
+
         for dashboard in workspace.dashboards.values():
             try:
-                # Fetch PowerBi users for dashboards
-                dashboard.users = self.powerbi_client.get_dashboard_users(dashboard)
+                # Skip user API call if users were already parsed from scan result
+                if not dashboards_from_scan:
+                    dashboard.users = self.powerbi_client.get_dashboard_users(dashboard)
                 # Increase dashboard and tiles count in report
                 self.reporter.report_dashboards_scanned()
                 self.reporter.report_charts_scanned(count=len(dashboard.tiles))

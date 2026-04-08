@@ -24,6 +24,7 @@ from datahub.ingestion.source.powerbi.rest_api_wrapper.data_classes import (
     Report,
     ReportType,
     Table,
+    Tile,
     User,
     Workspace,
 )
@@ -249,6 +250,81 @@ class PowerBiAPI:
             reports[report_id] = report
 
         return reports
+
+    def _get_dashboards_from_scan_result(
+        self, workspace: Workspace
+    ) -> Dict[str, Dashboard]:
+        """
+        Build Dashboard objects (with tiles and users) directly from the scan
+        result, avoiding redundant GET /admin/groups/{ws}/dashboards,
+        GET /admin/dashboards/{id}/tiles, and GET /admin/dashboards/{id}/users
+        calls when admin_apis_only is enabled.
+        """
+        dashboards: Dict[str, Dashboard] = {}
+        scan_result = workspace.scan_result
+        if not scan_result:
+            return dashboards
+
+        raw_dashboards: List[dict] = scan_result.get(Constant.DASHBOARDS) or []
+        base_url = self.__config.environment.web_app_base_url
+        parse_users = self.__config.extract_ownership
+
+        for raw_dashboard in raw_dashboards:
+            dashboard_id = raw_dashboard.get(Constant.ID)
+            if dashboard_id is None:
+                continue
+
+            # Skip app-duplicate dashboards
+            if Constant.APP_ID in raw_dashboard:
+                continue
+
+            web_url = f"{base_url}/groups/{workspace.id}/dashboards/{dashboard_id}"
+
+            # Parse tiles from scan result
+            raw_tiles: List[dict] = raw_dashboard.get(Constant.TILES, [])
+            tiles: List[Tile] = [
+                Tile(
+                    id=raw_tile.get(Constant.ID, ""),
+                    title=raw_tile.get(Constant.TITLE, ""),
+                    embedUrl=raw_tile.get(Constant.EMBED_URL),
+                    dataset_id=raw_tile.get(Constant.DATASET_ID),
+                    report_id=raw_tile.get(Constant.REPORT_ID),
+                    dataset=None,
+                    report=None,
+                    createdFrom=(
+                        Tile.CreatedFrom.REPORT
+                        if raw_tile.get(Constant.REPORT_ID)
+                        else Tile.CreatedFrom.DATASET
+                        if raw_tile.get(Constant.DATASET_ID)
+                        else Tile.CreatedFrom.VISUALIZATION
+                    ),
+                )
+                for raw_tile in raw_tiles
+                if raw_tile is not None
+            ]
+
+            # Parse users from scan result
+            users: List[User] = []
+            if parse_users:
+                raw_users = raw_dashboard.get(Constant.USERS, [])
+                users = self._parse_users_from_scan_result(raw_users)
+
+            dashboard = Dashboard(
+                id=dashboard_id,
+                displayName=raw_dashboard.get(Constant.DISPLAY_NAME, ""),
+                description=raw_dashboard.get(Constant.DESCRIPTION, ""),
+                embedUrl=raw_dashboard.get(Constant.EMBED_URL, ""),
+                isReadOnly=raw_dashboard.get(Constant.IS_READ_ONLY),
+                webUrl=web_url,
+                workspace_id=workspace.id,
+                workspace_name=workspace.name,
+                tiles=tiles,
+                users=users,
+                tags=[],
+            )
+            dashboards[dashboard_id] = dashboard
+
+        return dashboards
 
     def _get_resolver(self):
         if self.__config.admin_apis_only:
@@ -831,12 +907,17 @@ class PowerBiAPI:
                 workspace_metadata=workspace_metadata,
             )
 
-            # In admin_apis_only mode, build reports from scan result to avoid
-            # a redundant GET /admin/groups/{ws}/reports call per workspace
-            if self.__config.admin_apis_only and self.__config.extract_reports:
-                cur_workspace.reports = self._get_reports_from_scan_result(
-                    cur_workspace
-                )
+            # In admin_apis_only mode, build reports and dashboards from scan
+            # result to avoid redundant per-workspace API calls
+            if self.__config.admin_apis_only:
+                if self.__config.extract_reports:
+                    cur_workspace.reports = self._get_reports_from_scan_result(
+                        cur_workspace
+                    )
+                if self.__config.extract_dashboards:
+                    cur_workspace.dashboards = self._get_dashboards_from_scan_result(
+                        cur_workspace
+                    )
 
             workspaces.append(cur_workspace)
 
@@ -861,16 +942,27 @@ class PowerBiAPI:
 
     def _fill_regular_metadata_detail(self, workspace: Workspace) -> None:
         def fill_dashboards() -> None:
-            workspace.dashboards = {
-                dashboard.id: dashboard
-                for dashboard in self._get_resolver().get_dashboards(workspace)
-            }
-            # set tiles of Dashboard
-            for dashboard in workspace.dashboards.values():
-                dashboard.tiles = self._get_resolver().get_tiles(
-                    workspace, dashboard=dashboard
+            dashboards_from_scan = self.__config.admin_apis_only
+
+            if dashboards_from_scan:
+                # Dashboards + tiles already built from scan result
+                logger.info(
+                    f"Using {len(workspace.dashboards)} dashboards from scan result "
+                    f"for workspace {workspace.name}, skipping redundant API calls"
                 )
-                # set the dataset and the report for tiles
+            else:
+                workspace.dashboards = {
+                    dashboard.id: dashboard
+                    for dashboard in self._get_resolver().get_dashboards(workspace)
+                }
+                # Fetch tiles via API
+                for dashboard in workspace.dashboards.values():
+                    dashboard.tiles = self._get_resolver().get_tiles(
+                        workspace, dashboard=dashboard
+                    )
+
+            # Resolve tile → report and tile → dataset references
+            for dashboard in workspace.dashboards.values():
                 for tile in dashboard.tiles:
                     # In Power BI, dashboards, reports, and datasets are tightly scoped to the workspace they belong to.
                     # https://learn.microsoft.com/en-us/power-bi/collaborate-share/service-new-workspaces

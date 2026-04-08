@@ -330,7 +330,7 @@ class Tile:
 
     id: str
     title: str
-    embedUrl: str
+    embedUrl: Optional[str]
     dataset_id: Optional[str]
     report_id: Optional[str]
     createdFrom: CreatedFrom
