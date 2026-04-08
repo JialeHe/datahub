@@ -1863,7 +1863,7 @@ class PowerBiDashboardSource(StatefulIngestionSourceBase, TestableSource):
 
         yield from auto_workunit(self.emit_app(workspace=workspace))
 
-        dashboards_from_scan = self.source_config.admin_apis_only
+        dashboards_from_scan = self.source_config.use_scan_result_only
 
         for dashboard in workspace.dashboards.values():
             try:

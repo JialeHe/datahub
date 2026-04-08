@@ -376,12 +376,13 @@ class PowerBiAPI:
     def get_reports(self, workspace: Workspace) -> Dict[str, Report]:
         """
         Fetch the report from PowerBi for the given Workspace.
-        If reports were already populated from the scan result (admin_apis_only
-        mode), reuse them instead of making a redundant API call.
+        If reports were already populated from the scan result
+        (use_scan_result_only mode), reuse them instead of making
+        a redundant API call.
         """
-        # In admin_apis_only mode, reports and their users are already built
-        # from the scan result — skip both the report list and per-report user API calls
-        reports_from_scan = self.__config.admin_apis_only
+        # When use_scan_result_only is enabled, reports and their users are
+        # already built from the scan result — skip API calls
+        reports_from_scan = self.__config.use_scan_result_only
 
         if reports_from_scan:
             reports = workspace.reports
@@ -652,7 +653,7 @@ class PowerBiAPI:
         for dataset_dict in datasets:
             dataset_id = dataset_dict[Constant.ID]
             try:
-                if self.__config.admin_apis_only:
+                if self.__config.use_scan_result_only:
                     # Build dataset directly from scan result — avoids a
                     # GET /admin/groups/{ws}/datasets?$filter=id eq '{id}' call per dataset
                     dataset_instance = new_powerbi_dataset(workspace, dataset_dict)
@@ -919,9 +920,9 @@ class PowerBiAPI:
                 workspace_metadata=workspace_metadata,
             )
 
-            # In admin_apis_only mode, build reports and dashboards from scan
-            # result to avoid redundant per-workspace API calls
-            if self.__config.admin_apis_only:
+            # When use_scan_result_only is enabled, build reports and dashboards
+            # from scan result to avoid redundant per-workspace API calls
+            if self.__config.use_scan_result_only:
                 if self.__config.extract_reports:
                     cur_workspace.reports = self._get_reports_from_scan_result(
                         cur_workspace
@@ -954,7 +955,7 @@ class PowerBiAPI:
 
     def _fill_regular_metadata_detail(self, workspace: Workspace) -> None:
         def fill_dashboards() -> None:
-            dashboards_from_scan = self.__config.admin_apis_only
+            dashboards_from_scan = self.__config.use_scan_result_only
 
             if dashboards_from_scan:
                 # Dashboards + tiles already built from scan result

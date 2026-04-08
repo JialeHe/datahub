@@ -573,6 +573,16 @@ class PowerBiDashboardSourceConfig(
         description="Retrieve metadata using PowerBI Admin API only. If this is enabled, then Report Pages will not "
         "be extracted. Admin API access is required if this setting is enabled",
     )
+    use_scan_result_only: bool = pydantic.Field(
+        default=False,
+        description="When enabled, builds reports, dashboards, tiles, datasets, and their ownership "
+        "directly from the workspace scan result instead of making separate API calls per entity. "
+        "This significantly reduces API call volume and avoids Power BI rate limiting for large "
+        "organizations. Requires admin API access (the scan always uses admin endpoints). "
+        "Note: report pages and dataset parameters are not available in scan results, "
+        "and tile titles may be missing for some workspaces. "
+        "Recommended for use with admin_apis_only=true.",
+    )
     # Extract independent datasets
     extract_independent_datasets: bool = pydantic.Field(
         default=False,
