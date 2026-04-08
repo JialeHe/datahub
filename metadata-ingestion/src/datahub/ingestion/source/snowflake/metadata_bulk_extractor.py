@@ -83,13 +83,32 @@ class BulkMetadataExtractor:
             tempfile.TemporaryDirectory(prefix="snowflake_metadata_")
         )
         self._temp_dir: str = self._temp_dir_obj.name
+
+        # Pre-allocate connection pool to avoid creating new connections per worker.
+        # Without pooling, each worker call to get_connection() opens a new Snowflake
+        # session, leading to 50+ simultaneous connections on large accounts.
+        self._connection_pool: Optional[Queue] = None
+        if connection_config:
+            self._connection_pool = Queue(maxsize=self._max_workers)
+            for _ in range(self._max_workers):
+                self._connection_pool.put(connection_config.get_connection())
+
         logger.debug(
             f"BulkMetadataExtractor: Using temp dir {self._temp_dir}, "
-            f"max_workers={self._max_workers}"
+            f"max_workers={self._max_workers}, "
+            f"pool_size={self._connection_pool.qsize() if self._connection_pool else 0}"
         )
 
     def cleanup(self) -> None:
-        """Remove the temporary directory and all files within it."""
+        """Remove the temporary directory, close pooled connections, and release resources."""
+        if self._connection_pool is not None:
+            while not self._connection_pool.empty():
+                try:
+                    conn = self._connection_pool.get_nowait()
+                    conn.close()
+                except Exception:
+                    pass
+            self._connection_pool = None
         if self._temp_dir_obj is not None:
             self._temp_dir_obj.cleanup()
             self._temp_dir_obj = None
@@ -377,9 +396,10 @@ class BulkMetadataExtractor:
                             logger.info(f"⛔ Interrupted before extracting {db}")
                             break
 
+                    conn = None
                     try:
-                        # Each thread gets its own connection
-                        conn = self._connection_config.get_connection()
+                        # Borrow a connection from the pool (blocks until available)
+                        conn = self._connection_pool.get()
                         try:
                             extractor = BulkMetadataExtractor(
                                 conn,
@@ -399,8 +419,13 @@ class BulkMetadataExtractor:
                                     extraction_stats["failed"] += 1
                                     logger.warning(f"⚠️ {db} returned empty")
                         finally:
-                            conn.close()
+                            # Return connection to pool (don't close it)
+                            self._connection_pool.put(conn)
+                            conn = None
                     except Exception as e:
+                        # If connection was not returned to pool, return it now
+                        if conn is not None:
+                            self._connection_pool.put(conn)
                         with result_lock:
                             extraction_stats["failed"] += 1
                             logger.warning(f"⚠️ {db} failed: {e}")
@@ -567,6 +592,7 @@ class BulkMetadataExtractor:
             "bytes",
             "row_count",
             "clustering_key",
+            "view_definition",
         ]
 
         def _parse_one(val: object) -> dict:
@@ -618,10 +644,10 @@ class BulkMetadataExtractor:
             fk_rows = []
 
             try:
-                conn = self._connection_config.get_connection()
+                conn = self._connection_pool.get()
             except Exception as e:
                 logger.warning(
-                    f"Failed to get connection for {db}: {e}. "
+                    f"Failed to get connection from pool for {db}: {e}. "
                     f"Skipping constraint extraction for this database."
                 )
                 return (db, 0, 0, [])
@@ -691,11 +717,11 @@ class BulkMetadataExtractor:
 
                 return (db, len(pk_rows), len(fk_rows), pk_rows + fk_rows)
             finally:
-                if conn != self.connection:
-                    try:
-                        conn.close()
-                    except Exception:
-                        pass
+                # Return connection to pool (don't close it)
+                try:
+                    self._connection_pool.put(conn)
+                except Exception:
+                    pass
 
         # Parallelize constraint fetching (respect configured worker count)
         with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
@@ -708,6 +734,53 @@ class BulkMetadataExtractor:
                 db = futures[future]
                 try:
                     db_name, pk_count, fk_count, rows = future.result()
+
+                    # Fix FK schema names for THIS database immediately,
+                    # before merging into the shared constraint_rows list.
+                    if rows and any(
+                        r["metadata_source"] == "FK_CONSTRAINT" for r in rows
+                    ):
+                        fk_rows_for_db = [
+                            r for r in rows if r["metadata_source"] == "FK_CONSTRAINT"
+                        ]
+
+                        # Build lookup from extracted table metadata for this database
+                        tables_with_schemas = df[
+                            (df["metadata_source"] == "TABLE_META")
+                            & (df["database_name"] == db_name)
+                        ][["table_name", "schema_name"]].drop_duplicates()
+
+                        table_schema_map = {}
+                        for _, meta_row in tables_with_schemas.iterrows():
+                            key = (db_name, meta_row["table_name"].upper())
+                            table_schema_map[key] = meta_row["schema_name"]
+
+                        fixed_count = 0
+                        missed_count = 0
+                        for fk_row in fk_rows_for_db:
+                            key = (db_name, fk_row["table_name"].upper())
+                            if key in table_schema_map:
+                                fk_row["schema_name"] = table_schema_map[key]
+                                fixed_count += 1
+                            else:
+                                missed_count += 1
+                                logger.warning(
+                                    f"FK constraint schema lookup failed for "
+                                    f"{db_name}.{fk_row['table_name']} "
+                                    f"(case-insensitive match found no matching table)"
+                                )
+
+                        if fixed_count > 0:
+                            logger.info(
+                                f"Fixed FK table schemas for {fixed_count}/{len(fk_rows_for_db)} "
+                                f"FK constraints in {db_name}"
+                            )
+                        if missed_count > 0:
+                            logger.warning(
+                                f"{missed_count}/{len(fk_rows_for_db)} FK constraints had "
+                                f"schema lookup failures in database {db_name}"
+                            )
+
                     with constraint_rows_lock:
                         constraint_rows.extend(rows)
                     logger.debug(
@@ -719,49 +792,6 @@ class BulkMetadataExtractor:
         # Append constraint rows to metadata DataFrame (with Arrow dtypes for efficiency)
         if constraint_rows:
             constraint_df = pd.DataFrame(constraint_rows)
-
-            # Fix FK table schema names by cross-referencing with extracted tables
-            # (SHOW IMPORTED KEYS returns PK schema, not FK table schema)
-            fk_df = constraint_df[constraint_df["metadata_source"] == "FK_CONSTRAINT"]
-            if len(fk_df) > 0:
-                # Get unique table names and their schemas from extracted metadata
-                tables_with_schemas = df[
-                    (df["metadata_source"] == "TABLE_META")
-                    & (df["database_name"] == db_name)
-                ][["table_name", "schema_name"]].drop_duplicates()
-
-                # Create lookup map with composite key (database, table_name) to handle
-                # cases where same table name exists in multiple schemas
-                table_schema_map = {}
-                for _, row in tables_with_schemas.iterrows():
-                    key = (db_name, row["table_name"].upper())
-                    table_schema_map[key] = row["schema_name"]
-
-                # Fix schema names in FK rows
-                fixed_count = 0
-                missed_count = 0
-                for idx, row in fk_df.iterrows():
-                    key = (db_name, row["table_name"].upper())
-                    if key in table_schema_map:
-                        constraint_df.at[idx, "schema_name"] = table_schema_map[key]
-                        fixed_count += 1
-                    else:
-                        missed_count += 1
-                        logger.warning(
-                            f"FK constraint schema lookup failed for "
-                            f"{db_name}.{row['table_name']} "
-                            f"(case-insensitive match using .upper() found no matching table)"
-                        )
-
-                if fixed_count > 0:
-                    logger.info(
-                        f"Fixed FK table schemas for {fixed_count}/{len(fk_df)} FK constraints"
-                    )
-                if missed_count > 0:
-                    logger.warning(
-                        f"{missed_count}/{len(fk_df)} FK constraints had schema lookup failures "
-                        f"in database {db_name}"
-                    )
 
             # Convert string columns to Arrow strings for 30-50% memory reduction
             string_cols = constraint_df.select_dtypes(include=["object"]).columns

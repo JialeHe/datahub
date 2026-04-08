@@ -2108,7 +2108,7 @@ class SnowflakeDataDictionary(SupportsAsObj):
                     # Look up the referred (PK) table's database and schema
                     pk_key = (
                         db_name.upper(),
-                        str(row.get("fk_table_schema", "") or "").upper(),
+                        str(row.get("fk_schema_name", "") or "").upper(),
                         str(row.get("fk_table_name", "") or "").upper(),
                     )
                     referred_db, referred_schema = pk_table_location.get(
