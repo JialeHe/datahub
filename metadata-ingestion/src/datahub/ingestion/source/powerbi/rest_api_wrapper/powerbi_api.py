@@ -657,8 +657,9 @@ class PowerBiAPI:
                     # Build dataset directly from scan result — avoids a
                     # GET /admin/groups/{ws}/datasets?$filter=id eq '{id}' call per dataset
                     dataset_instance = new_powerbi_dataset(workspace, dataset_dict)
-                    # webUrl is not in scan result, construct it
-                    dataset_instance.webUrl = f"{base_url}/groups/{workspace.id}/datasets/{dataset_id}/details"
+                    # Construct webUrl only if scan result didn't provide one
+                    if dataset_instance.webUrl is None:
+                        dataset_instance.webUrl = f"{base_url}/groups/{workspace.id}/datasets/{dataset_id}/details"
                 else:
                     dataset_instance = self._get_resolver().get_dataset(
                         workspace=workspace,
