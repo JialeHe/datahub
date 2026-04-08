@@ -466,11 +466,13 @@ class PowerBiAPI:
             self.log_http_error(message="Unable to fetch list of workspaces")
             # raise  # we want this exception to bubble up
 
+        base_url = self.__config.environment.web_app_base_url
         workspaces = [
             Workspace(
                 id=workspace[Constant.ID],
                 name=workspace[Constant.NAME],
                 type=workspace[Constant.TYPE],
+                webUrl=f"{base_url}/groups/{workspace[Constant.ID]}",
                 datasets={},
                 dashboards={},
                 reports={},
@@ -885,10 +887,12 @@ class PowerBiAPI:
                 )
                 continue
 
+            ws_id = workspace_metadata[Constant.ID]
             cur_workspace = Workspace(
-                id=workspace_metadata[Constant.ID],
+                id=ws_id,
                 name=workspace_metadata[Constant.NAME],
                 type=workspace_metadata[Constant.TYPE],
+                webUrl=f"{self.__config.environment.web_app_base_url}/groups/{ws_id}",
                 datasets={},
                 dashboards={},
                 reports={},
