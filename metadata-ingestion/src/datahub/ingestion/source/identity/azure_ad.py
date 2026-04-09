@@ -476,9 +476,21 @@ class AzureADSource(StatefulIngestionSourceBase):
                 self.report.report_failure("azure_ad_group", str(e))
 
     def _map_azure_ad_group(self, azure_ad_group):
-        # Extract group name first so we can apply the pattern filter before
-        # attempting URN construction. Groups excluded by the filter should be
-        # silently skipped, not reported as failures.
+        # Resolve group name and apply filters before building the URN.
+        # This avoids false report_failure entries for groups that are
+        # intentionally excluded by the user's configuration.
+        #
+        # Pre-check for missing attribute so we can distinguish misconfiguration
+        # from intentional regex filtering without changing the shared helper's
+        # exception contract (which other callers rely on).
+        raw_name = azure_ad_group.get(self.config.azure_ad_response_to_groupname_attr)
+        if raw_name is None:
+            self.report.report_failure(
+                "azure_ad_group_mapping",
+                f"Attribute '{self.config.azure_ad_response_to_groupname_attr}' not found in group response. "
+                f"Check azure_ad_response_to_groupname_attr in your config.",
+            )
+            return
         try:
             group_name = self._extract_regex_match_from_dict_value(
                 azure_ad_group,
@@ -486,25 +498,15 @@ class AzureADSource(StatefulIngestionSourceBase):
                 self.config.azure_ad_response_to_groupname_regex,
             )
         except ValueError:
-            # The group's displayName doesn't match the configured regex, which
-            # means it's intentionally excluded by the user's config — treat as
-            # filtered, not as an error.
-            raw_name = azure_ad_group.get(
-                self.config.azure_ad_response_to_groupname_attr, "unknown"
-            )
+            # Attribute exists but regex didn't match — group is intentionally
+            # excluded by azure_ad_response_to_groupname_regex, not an error.
             self.report.report_filtered(f"group:{raw_name}")
             return
         if not self.config.groups_pattern.allowed(group_name):
             self.report.report_filtered(f"group:{group_name}")
             return
-        corp_group_urn, error_str = self._map_identity_to_urn(
-            self._map_azure_ad_group_to_urn,
-            azure_ad_group,
-            "azure_ad_group_mapping",
-            "group",
-        )
-        if error_str is not None:
-            return
+        # URN construction is safe here: group_name is already validated above.
+        corp_group_urn = make_group_urn(urllib.parse.quote(group_name))
         self.selected_azure_ad_groups.append(azure_ad_group)
         corp_group_snapshot = CorpGroupSnapshot(
             urn=corp_group_urn,
