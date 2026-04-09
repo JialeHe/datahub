@@ -9,6 +9,11 @@ from typing import Dict, List, Optional
 from pydantic import Field, model_validator
 
 from datahub.configuration.common import ConfigModel, DynamicTypedConfig, HiddenFromDocs
+from datahub.configuration.env_vars import (
+    get_progress_report_max_failures,
+    get_progress_report_max_infos,
+    get_progress_report_max_warnings,
+)
 from datahub.ingestion.graph.config import DatahubClientConfig
 from datahub.ingestion.recording.config import RecordingConfig
 from datahub.ingestion.sink.file import FileSinkConfig
@@ -63,6 +68,28 @@ class FlagsConfig(ConfigModel):
         default=None,
         description=(
             "Generate memray memory dumps for ingestion process by providing a path to write the dump file in."
+        ),
+    )
+
+    progress_report_max_failures: int = Field(
+        default_factory=get_progress_report_max_failures,
+        description=(
+            "Maximum failure entries in intermediate progress reports. "
+            "Also settable via DATAHUB_PROGRESS_REPORT_MAX_FAILURES env var."
+        ),
+    )
+    progress_report_max_warnings: int = Field(
+        default_factory=get_progress_report_max_warnings,
+        description=(
+            "Maximum warning entries in intermediate progress reports. "
+            "Also settable via DATAHUB_PROGRESS_REPORT_MAX_WARNINGS env var."
+        ),
+    )
+    progress_report_max_infos: int = Field(
+        default_factory=get_progress_report_max_infos,
+        description=(
+            "Maximum info entries in intermediate progress reports. "
+            "Also settable via DATAHUB_PROGRESS_REPORT_MAX_INFOS env var."
         ),
     )
 

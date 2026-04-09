@@ -707,13 +707,22 @@ class Pipeline:
             # out the report would just be annoying.
             pass
         else:
+            sample_caps = (
+                {
+                    "failures": self.config.flags.progress_report_max_failures,
+                    "warnings": self.config.flags.progress_report_max_warnings,
+                    "infos": self.config.flags.progress_report_max_infos,
+                }
+                if currently_running
+                else None
+            )
             click.echo()
             click.secho("Cli report:", bold=True)
-            click.echo(self.cli_report.as_string())
+            click.echo(self.cli_report.as_string(sample_caps))
             click.secho(f"Source ({self.source_type}) report:", bold=True)
-            click.echo(self.source.get_report().as_string())
+            click.echo(self.source.get_report().as_string(sample_caps))
             click.secho(f"Sink ({self.sink_type}) report:", bold=True)
-            click.echo(self.sink.get_report().as_string())
+            click.echo(self.sink.get_report().as_string(sample_caps))
             global_warnings = get_global_warnings()
             if len(global_warnings) > 0:
                 click.secho("Global Warnings:", bold=True)
