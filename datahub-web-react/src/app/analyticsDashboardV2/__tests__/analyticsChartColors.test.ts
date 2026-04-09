@@ -28,6 +28,7 @@ const mockTheme = {
         chartsBrandLow: '#B0A7EA',
         chartsRedHigh: '#8B1A1A',
         chartsRedMedium: '#D23939',
+        iconError: '#E54D1F',
         iconWarning: '#EE9521',
         textWarning: '#C77100',
         iconSuccess: '#248F5B',
