@@ -548,7 +548,6 @@ class ClickHouseSource(TwoTierSQLAlchemySource):
     def __init__(self, config: ClickHouseConfig, ctx: PipelineContext):
         super().__init__(config, ctx, "clickhouse")
         self._lineage_map: Optional[Dict[str, LineageItem]] = None
-        self._all_tables_set: Optional[Set[str]] = None
         self._query_log_aggregator: Optional[SqlParsingAggregator] = None
 
         # Initialize query log aggregator if needed
@@ -825,24 +824,6 @@ ORDER BY event_time ASC
         if self._should_extract_query_log():
             yield from self._extract_query_log()
 
-    def _get_all_tables(self) -> Set[str]:
-        all_tables_query: str = textwrap.dedent(
-            """\
-        SELECT database, name AS table_name
-          FROM system.tables
-         WHERE name NOT LIKE '.inner%'"""
-        )
-
-        all_tables_set = set()
-
-        url = self.config.get_sql_alchemy_url()
-        logger.debug(f"sql_alchemy_url={url}")
-        engine = create_engine(url, **self.config.options)
-        for db_row in engine.execute(text(all_tables_query)):
-            all_tables_set.add(f"{db_row['database']}.{db_row['table_name']}")
-
-        return all_tables_set
-
     def _populate_lineage_map(
         self, query: str, lineage_type: LineageCollectorType
     ) -> None:
@@ -858,9 +839,6 @@ ORDER BY event_time ASC
         :rtype: None
         """
         assert self._lineage_map is not None
-
-        if not self._all_tables_set:
-            self._all_tables_set = self._get_all_tables()
 
         url = self.config.get_sql_alchemy_url()
         logger.debug(f"sql_alchemy_url={url}")
@@ -900,15 +878,6 @@ ORDER BY event_time ASC
                 ]
 
                 for source in sources:
-                    # Filtering out tables which does not exist in ClickHouse
-                    # It was deleted in the meantime
-                    if (
-                        source.platform == LineageDatasetPlatform.CLICKHOUSE
-                        and source.path not in self._all_tables_set
-                    ):
-                        logger.warning(f"{source.path} missing table")
-                        continue
-
                     target.upstreams.add(source)
 
                 # Merging downstreams if dataset already exists and has downstreams
