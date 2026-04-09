@@ -271,6 +271,27 @@ class TestDataplexEntriesProcessorDesign:
             entry=accepted,
         )
 
+    def test_process_location_skips_entries_with_unresolved_mapping(
+        self, processor: DataplexEntriesProcessor
+    ) -> None:
+        entry = Mock(spec=dataplex_v1.Entry)
+        entry.name = "projects/p/locations/us/entryGroups/g/entries/skip-me"
+        entry.fully_qualified_name = "bigquery:p.ds.skip_me"
+
+        with (
+            patch.object(processor, "collect_entries", return_value=[entry]),
+            patch.object(processor, "_resolve_entry_type_mapping", return_value=None),
+            patch.object(
+                processor, "build_project_container_for_entry"
+            ) as build_project,
+            patch.object(processor, "build_entity_for_entry") as build_entity,
+        ):
+            entities = list(processor.process_location("project-1", "us"))
+
+        assert entities == []
+        build_project.assert_not_called()
+        build_entity.assert_not_called()
+
     def test_collect_entries_covers_group_filtering_and_exception_paths(self) -> None:
         catalog_client = Mock()
         processor = DataplexEntriesProcessor(
@@ -673,6 +694,32 @@ class TestDataplexEntriesProcessorDesign:
         project_container = processor.build_project_container_for_entry(model_entry)
         assert project_container is None
 
+    def test_build_entity_for_vertexai_model_version_returns_none_on_bad_fqn(
+        self, processor: DataplexEntriesProcessor
+    ) -> None:
+        model_entry = Mock(spec=dataplex_v1.Entry)
+        model_entry.name = (
+            "projects/acryl-poc/locations/us-west2/entryGroups/@vertexai/entries/"
+            "aiplatform.googleapis.com/projects/acryl-poc/locations/us-west2/models/3595693293897252864@1"
+        )
+        model_entry.entry_type = (
+            "projects/123/locations/global/entryTypes/vertexai-model-version"
+        )
+        # Missing model/version segments => extraction should fail.
+        model_entry.fully_qualified_name = "vertex_ai:model:acryl-poc.us-west2"
+        model_entry.parent_entry = ""
+        model_entry.entry_source = Mock()
+        model_entry.entry_source.display_name = "test-prediction-model"
+        model_entry.entry_source.description = ""
+        model_entry.entry_source.create_time = None
+        model_entry.entry_source.update_time = None
+
+        with patch(
+            "datahub.ingestion.source.dataplex.dataplex_entries.extract_entry_custom_properties",
+            return_value={},
+        ):
+            assert processor.build_entity_for_entry(model_entry) is None
+
     def test_build_entity_for_pubsub_topic_uses_project_parent_container(
         self, processor: DataplexEntriesProcessor
     ) -> None:
@@ -758,6 +805,30 @@ class TestDataplexEntriesProcessorDesign:
         source_report = cast(Mock, processor.source_report)
         source_report.warning.assert_called_once()
         assert "project-1" not in processor.entry_data_by_project
+
+    def test_track_entry_for_lineage_skips_when_entity_name_extraction_fails(
+        self, processor: DataplexEntriesProcessor
+    ) -> None:
+        dataset_entry = Mock(spec=dataplex_v1.Entry)
+        dataset_entry.name = "projects/p/locations/us/entryGroups/g/entries/e1"
+        dataset_entry.entry_type = (
+            "projects/123/locations/global/entryTypes/bigquery-table"
+        )
+        # Invalid dataset FQN shape for bigquery-table mapping.
+        dataset_entry.fully_qualified_name = "bigquery"
+
+        processor._track_entry_for_lineage("project-1", "us", dataset_entry)
+        assert "project-1" not in processor.entry_data_by_project
+
+    def test_build_project_container_for_entry_returns_none_when_mapping_unresolved(
+        self, processor: DataplexEntriesProcessor
+    ) -> None:
+        entry = Mock(spec=dataplex_v1.Entry)
+        entry.name = "projects/p/locations/us/entryGroups/g/entries/e1"
+        entry.fully_qualified_name = "bigquery:p.ds.table1"
+
+        with patch.object(processor, "_resolve_entry_type_mapping", return_value=None):
+            assert processor.build_project_container_for_entry(entry) is None
 
     def test_build_entry_container_key_and_lineage_tracking(
         self, processor: DataplexEntriesProcessor

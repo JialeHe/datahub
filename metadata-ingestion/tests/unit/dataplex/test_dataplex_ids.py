@@ -22,6 +22,7 @@ from datahub.ingestion.source.dataplex.dataplex_ids import (
     build_datahub_urn_from_fqn,
     build_datahub_urn_from_fqn_only,
     build_dataset_urn_from_fqn,
+    build_dataset_urn_from_fqn_only,
     build_parent_container_key,
     build_parent_container_urn,
     build_project_container_urn_from_fqn,
@@ -674,6 +675,100 @@ def test_build_datahub_urn_from_fqn_for_mlmodel() -> None:
     assert (
         model_urn
         == "urn:li:mlModel:(urn:li:dataPlatform:vertexai,acryl-poc.us-west2.3595693293897252864.1,PROD)"
+    )
+
+
+def test_extract_datahub_entity_name_from_fqn_dataset_only_guard() -> None:
+    assert (
+        extract_datahub_entity_name_from_fqn(
+            "bigquery-dataset",
+            "bigquery:test-project.analytics",
+        )
+        is None
+    )
+
+
+def test_build_datahub_urn_from_fqn_returns_none_for_unknown_mapping() -> None:
+    assert (
+        build_datahub_urn_from_fqn(
+            "not-a-real-entry-type",
+            "bigquery:test-project.analytics.customers",
+            env="PROD",
+        )
+        is None
+    )
+
+
+def test_build_datahub_urn_from_fqn_returns_none_for_unhandled_entity_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mapping = DataplexEntryTypeMapping(
+        datahub_platform="bigquery",
+        datahub_entity_type="Dataset",
+        datahub_subtype="table",
+        fqn_regex=BIGQUERY_TABLE_FQN_REGEX,
+        parent_entry_regex=None,
+        container_key_class=None,
+        parent_container_key_class=None,
+        datahub_entity_name_format="{project_id}.{dataset_id}.{table_id}",
+    )
+    object.__setattr__(mapping, "datahub_entity_type", "UnknownType")
+    monkeypatch.setitem(
+        DATAPLEX_ENTRY_TYPE_MAPPINGS, "test-unknown-entity-type", mapping
+    )
+    monkeypatch.setattr(
+        "datahub.ingestion.source.dataplex.dataplex_ids.extract_datahub_entity_name_from_fqn",
+        lambda entry_type_or_short_name, fully_qualified_name: "test-project.ds.table",
+    )
+
+    assert (
+        build_datahub_urn_from_fqn(
+            "test-unknown-entity-type",
+            "bigquery:test-project.ds.table",
+            env="PROD",
+        )
+        is None
+    )
+
+
+def test_build_datahub_urn_from_fqn_only_dataset_mode_skips_mlmodel() -> None:
+    assert (
+        build_dataset_urn_from_fqn_only(
+            "vertex_ai:model:acryl-poc.us-west2.3595693293897252864.1",
+            env="PROD",
+        )
+        is None
+    )
+
+
+def test_extract_dataset_name_alias_returns_none_for_mlmodel() -> None:
+    assert (
+        _extract_dataset_name_from_fqn(
+            "vertexai-model-version",
+            "vertex_ai:model:acryl-poc.us-west2.3595693293897252864.1",
+        )
+        is None
+    )
+
+
+def test_build_datahub_urn_from_fqn_returns_none_for_container_mapping() -> None:
+    assert (
+        build_datahub_urn_from_fqn(
+            "bigquery-dataset",
+            "bigquery:test-project.analytics",
+            env="PROD",
+        )
+        is None
+    )
+
+
+def test_extract_dataset_name_alias_returns_dataset_name() -> None:
+    assert (
+        _extract_dataset_name_from_fqn(
+            "bigquery-table",
+            "bigquery:test-project.analytics.customers",
+        )
+        == "test-project.analytics.customers"
     )
 
 

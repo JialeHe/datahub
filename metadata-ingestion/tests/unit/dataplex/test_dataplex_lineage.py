@@ -2,7 +2,7 @@
 
 import datetime
 from typing import cast
-from unittest.mock import MagicMock, Mock
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
@@ -996,6 +996,116 @@ def test_batched_lineage_memory_cleanup() -> None:
 
     # After processing, lineage map should be empty (cleared after last batch)
     assert len(extractor.lineage_by_full_dataset_id) == 0
+
+
+def test_get_lineage_workunits_skips_non_dataset_entities_single_batch() -> None:
+    config = DataplexConfig(
+        project_ids=["test-project"],
+        include_lineage=True,
+        batch_size=None,
+    )
+    report = DataplexReport()
+
+    extractor = DataplexLineageExtractor(
+        config=config,
+        report=report.lineage_report,
+        source_report=Mock(),
+        lineage_client=None,
+    )
+
+    dataset_entry = EntryDataTuple(
+        dataplex_entry_short_name="dataset_entry",
+        dataplex_entry_name="projects/p/locations/us/entryGroups/g/entries/dataset_entry",
+        dataplex_location="us",
+        dataplex_entry_fqn="bigquery:test-project.ds.table",
+        dataplex_entry_type_short_name="bigquery-table",
+        datahub_platform="bigquery",
+        datahub_entity_name="test-project.ds.table",
+        datahub_entity_urn="urn:li:dataset:(urn:li:dataPlatform:bigquery,test-project.ds.table,PROD)",
+    )
+    mlmodel_entry = EntryDataTuple(
+        dataplex_entry_short_name="mlmodel_entry",
+        dataplex_entry_name="projects/p/locations/us/entryGroups/g/entries/mlmodel_entry",
+        dataplex_location="us",
+        dataplex_entry_fqn="vertex_ai:model:test-project.us-west2.model.1",
+        dataplex_entry_type_short_name="vertexai-model-version",
+        datahub_platform="vertexai",
+        datahub_entity_name="test-project.us-west2.model.1",
+        datahub_entity_urn="urn:li:mlModel:(urn:li:dataPlatform:vertexai,test-project.us-west2.model.1,PROD)",
+    )
+
+    with patch.object(
+        extractor,
+        "gen_lineage",
+        return_value=iter(()),
+    ) as gen_lineage_mock:
+        list(
+            extractor.get_lineage_workunits(
+                "test-project",
+                [dataset_entry, mlmodel_entry],
+            )
+        )
+
+    # Only the dataset entry should be emitted as UpstreamLineage MCP.
+    gen_lineage_mock.assert_called_once_with(
+        "test-project.ds.table",
+        "urn:li:dataset:(urn:li:dataPlatform:bigquery,test-project.ds.table,PROD)",
+    )
+
+
+def test_get_lineage_workunits_skips_non_dataset_entities_batched() -> None:
+    config = DataplexConfig(
+        project_ids=["test-project"],
+        include_lineage=True,
+        batch_size=1,
+    )
+    report = DataplexReport()
+
+    extractor = DataplexLineageExtractor(
+        config=config,
+        report=report.lineage_report,
+        source_report=Mock(),
+        lineage_client=None,
+    )
+
+    dataset_entry = EntryDataTuple(
+        dataplex_entry_short_name="dataset_entry",
+        dataplex_entry_name="projects/p/locations/us/entryGroups/g/entries/dataset_entry",
+        dataplex_location="us",
+        dataplex_entry_fqn="bigquery:test-project.ds.table",
+        dataplex_entry_type_short_name="bigquery-table",
+        datahub_platform="bigquery",
+        datahub_entity_name="test-project.ds.table",
+        datahub_entity_urn="urn:li:dataset:(urn:li:dataPlatform:bigquery,test-project.ds.table,PROD)",
+    )
+    mlmodel_entry = EntryDataTuple(
+        dataplex_entry_short_name="mlmodel_entry",
+        dataplex_entry_name="projects/p/locations/us/entryGroups/g/entries/mlmodel_entry",
+        dataplex_location="us",
+        dataplex_entry_fqn="vertex_ai:model:test-project.us-west2.model.1",
+        dataplex_entry_type_short_name="vertexai-model-version",
+        datahub_platform="vertexai",
+        datahub_entity_name="test-project.us-west2.model.1",
+        datahub_entity_urn="urn:li:mlModel:(urn:li:dataPlatform:vertexai,test-project.us-west2.model.1,PROD)",
+    )
+
+    with patch.object(
+        extractor,
+        "gen_lineage",
+        return_value=iter(()),
+    ) as gen_lineage_mock:
+        list(
+            extractor.get_lineage_workunits(
+                "test-project",
+                [dataset_entry, mlmodel_entry],
+            )
+        )
+
+    # Only dataset entries are emitted in batched mode as well.
+    gen_lineage_mock.assert_called_once_with(
+        "test-project.ds.table",
+        "urn:li:dataset:(urn:li:dataPlatform:bigquery,test-project.ds.table,PROD)",
+    )
 
 
 class TestLineageMapKeyCollision:
