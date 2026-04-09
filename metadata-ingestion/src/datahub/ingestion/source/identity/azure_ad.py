@@ -485,8 +485,14 @@ class AzureADSource(StatefulIngestionSourceBase):
                 self.config.azure_ad_response_to_groupname_attr,
                 self.config.azure_ad_response_to_groupname_regex,
             )
-        except ValueError as e:
-            self.report.report_failure("azure_ad_group_mapping", str(e))
+        except ValueError:
+            # The group's displayName doesn't match the configured regex, which
+            # means it's intentionally excluded by the user's config — treat as
+            # filtered, not as an error.
+            raw_name = azure_ad_group.get(
+                self.config.azure_ad_response_to_groupname_attr, "unknown"
+            )
+            self.report.report_filtered(f"group:{raw_name}")
             return
         if not self.config.groups_pattern.allowed(group_name):
             self.report.report_filtered(f"group:{group_name}")
