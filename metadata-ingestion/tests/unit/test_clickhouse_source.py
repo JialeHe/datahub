@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -180,7 +180,7 @@ def test_is_temp_table_custom_patterns():
 
 @patch("datahub.ingestion.source.sql.clickhouse.create_engine")
 def test_parse_query_log_row_sets_default_schema_from_current_database(
-    _create_engine_mock,
+    _create_engine_mock: MagicMock,
 ) -> None:
     config = ClickHouseConfig.model_validate({"host_port": "localhost:8123"})
     source = ClickHouseSource(config, PipelineContext(run_id="test"))
