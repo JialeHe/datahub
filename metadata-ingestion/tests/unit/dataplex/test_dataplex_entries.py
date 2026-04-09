@@ -15,6 +15,7 @@ from datahub.ingestion.source.dataplex.dataplex_entries import (
 from datahub.ingestion.source.dataplex.dataplex_ids import DataplexCloudSqlMySqlDatabase
 from datahub.sdk.container import Container
 from datahub.sdk.dataset import Dataset
+from datahub.sdk.mlmodel import MLModel
 
 
 class TestDataplexEntriesProcessorDesign:
@@ -243,6 +244,7 @@ class TestDataplexEntriesProcessorDesign:
     ) -> None:
         accepted = Mock(spec=dataplex_v1.Entry)
         accepted.name = "projects/p/locations/us/entryGroups/g/entries/allow"
+        accepted.entry_type = "projects/123/locations/global/entryTypes/bigquery-table"
         accepted.fully_qualified_name = "bigquery:p.ds.allow"
 
         entity = Mock()
@@ -472,9 +474,11 @@ class TestDataplexEntriesProcessorDesign:
     ) -> None:
         entry_one = Mock(spec=dataplex_v1.Entry)
         entry_one.name = "projects/p/locations/us/entryGroups/g/entries/one"
+        entry_one.entry_type = "projects/123/locations/global/entryTypes/bigquery-table"
         entry_one.fully_qualified_name = "bigquery:p.ds.one"
         entry_two = Mock(spec=dataplex_v1.Entry)
         entry_two.name = "projects/p/locations/us/entryGroups/g/entries/two"
+        entry_two.entry_type = "projects/123/locations/global/entryTypes/bigquery-table"
         entry_two.fully_qualified_name = "bigquery:p.ds.two"
 
         project_container = Mock()
@@ -632,6 +636,43 @@ class TestDataplexEntriesProcessorDesign:
         assert dataset_entity.parent_container is not None
         assert str(dataset_entity.parent_container).startswith("urn:li:container:")
 
+    def test_build_entity_for_vertexai_model_version_emits_mlmodel_without_container(
+        self, processor: DataplexEntriesProcessor
+    ) -> None:
+        model_entry = Mock(spec=dataplex_v1.Entry)
+        model_entry.name = (
+            "projects/acryl-poc/locations/us-west2/entryGroups/@vertexai/entries/"
+            "aiplatform.googleapis.com/projects/acryl-poc/locations/us-west2/models/3595693293897252864@1"
+        )
+        model_entry.entry_type = (
+            "projects/123/locations/global/entryTypes/vertexai-model-version"
+        )
+        model_entry.fully_qualified_name = (
+            "vertex_ai:model:acryl-poc.us-west2.3595693293897252864.1"
+        )
+        model_entry.parent_entry = ""
+        model_entry.entry_source = Mock()
+        model_entry.entry_source.display_name = "test-prediction-model"
+        model_entry.entry_source.description = ""
+        model_entry.entry_source.create_time = None
+        model_entry.entry_source.update_time = None
+
+        with patch(
+            "datahub.ingestion.source.dataplex.dataplex_entries.extract_entry_custom_properties",
+            return_value={"k": "v"},
+        ):
+            model_entity = processor.build_entity_for_entry(model_entry)
+
+        assert isinstance(model_entity, MLModel)
+        assert model_entity.urn.urn() == (
+            "urn:li:mlModel:(urn:li:dataPlatform:vertexai,"
+            "acryl-poc.us-west2.3595693293897252864.1,PROD)"
+        )
+        assert model_entity.name == "test-prediction-model"
+
+        project_container = processor.build_project_container_for_entry(model_entry)
+        assert project_container is None
+
     def test_build_entity_for_pubsub_topic_uses_project_parent_container(
         self, processor: DataplexEntriesProcessor
     ) -> None:
@@ -748,7 +789,7 @@ class TestDataplexEntriesProcessorDesign:
         processor._track_entry_for_lineage("project-1", "us", dataset_entry)
         assert "project-1" in processor.entry_data_by_project
         tracked = next(iter(processor.entry_data_by_project["project-1"]))
-        assert tracked.datahub_dataset_name == "p.ds.table1"
+        assert tracked.datahub_entity_name == "p.ds.table1"
         assert tracked.datahub_platform == "bigquery"
         assert tracked.dataplex_entry_fqn == "bigquery:p.ds.table1"
 
@@ -760,3 +801,21 @@ class TestDataplexEntriesProcessorDesign:
         non_dataset_entry.fully_qualified_name = "bigquery:p.ds"
         processor._track_entry_for_lineage("project-2", "us", non_dataset_entry)
         assert "project-2" not in processor.entry_data_by_project
+
+        mlmodel_entry = Mock(spec=dataplex_v1.Entry)
+        mlmodel_entry.name = "projects/p/locations/us/entryGroups/g/entries/model-v1"
+        mlmodel_entry.entry_type = (
+            "projects/123/locations/global/entryTypes/vertexai-model-version"
+        )
+        mlmodel_entry.fully_qualified_name = (
+            "vertex_ai:model:acryl-poc.us-west2.3595693293897252864.1"
+        )
+        processor._track_entry_for_lineage("project-3", "us", mlmodel_entry)
+        assert "project-3" in processor.entry_data_by_project
+        tracked_ml = next(iter(processor.entry_data_by_project["project-3"]))
+        assert tracked_ml.datahub_entity_name == "acryl-poc.us-west2.3595693293897252864.1"
+        assert tracked_ml.datahub_platform == "vertexai"
+        assert tracked_ml.datahub_entity_urn == (
+            "urn:li:mlModel:(urn:li:dataPlatform:vertexai,"
+            "acryl-poc.us-west2.3595693293897252864.1,PROD)"
+        )

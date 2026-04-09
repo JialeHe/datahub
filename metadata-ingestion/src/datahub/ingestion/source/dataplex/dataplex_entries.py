@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Iterable, Optional, cast
 
 from google.cloud import dataplex_v1
 
-from datahub.emitter.mce_builder import make_dataset_urn_with_platform_instance
 from datahub.emitter.mcp_builder import ContainerKey
 from datahub.ingestion.api.report import Report
 from datahub.ingestion.api.source import SourceReport
@@ -19,9 +18,10 @@ from datahub.ingestion.source.dataplex.dataplex_ids import (
     DATAPLEX_ENTRY_TYPE_MAPPINGS,
     DataplexEntryTypeMapping,
     build_container_key_from_fqn,
+    build_datahub_urn_from_fqn,
     build_parent_container_key,
     build_project_schema_key_from_fqn,
-    extract_datahub_dataset_name_from_fqn,
+    extract_datahub_entity_name_from_fqn,
     extract_entry_type_short_name,
     parse_fully_qualified_name,
 )
@@ -33,6 +33,7 @@ from datahub.ingestion.source.dataplex.dataplex_schema import (
 )
 from datahub.sdk.container import Container
 from datahub.sdk.dataset import Dataset
+from datahub.sdk.mlmodel import MLModel
 from datahub.utilities.lossy_collections import LossyList
 from datahub.utilities.perf_timer import PerfTimer
 
@@ -151,14 +152,27 @@ class DataplexEntriesProcessor:
     def process_location(self, project_id: str, location: str) -> Iterable["Entity"]:
         """Process all pre-filtered entries for one location."""
         for entry in self.collect_entries(project_id, location):
-            project_container = self.build_project_container_for_entry(entry)
+            mapping_result = self._resolve_entry_type_mapping(entry)
+            if mapping_result is None:
+                continue
+            short_name, mapping = mapping_result
+
+            project_container = self.build_project_container_for_entry(
+                entry=entry,
+                short_name=short_name,
+                mapping=mapping,
+            )
             if project_container is not None:
                 project_container_urn = project_container.urn.urn()
                 if project_container_urn not in self._emitted_project_containers:
                     self._emitted_project_containers.add(project_container_urn)
                     yield project_container
 
-            entity = self.build_entity_for_entry(entry)
+            entity = self.build_entity_for_entry(
+                entry=entry,
+                short_name=short_name,
+                mapping=mapping,
+            )
             if entity is None:
                 continue
             self._track_entry_for_lineage(
@@ -311,7 +325,12 @@ class DataplexEntriesProcessor:
         )
         return not filtered_name and not filtered_fqn
 
-    def build_entity_for_entry(self, entry: dataplex_v1.Entry) -> Optional["Entity"]:
+    def build_entity_for_entry(
+        self,
+        entry: dataplex_v1.Entry,
+        short_name: Optional[str] = None,
+        mapping: Optional[DataplexEntryTypeMapping] = None,
+    ) -> Optional["Entity"]:
         """Map Dataplex entry to DataHub SDK v2 Dataset/Container entity."""
         if not entry.fully_qualified_name:
             logger.debug(
@@ -320,14 +339,15 @@ class DataplexEntriesProcessor:
             )
             return None
 
-        mapping_result = self._resolve_entry_type_mapping(entry)
-        if mapping_result is None:
-            logger.debug(
-                "Skipping entity build for entry %s: unresolved entry type mapping",
-                entry.name,
-            )
-            return None
-        short_name, mapping = mapping_result
+        if short_name is None or mapping is None:
+            mapping_result = self._resolve_entry_type_mapping(entry)
+            if mapping_result is None:
+                logger.debug(
+                    "Skipping entity build for entry %s: unresolved entry type mapping",
+                    entry.name,
+                )
+                return None
+            short_name, mapping = mapping_result
 
         entry_name = entry.name
         display_name = self._extract_display_name(entry)
@@ -340,7 +360,7 @@ class DataplexEntriesProcessor:
         )
 
         if mapping.datahub_entity_type == "Dataset":
-            dataset_name = extract_datahub_dataset_name_from_fqn(
+            dataset_name = extract_datahub_entity_name_from_fqn(
                 entry_type_or_short_name=short_name,
                 fully_qualified_name=entry.fully_qualified_name,
             )
@@ -418,6 +438,29 @@ class DataplexEntriesProcessor:
                 schema=schema_metadata,
             )
 
+        if mapping.datahub_entity_type == "MLModel":
+            model_name = extract_datahub_entity_name_from_fqn(
+                entry_type_or_short_name=short_name,
+                fully_qualified_name=entry.fully_qualified_name,
+            )
+            if model_name is None:
+                logger.debug(
+                    "Skipping mlmodel entity build for entry %s: unable to extract model name from FQN %s",
+                    entry.name,
+                    entry.fully_qualified_name,
+                )
+                return None
+            return MLModel(
+                id=model_name,
+                platform=mapping.datahub_platform,
+                env=self.config.env,
+                name=display_name,
+                description=description or None,
+                custom_properties=custom_properties,
+                created=created,
+                last_modified=last_modified,
+            )
+
         container_key = build_container_key_from_fqn(
             entry_type_or_short_name=short_name,
             fully_qualified_name=entry.fully_qualified_name,
@@ -454,7 +497,10 @@ class DataplexEntriesProcessor:
         )
 
     def build_project_container_for_entry(
-        self, entry: dataplex_v1.Entry
+        self,
+        entry: dataplex_v1.Entry,
+        short_name: Optional[str] = None,
+        mapping: Optional[DataplexEntryTypeMapping] = None,
     ) -> Optional[Container]:
         """Build project-level container for an entry's owning project."""
         if not entry.fully_qualified_name:
@@ -464,14 +510,18 @@ class DataplexEntriesProcessor:
             )
             return None
 
-        mapping_result = self._resolve_entry_type_mapping(entry)
-        if mapping_result is None:
-            logger.debug(
-                "Skipping project container build for entry %s: unresolved entry type mapping",
-                entry.name,
-            )
+        if short_name is None or mapping is None:
+            mapping_result = self._resolve_entry_type_mapping(entry)
+            if mapping_result is None:
+                logger.debug(
+                    "Skipping project container build for entry %s: unresolved entry type mapping",
+                    entry.name,
+                )
+                return None
+            short_name, mapping = mapping_result
+
+        if mapping.datahub_entity_type == "MLModel":
             return None
-        short_name, mapping = mapping_result
 
         project_schema_key = build_project_schema_key_from_fqn(
             entry_type_or_short_name=short_name,
@@ -601,14 +651,22 @@ class DataplexEntriesProcessor:
             )
             return
         mapping = DATAPLEX_ENTRY_TYPE_MAPPINGS.get(short_name)
-        if mapping is None or mapping.datahub_entity_type != "Dataset":
+        if mapping is None or mapping.datahub_entity_type not in {"Dataset", "MLModel"}:
             return
 
-        dataset_name = extract_datahub_dataset_name_from_fqn(
+        datahub_entity_name = extract_datahub_entity_name_from_fqn(
             entry_type_or_short_name=short_name,
             fully_qualified_name=entry.fully_qualified_name,
         )
-        if dataset_name is None:
+        if datahub_entity_name is None:
+            return
+
+        datahub_entity_urn = build_datahub_urn_from_fqn(
+            entry_type_or_short_name=short_name,
+            fully_qualified_name=entry.fully_qualified_name,
+            env=self.config.env,
+        )
+        if datahub_entity_urn is None:
             return
 
         with self.entry_data_lock:
@@ -622,13 +680,8 @@ class DataplexEntriesProcessor:
                     dataplex_entry_fqn=entry.fully_qualified_name,
                     dataplex_entry_type_short_name=short_name,
                     datahub_platform=mapping.datahub_platform,
-                    datahub_dataset_name=dataset_name,
-                    datahub_dataset_urn=make_dataset_urn_with_platform_instance(
-                        platform=mapping.datahub_platform,
-                        name=dataset_name,
-                        platform_instance=None,
-                        env=self.config.env,
-                    ),
+                    datahub_entity_name=datahub_entity_name,
+                    datahub_entity_urn=datahub_entity_urn,
                 )
             )
 

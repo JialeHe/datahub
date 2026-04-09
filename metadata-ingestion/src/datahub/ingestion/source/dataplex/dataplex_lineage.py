@@ -22,7 +22,6 @@ if TYPE_CHECKING:
 
 from google.cloud.datacatalog_lineage import EntityReference, SearchLinksRequest
 
-import datahub.emitter.mce_builder as builder
 from datahub.emitter.mcp import MetadataChangeProposalWrapper
 from datahub.ingestion.api.report import Report
 from datahub.ingestion.api.source import SourceReport
@@ -30,7 +29,7 @@ from datahub.ingestion.api.workunit import MetadataWorkUnit
 from datahub.ingestion.source.dataplex.dataplex_config import DataplexConfig
 from datahub.ingestion.source.dataplex.dataplex_helpers import EntryDataTuple
 from datahub.ingestion.source.dataplex.dataplex_ids import (
-    build_dataset_urn_from_fqn_only,
+    build_datahub_urn_from_fqn_only,
     is_supported_lineage_entry_type,
 )
 from datahub.ingestion.source.state.redundant_run_skip_handler import (
@@ -315,7 +314,7 @@ class DataplexLineageExtractor:
                 context=(
                     f"project_id={project_id}, "
                     f"dataplex_entry_name={entry.dataplex_entry_name}, "
-                    f"datahub_dataset_name={entry.datahub_dataset_name}, "
+                    f"datahub_entity_name={entry.datahub_entity_name}, "
                     f"entry_type={entry.dataplex_entry_type_short_name}"
                 ),
                 exc=e,
@@ -493,27 +492,27 @@ class DataplexLineageExtractor:
             for upstream_fqn in lineage_data.get("upstream", []):
                 # Upstream FQN may be cross-platform (e.g. pubsub->bigquery), so
                 # normalize to DataHub URN using a mapping lookup driven only by FQN shape.
-                upstream_dataset_urn = build_dataset_urn_from_fqn_only(
+                upstream_datahub_urn = build_datahub_urn_from_fqn_only(
                     fully_qualified_name=upstream_fqn,
                     env=self.config.env,
                 )
 
-                if upstream_dataset_urn:
+                if upstream_datahub_urn:
                     edge = LineageEdge(
-                        upstream_datahub_urn=upstream_dataset_urn,
+                        upstream_datahub_urn=upstream_datahub_urn,
                         audit_stamp=datetime.now(timezone.utc),
                         lineage_type=DatasetLineageTypeClass.TRANSFORMED,
                     )
                     # Use full dataset_id as key to avoid collisions between tables with same name
-                    lineage_by_full_dataset_id[entry.datahub_dataset_name].add(edge)
+                    lineage_by_full_dataset_id[entry.datahub_entity_name].add(edge)
                     self.report.report_lineage_edge_added(
-                        downstream_dataset_id=entry.datahub_dataset_name,
-                        upstream_dataset_urn=upstream_dataset_urn,
+                        downstream_dataset_id=entry.datahub_entity_name,
+                        upstream_dataset_urn=upstream_datahub_urn,
                     )
                     logger.debug(
                         "  Added lineage edge: %s <- %s",
-                        entry.datahub_dataset_name,
-                        upstream_dataset_urn,
+                        entry.datahub_entity_name,
+                        upstream_datahub_urn,
                     )
                 else:
                     self.report.report_lineage_upstream_fqn_skipped(
@@ -526,7 +525,7 @@ class DataplexLineageExtractor:
                         context=(
                             f"project_id={project_id}, "
                             f"dataplex_entry_name={entry.dataplex_entry_name}, "
-                            f"datahub_dataset_name={entry.datahub_dataset_name}, "
+                            f"datahub_entity_name={entry.datahub_entity_name}, "
                             f"entry_type={entry.dataplex_entry_type_short_name}, "
                             f"upstream_fqn={upstream_fqn}"
                         ),
@@ -669,18 +668,18 @@ class DataplexLineageExtractor:
             self.build_lineage_map(project_id, entry_list)
 
             for entry in entry_list:
-                # Construct dataset URN - entries use full dataset_id path
-                dataset_urn = builder.make_dataset_urn_with_platform_instance(
-                    platform=entry.datahub_platform,
-                    name=entry.datahub_dataset_name,
-                    platform_instance=None,
-                    env=self.config.env,
-                )
+                # UpstreamLineage is a dataset aspect; skip non-dataset entities for now.
+                if not entry.datahub_entity_urn.startswith("urn:li:dataset:"):
+                    logger.debug(
+                        "Skipping lineage MCP emission for non-dataset entity: %s",
+                        entry.datahub_entity_urn,
+                    )
+                    continue
 
                 try:
                     yield from self.gen_lineage(
-                        entry.datahub_dataset_name,
-                        dataset_urn,
+                        entry.datahub_entity_name,
+                        entry.datahub_entity_urn,
                     )
                 except Exception as e:
                     self.report.report_lineage_entry_failed(
@@ -692,7 +691,7 @@ class DataplexLineageExtractor:
                         context=(
                             f"project_id={project_id}, "
                             f"dataplex_entry_name={entry.dataplex_entry_name}, "
-                            f"datahub_dataset_name={entry.datahub_dataset_name}, "
+                            f"datahub_entity_name={entry.datahub_entity_name}, "
                             "stage=gen_lineage_single_batch"
                         ),
                         exc=e,
@@ -724,18 +723,18 @@ class DataplexLineageExtractor:
 
                 # Generate workunits for entries in this batch
                 for entry in batch:
-                    # Construct dataset URN - entries use full dataset_id path
-                    dataset_urn = builder.make_dataset_urn_with_platform_instance(
-                        platform=entry.datahub_platform,
-                        name=entry.datahub_dataset_name,
-                        platform_instance=None,
-                        env=self.config.env,
-                    )
+                    # UpstreamLineage is a dataset aspect; skip non-dataset entities for now.
+                    if not entry.datahub_entity_urn.startswith("urn:li:dataset:"):
+                        logger.debug(
+                            "Skipping lineage MCP emission for non-dataset entity: %s",
+                            entry.datahub_entity_urn,
+                        )
+                        continue
 
                     try:
                         yield from self.gen_lineage(
-                            entry.datahub_dataset_name,
-                            dataset_urn,
+                            entry.datahub_entity_name,
+                            entry.datahub_entity_urn,
                         )
                     except Exception as e:
                         self.report.report_lineage_entry_failed(
@@ -747,7 +746,7 @@ class DataplexLineageExtractor:
                             context=(
                                 f"project_id={project_id}, "
                                 f"dataplex_entry_name={entry.dataplex_entry_name}, "
-                                f"datahub_dataset_name={entry.datahub_dataset_name}, "
+                                f"datahub_entity_name={entry.datahub_entity_name}, "
                                 f"stage=gen_lineage_batch_{batch_idx + 1}"
                             ),
                             exc=e,

@@ -19,13 +19,15 @@ from datahub.ingestion.source.dataplex.dataplex_ids import (
     _extract_dataset_name_from_fqn,
     build_container_key_from_fqn,
     build_container_urn_from_fqn,
+    build_datahub_urn_from_fqn,
+    build_datahub_urn_from_fqn_only,
     build_dataset_urn_from_fqn,
-    build_dataset_urn_from_fqn_only,
     build_parent_container_key,
     build_parent_container_urn,
     build_project_container_urn_from_fqn,
     build_project_schema_key_from_fqn,
     extract_datahub_dataset_name_from_fqn,
+    extract_datahub_entity_name_from_fqn,
     extract_entry_type_short_name,
     is_supported_lineage_entry_type,
     parse_fully_qualified_name,
@@ -78,6 +80,10 @@ def test_schema_key_parent_chain_for_project_has_no_duplicate_step() -> None:
             "projects/655216118709/locations/global/entryTypes/vertexai-dataset",
             "vertexai-dataset",
         ),
+        (
+            "projects/655216118709/locations/global/entryTypes/vertexai-model-version",
+            "vertexai-model-version",
+        ),
     ],
 )
 def test_extract_entry_type_short_name(
@@ -105,6 +111,7 @@ def test_supported_entry_type_mapping_keys() -> None:
         "cloud-bigtable-table",
         "pubsub-topic",
         "vertexai-dataset",
+        "vertexai-model-version",
     }
 
 
@@ -120,9 +127,9 @@ def test_supported_entry_type_mapping_keys() -> None:
                 "parent_entry_regex": BIGQUERY_DATASET_PARENT_ENTRY_REGEX,
                 "container_key_class": None,
                 "parent_container_key_class": DataplexBigQueryDataset,
-                "datahub_dataset_name_format": None,
+                "datahub_entity_name_format": None,
             },
-            "Dataset mappings must define datahub_dataset_name_format",
+            "Dataset/MLModel mappings must define datahub_entity_name_format",
         ),
         (
             {
@@ -133,9 +140,9 @@ def test_supported_entry_type_mapping_keys() -> None:
                 "parent_entry_regex": None,
                 "container_key_class": DataplexBigQueryDataset,
                 "parent_container_key_class": None,
-                "datahub_dataset_name_format": "{project_id}.{dataset_id}",
+                "datahub_entity_name_format": "{project_id}.{dataset_id}",
             },
-            "Container mappings must not define datahub_dataset_name_format",
+            "Container mappings must not define datahub_entity_name_format",
         ),
         (
             {
@@ -146,7 +153,7 @@ def test_supported_entry_type_mapping_keys() -> None:
                 "parent_entry_regex": BIGQUERY_DATASET_PARENT_ENTRY_REGEX,
                 "container_key_class": None,
                 "parent_container_key_class": None,
-                "datahub_dataset_name_format": "{project_id}.{dataset_id}.{table_id}",
+                "datahub_entity_name_format": "{project_id}.{dataset_id}.{table_id}",
             },
             "Mappings with parent_entry_regex must define parent_container_key_class",
         ),
@@ -159,7 +166,7 @@ def test_supported_entry_type_mapping_keys() -> None:
                 "parent_entry_regex": BIGQUERY_DATASET_PARENT_ENTRY_REGEX,
                 "container_key_class": None,
                 "parent_container_key_class": DataplexCloudSqlMySqlInstance,
-                "datahub_dataset_name_format": "{project_id}.{dataset_id}.{table_id}",
+                "datahub_entity_name_format": "{project_id}.{dataset_id}.{table_id}",
             },
             "parent_entry_regex groups",
         ),
@@ -172,7 +179,7 @@ def test_supported_entry_type_mapping_keys() -> None:
                 "parent_entry_regex": None,
                 "container_key_class": None,
                 "parent_container_key_class": None,
-                "datahub_dataset_name_format": None,
+                "datahub_entity_name_format": None,
             },
             "Container mappings must define container_key_class",
         ),
@@ -185,9 +192,9 @@ def test_supported_entry_type_mapping_keys() -> None:
                 "parent_entry_regex": None,
                 "container_key_class": DataplexBigQueryDataset,
                 "parent_container_key_class": None,
-                "datahub_dataset_name_format": "{project_id}.{dataset_id}.{table_id}",
+                "datahub_entity_name_format": "{project_id}.{dataset_id}.{table_id}",
             },
-            "Dataset mappings must not define container_key_class",
+            "Dataset/MLModel mappings must not define container_key_class",
         ),
         (
             {
@@ -198,7 +205,7 @@ def test_supported_entry_type_mapping_keys() -> None:
                 "parent_entry_regex": None,
                 "container_key_class": DataplexBigQueryDataset,
                 "parent_container_key_class": None,
-                "datahub_dataset_name_format": None,
+                "datahub_entity_name_format": None,
             },
             "fqn_regex groups",
         ),
@@ -219,11 +226,11 @@ def test_dataplex_entry_type_mapping_instances_are_valid(
     entry_type_short_name: str,
 ) -> None:
     mapping = DATAPLEX_ENTRY_TYPE_MAPPINGS[entry_type_short_name]
-    assert mapping.datahub_entity_type in {"Dataset", "Container"}
-    if mapping.datahub_entity_type == "Dataset":
-        assert mapping.datahub_dataset_name_format is not None
+    assert mapping.datahub_entity_type in {"Dataset", "Container", "MLModel"}
+    if mapping.datahub_entity_type in {"Dataset", "MLModel"}:
+        assert mapping.datahub_entity_name_format is not None
     else:
-        assert mapping.datahub_dataset_name_format is None
+        assert mapping.datahub_entity_name_format is None
 
 
 @pytest.mark.parametrize(
@@ -309,6 +316,16 @@ def test_dataplex_entry_type_mapping_instances_are_valid(
                 "project_id": "harshal-playground-306419",
                 "location": "us-west2",
                 "dataset_id": "5135361416504541184",
+            },
+        ),
+        (
+            "vertexai-model-version",
+            "vertex_ai:model:acryl-poc.us-west2.3595693293897252864.1",
+            {
+                "project_id": "acryl-poc",
+                "location": "us-west2",
+                "model_id": "3595693293897252864",
+                "version_id": "1",
             },
         ),
     ],
@@ -589,6 +606,7 @@ def test_is_supported_lineage_entry_type_helper() -> None:
     assert is_supported_lineage_entry_type("cloud-bigtable-table")
     assert is_supported_lineage_entry_type("pubsub-topic")
     assert is_supported_lineage_entry_type("vertexai-dataset")
+    assert is_supported_lineage_entry_type("vertexai-model-version")
     assert not is_supported_lineage_entry_type("bigquery-dataset")
     assert not is_supported_lineage_entry_type("cloud-bigtable-instance")
     assert not is_supported_lineage_entry_type("cloudsql-mysql-database")
@@ -614,6 +632,10 @@ def test_is_supported_lineage_entry_type_helper() -> None:
             "vertex_ai:dataset:harshal-playground-306419.us-west2.5135361416504541184",
             "urn:li:dataset:(urn:li:dataPlatform:vertexai,harshal-playground-306419.us-west2.5135361416504541184,PROD)",
         ),
+        (
+            "vertex_ai:model:acryl-poc.us-west2.3595693293897252864.1",
+            "urn:li:mlModel:(urn:li:dataPlatform:vertexai,acryl-poc.us-west2.3595693293897252864.1,PROD)",
+        ),
         ("unknown:project.dataset.table", None),
         ("invalid", None),
     ],
@@ -622,7 +644,7 @@ def test_build_dataset_urn_from_fqn_only_cross_platform(
     fully_qualified_name: str, expected_dataset_urn: str | None
 ) -> None:
     assert (
-        build_dataset_urn_from_fqn_only(fully_qualified_name, env="PROD")
+        build_datahub_urn_from_fqn_only(fully_qualified_name, env="PROD")
         == expected_dataset_urn
     )
 
@@ -633,6 +655,26 @@ def test_extract_datahub_dataset_name_from_fqn_uses_mapping_format() -> None:
         "vertex_ai:dataset:harshal-playground-306419.us-west2.5135361416504541184",
     )
     assert dataset_name == "harshal-playground-306419.us-west2.5135361416504541184"
+
+
+def test_extract_datahub_entity_name_from_fqn_for_mlmodel() -> None:
+    entity_name = extract_datahub_entity_name_from_fqn(
+        "vertexai-model-version",
+        "vertex_ai:model:acryl-poc.us-west2.3595693293897252864.1",
+    )
+    assert entity_name == "acryl-poc.us-west2.3595693293897252864.1"
+
+
+def test_build_datahub_urn_from_fqn_for_mlmodel() -> None:
+    model_urn = build_datahub_urn_from_fqn(
+        "vertexai-model-version",
+        "vertex_ai:model:acryl-poc.us-west2.3595693293897252864.1",
+        env="PROD",
+    )
+    assert (
+        model_urn
+        == "urn:li:mlModel:(urn:li:dataPlatform:vertexai,acryl-poc.us-west2.3595693293897252864.1,PROD)"
+    )
 
 
 def test_extract_dataset_name_from_fqn_returns_none_for_container_mapping() -> None:
@@ -655,7 +697,7 @@ def test_extract_datahub_dataset_name_from_fqn_handles_format_key_errors(
         parent_entry_regex=None,
         container_key_class=None,
         parent_container_key_class=None,
-        datahub_dataset_name_format="{missing_field}",
+        datahub_entity_name_format="{missing_field}",
     )
     monkeypatch.setitem(DATAPLEX_ENTRY_TYPE_MAPPINGS, "test-key-error", mapping)
 
@@ -679,9 +721,9 @@ def test_extract_datahub_dataset_name_from_fqn_handles_missing_format(
         parent_entry_regex=None,
         container_key_class=None,
         parent_container_key_class=None,
-        datahub_dataset_name_format="{project_id}.{dataset_id}.{table_id}",
+        datahub_entity_name_format="{project_id}.{dataset_id}.{table_id}",
     )
-    object.__setattr__(mapping, "datahub_dataset_name_format", None)
+    object.__setattr__(mapping, "datahub_entity_name_format", None)
     monkeypatch.setitem(DATAPLEX_ENTRY_TYPE_MAPPINGS, "test-missing-format", mapping)
 
     assert (

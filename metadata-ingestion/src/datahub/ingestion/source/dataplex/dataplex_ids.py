@@ -76,11 +76,13 @@ import re
 from dataclasses import dataclass
 from typing import Literal, Optional, Pattern
 
+import datahub.emitter.mce_builder as builder
 from datahub.emitter.mce_builder import make_dataset_urn_with_platform_instance
 from datahub.emitter.mcp_builder import ContainerKey
 from datahub.ingestion.source.common.subtypes import (
     DatasetContainerSubTypes,
     DatasetSubTypes,
+    MLAssetSubTypes,
 )
 
 
@@ -169,8 +171,8 @@ class DataplexEntryTypeMapping:
     datahub_platform: Literal[
         "bigquery", "cloudsql", "spanner", "pubsub", "bigtable", "vertexai"
     ]
-    # Whether this Dataplex entry type maps to a DataHub Dataset or Container.
-    datahub_entity_type: Literal["Dataset", "Container"]
+    # Whether this Dataplex entry type maps to a DataHub Dataset, Container, or MLModel.
+    datahub_entity_type: Literal["Dataset", "Container", "MLModel"]
     # DataHub subtype to emit for the mapped entity.
     datahub_subtype: str
     # Regex that parses fully_qualified_name into identity fields for this type.
@@ -181,35 +183,37 @@ class DataplexEntryTypeMapping:
     parent_container_key_class: Optional[type[DataplexProjectId]]
     # Key class used when this entry maps to a Container entity itself.
     container_key_class: Optional[type[DataplexProjectId]]
-    # Required format string for dataset URN names from parsed identity fields.
+    # Required format string for DataHub entity-name segment from parsed identity fields.
     # Example: "{project_id}.{location}.{dataset_id}".
-    datahub_dataset_name_format: Optional[str] = None
+    datahub_entity_name_format: Optional[str] = None
 
     def __post_init__(self) -> None:
         """Validate:
-        1) dataset/container field constraints,
+        1) dataset/container/mlmodel field constraints,
         2) parent linkage constraints,
         3) regex group -> key field compatibility.
         """
-        if (
-            self.datahub_entity_type == "Dataset"
-            and self.datahub_dataset_name_format is None
-        ):
-            raise ValueError("Dataset mappings must define datahub_dataset_name_format")
-        if (
-            self.datahub_entity_type == "Container"
-            and self.datahub_dataset_name_format is not None
+        if self.datahub_entity_type in {"Dataset", "MLModel"} and (
+            self.datahub_entity_name_format is None
         ):
             raise ValueError(
-                "Container mappings must not define datahub_dataset_name_format"
+                "Dataset/MLModel mappings must define datahub_entity_name_format"
+            )
+        if (
+            self.datahub_entity_type == "Container"
+            and self.datahub_entity_name_format is not None
+        ):
+            raise ValueError(
+                "Container mappings must not define datahub_entity_name_format"
             )
         if self.datahub_entity_type == "Container" and self.container_key_class is None:
             raise ValueError("Container mappings must define container_key_class")
-        if (
-            self.datahub_entity_type == "Dataset"
-            and self.container_key_class is not None
+        if self.datahub_entity_type in {"Dataset", "MLModel"} and (
+            self.container_key_class is not None
         ):
-            raise ValueError("Dataset mappings must not define container_key_class")
+            raise ValueError(
+                "Dataset/MLModel mappings must not define container_key_class"
+            )
         if (
             self.parent_entry_regex is not None
             and self.parent_container_key_class is None
@@ -287,6 +291,9 @@ BIGTABLE_TABLE_FQN_REGEX = re.compile(
 VERTEX_AI_DATASET_FQN_REGEX = re.compile(
     r"^vertex_ai:dataset:(?P<project_id>[^.]+)\.(?P<location>[^.]+)\.(?P<dataset_id>[^.]+)$"
 )
+VERTEX_AI_MODEL_VERSION_FQN_REGEX = re.compile(
+    r"^vertex_ai:model:(?P<project_id>[^.]+)\.(?P<location>[^.]+)\.(?P<model_id>[^.]+)\.(?P<version_id>[^.]+)$"
+)
 
 # parent_entry regexes
 BIGQUERY_DATASET_PARENT_ENTRY_REGEX = re.compile(
@@ -328,7 +335,7 @@ DATAPLEX_ENTRY_TYPE_MAPPINGS: dict[str, DataplexEntryTypeMapping] = {
         parent_entry_regex=BIGQUERY_DATASET_PARENT_ENTRY_REGEX,
         container_key_class=None,
         parent_container_key_class=DataplexBigQueryDataset,
-        datahub_dataset_name_format="{project_id}.{dataset_id}.{table_id}",
+        datahub_entity_name_format="{project_id}.{dataset_id}.{table_id}",
     ),
     "bigquery-view": DataplexEntryTypeMapping(
         datahub_platform="bigquery",
@@ -339,7 +346,7 @@ DATAPLEX_ENTRY_TYPE_MAPPINGS: dict[str, DataplexEntryTypeMapping] = {
         parent_entry_regex=BIGQUERY_DATASET_PARENT_ENTRY_REGEX,
         container_key_class=None,
         parent_container_key_class=DataplexBigQueryDataset,
-        datahub_dataset_name_format="{project_id}.{dataset_id}.{table_id}",
+        datahub_entity_name_format="{project_id}.{dataset_id}.{table_id}",
     ),
     "cloudsql-mysql-instance": DataplexEntryTypeMapping(
         datahub_platform="cloudsql",
@@ -368,7 +375,7 @@ DATAPLEX_ENTRY_TYPE_MAPPINGS: dict[str, DataplexEntryTypeMapping] = {
         parent_entry_regex=MYSQL_DATABASE_PARENT_ENTRY_REGEX,
         container_key_class=None,
         parent_container_key_class=DataplexCloudSqlMySqlDatabase,
-        datahub_dataset_name_format=(
+        datahub_entity_name_format=(
             "{project_id}.{location}.{instance_id}.{database_id}.{table_id}"
         ),
     ),
@@ -399,7 +406,7 @@ DATAPLEX_ENTRY_TYPE_MAPPINGS: dict[str, DataplexEntryTypeMapping] = {
         parent_entry_regex=SPANNER_DATABASE_PARENT_ENTRY_REGEX,
         container_key_class=None,
         parent_container_key_class=DataplexCloudSpannerDatabase,
-        datahub_dataset_name_format=(
+        datahub_entity_name_format=(
             "{project_id}.regional-{location}.{instance_id}.{database_id}.{table_id}"
         ),
     ),
@@ -411,7 +418,7 @@ DATAPLEX_ENTRY_TYPE_MAPPINGS: dict[str, DataplexEntryTypeMapping] = {
         parent_entry_regex=None,
         container_key_class=None,
         parent_container_key_class=DataplexPubSubProject,
-        datahub_dataset_name_format="{project_id}.{topic_id}",
+        datahub_entity_name_format="{project_id}.{topic_id}",
     ),
     "cloud-bigtable-instance": DataplexEntryTypeMapping(
         datahub_platform="bigtable",
@@ -431,7 +438,7 @@ DATAPLEX_ENTRY_TYPE_MAPPINGS: dict[str, DataplexEntryTypeMapping] = {
         parent_entry_regex=BIGTABLE_INSTANCE_PARENT_ENTRY_REGEX,
         container_key_class=None,
         parent_container_key_class=DataplexBigtableInstance,
-        datahub_dataset_name_format="{project_id}.{instance_id}.{table_id}",
+        datahub_entity_name_format="{project_id}.{instance_id}.{table_id}",
     ),
     "vertexai-dataset": DataplexEntryTypeMapping(
         datahub_platform="vertexai",
@@ -441,7 +448,17 @@ DATAPLEX_ENTRY_TYPE_MAPPINGS: dict[str, DataplexEntryTypeMapping] = {
         parent_entry_regex=None,
         container_key_class=None,
         parent_container_key_class=DataplexVertexAiProject,
-        datahub_dataset_name_format="{project_id}.{location}.{dataset_id}",
+        datahub_entity_name_format="{project_id}.{location}.{dataset_id}",
+    ),
+    "vertexai-model-version": DataplexEntryTypeMapping(
+        datahub_platform="vertexai",
+        datahub_entity_type="MLModel",
+        datahub_subtype=MLAssetSubTypes.VERTEX_MODEL,
+        fqn_regex=VERTEX_AI_MODEL_VERSION_FQN_REGEX,
+        parent_entry_regex=None,
+        container_key_class=None,
+        parent_container_key_class=None,
+        datahub_entity_name_format="{project_id}.{location}.{model_id}.{version_id}",
     ),
 }
 
@@ -570,7 +587,7 @@ def build_dataset_urn_from_fqn(
     mapping = _get_mapping(entry_type_or_short_name)
     if mapping is None or mapping.datahub_entity_type != "Dataset":
         return None
-    dataset_name = extract_datahub_dataset_name_from_fqn(
+    dataset_name = extract_datahub_entity_name_from_fqn(
         entry_type_or_short_name=entry_type_or_short_name,
         fully_qualified_name=fully_qualified_name,
     )
@@ -592,41 +609,97 @@ def extract_datahub_dataset_name_from_fqn(
     mapping = _get_mapping(entry_type_or_short_name)
     if mapping is None or mapping.datahub_entity_type != "Dataset":
         return None
-    return _extract_dataset_name_from_fqn(
+    return _extract_datahub_entity_name_from_fqn(
         entry_type_or_short_name=entry_type_or_short_name,
         fully_qualified_name=fully_qualified_name,
     )
+
+
+def extract_datahub_entity_name_from_fqn(
+    entry_type_or_short_name: str, fully_qualified_name: str
+) -> Optional[str]:
+    """Extract normalized DataHub entity-name from Dataplex FQN.
+
+    This supports any mapping that encodes entity identity in FQN and then emits an
+    unencoded name in URN (currently Dataset and MLModel).
+    """
+    mapping = _get_mapping(entry_type_or_short_name)
+    if mapping is None or mapping.datahub_entity_type not in {"Dataset", "MLModel"}:
+        return None
+    return _extract_datahub_entity_name_from_fqn(
+        entry_type_or_short_name=entry_type_or_short_name,
+        fully_qualified_name=fully_qualified_name,
+    )
+
+
+def build_datahub_urn_from_fqn(
+    entry_type_or_short_name: str, fully_qualified_name: str, env: str
+) -> Optional[str]:
+    """Build DataHub URN from mapped entry type, FQN, and target environment."""
+    mapping = _get_mapping(entry_type_or_short_name)
+    if mapping is None:
+        return None
+
+    entity_name = extract_datahub_entity_name_from_fqn(
+        entry_type_or_short_name=entry_type_or_short_name,
+        fully_qualified_name=fully_qualified_name,
+    )
+    if entity_name is None:
+        return None
+
+    if mapping.datahub_entity_type == "Dataset":
+        return make_dataset_urn_with_platform_instance(
+            platform=mapping.datahub_platform,
+            name=entity_name,
+            platform_instance=None,
+            env=env,
+        )
+    if mapping.datahub_entity_type == "MLModel":
+        return builder.make_ml_model_urn(
+            platform=mapping.datahub_platform,
+            model_name=entity_name,
+            env=env,
+        )
+    return None
 
 
 def build_dataset_urn_from_fqn_only(
     fully_qualified_name: str, env: str
 ) -> Optional[str]:
     """Extract DataHub dataset URN by matching FQN against dataset mappings."""
+    return build_datahub_urn_from_fqn_only(
+        fully_qualified_name=fully_qualified_name,
+        env=env,
+        allowed_entity_types={"Dataset"},
+    )
+
+
+def build_datahub_urn_from_fqn_only(
+    fully_qualified_name: str,
+    env: str,
+    allowed_entity_types: Optional[set[Literal["Dataset", "MLModel"]]] = None,
+) -> Optional[str]:
+    """Extract DataHub URN by matching FQN against non-container mappings."""
+    allowed_types = allowed_entity_types or {"Dataset", "MLModel"}
     for entry_type_short_name, mapping in DATAPLEX_ENTRY_TYPE_MAPPINGS.items():
-        if mapping.datahub_entity_type != "Dataset":
+        if mapping.datahub_entity_type not in allowed_types:
             continue
-        dataset_name = _extract_dataset_name_from_fqn(
+        entity_urn = build_datahub_urn_from_fqn(
             entry_type_or_short_name=entry_type_short_name,
             fully_qualified_name=fully_qualified_name,
-        )
-        if dataset_name is None:
-            continue
-        return make_dataset_urn_with_platform_instance(
-            platform=mapping.datahub_platform,
-            name=dataset_name,
-            platform_instance=None,
             env=env,
         )
-
+        if entity_urn is not None:
+            return entity_urn
     return None
 
 
-def _extract_dataset_name_from_fqn(
+def _extract_datahub_entity_name_from_fqn(
     entry_type_or_short_name: str, fully_qualified_name: str
 ) -> Optional[str]:
-    """Validate FQN against mapping regex and return DataHub dataset name."""
+    """Validate FQN against mapping regex and return DataHub entity-name."""
     mapping = _get_mapping(entry_type_or_short_name)
-    if mapping is None or mapping.datahub_entity_type != "Dataset":
+    if mapping is None or mapping.datahub_entity_type not in {"Dataset", "MLModel"}:
         return None
 
     identity_fields = parse_fully_qualified_name(
@@ -635,19 +708,32 @@ def _extract_dataset_name_from_fqn(
     if identity_fields is None:
         return None
 
-    if mapping.datahub_dataset_name_format is None:
+    if mapping.datahub_entity_name_format is None:
         return None
     try:
-        dataset_name = mapping.datahub_dataset_name_format.format(**identity_fields)
+        entity_name = mapping.datahub_entity_name_format.format(**identity_fields)
     except KeyError:
         return None
-    return dataset_name or None
+    return entity_name or None
+
+
+def _extract_dataset_name_from_fqn(
+    entry_type_or_short_name: str, fully_qualified_name: str
+) -> Optional[str]:
+    """Backward-compatible alias for dataset-only extraction tests."""
+    mapping = _get_mapping(entry_type_or_short_name)
+    if mapping is None or mapping.datahub_entity_type != "Dataset":
+        return None
+    return _extract_datahub_entity_name_from_fqn(
+        entry_type_or_short_name=entry_type_or_short_name,
+        fully_qualified_name=fully_qualified_name,
+    )
 
 
 def is_supported_lineage_entry_type(entry_type_short_name: str) -> bool:
-    """Return whether an entry type is supported as a lineage dataset node."""
+    """Return whether an entry type is supported as a lineage node."""
     mapping = DATAPLEX_ENTRY_TYPE_MAPPINGS.get(entry_type_short_name)
-    return bool(mapping and mapping.datahub_entity_type == "Dataset")
+    return bool(mapping and mapping.datahub_entity_type in {"Dataset", "MLModel"})
 
 
 def build_container_urn_from_fqn(
