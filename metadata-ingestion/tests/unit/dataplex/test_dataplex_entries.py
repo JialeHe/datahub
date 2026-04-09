@@ -813,7 +813,9 @@ class TestDataplexEntriesProcessorDesign:
         processor._track_entry_for_lineage("project-3", "us", mlmodel_entry)
         assert "project-3" in processor.entry_data_by_project
         tracked_ml = next(iter(processor.entry_data_by_project["project-3"]))
-        assert tracked_ml.datahub_entity_name == "acryl-poc.us-west2.3595693293897252864.1"
+        assert (
+            tracked_ml.datahub_entity_name == "acryl-poc.us-west2.3595693293897252864.1"
+        )
         assert tracked_ml.datahub_platform == "vertexai"
         assert tracked_ml.datahub_entity_urn == (
             "urn:li:mlModel:(urn:li:dataPlatform:vertexai,"
