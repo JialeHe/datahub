@@ -1032,8 +1032,9 @@ ORDER BY event_time ASC
                         )
                         if query_match:
                             try:
+                                query_sql = query_match.group(1).replace("\\'", "'")
                                 parsed = sqlglot.parse_one(
-                                    query_match.group(1), dialect="clickhouse"
+                                    query_sql, dialect="clickhouse"
                                 )
                                 for table in parsed.find_all(sqlglot.exp.Table):
                                     if table.db and table.name:
