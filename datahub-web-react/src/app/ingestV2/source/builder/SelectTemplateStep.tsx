@@ -30,7 +30,7 @@ const SearchBarContainer = styled.div`
 `;
 
 const StyledSearchBar = styled(Input)`
-    background-color: ${(props) => props.theme.colors.bgSurface};
+    background-color: ${(props) => props.theme.colors.bg};
     border-radius: 8px;
     box-shadow: ${(props) => props.theme.colors.shadowSm};
     border: 1px solid ${(props) => props.theme.colors.border};

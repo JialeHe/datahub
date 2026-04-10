@@ -14,7 +14,7 @@ import LineageStatusIcon from '@images/lineage-status.svg?react';
 
 const Icon = styled(LineageStatusIcon)<{ highlighted?: boolean }>`
     display: flex;
-    color: ${({ highlighted, theme }) => (highlighted ? theme.colors.textBrand : theme.colors.border)};
+    color: ${({ highlighted, theme }) => (highlighted ? theme.colors.textBrand : theme.colors.iconDisabled)};
     font-size: 16px;
 
     :hover {

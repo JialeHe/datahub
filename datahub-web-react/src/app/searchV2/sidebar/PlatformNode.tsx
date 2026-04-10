@@ -132,7 +132,7 @@ const PlatformNode = ({ iconSize = 20, hasOnlyOnePlatform = false, toggleCollaps
                         <PlatformIcon
                             platform={platformAggregation.entity as DataPlatform}
                             size={iconSize}
-                            color={theme.colors.border}
+                            color={theme.colors.icon}
                         />
                         {!collapsed && (
                             <ExpandableNode.Title

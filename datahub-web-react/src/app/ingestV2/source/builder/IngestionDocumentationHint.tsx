@@ -6,7 +6,7 @@ import styled from 'styled-components';
 import { SourceConfig } from '@app/ingestV2/source/builder/types';
 
 const Container = styled.div`
-    background-color: ${(props) => props.theme.colors.bgSurface};
+    background-color: ${(props) => props.theme.colors.bg};
     border-radius: 8px;
     padding: 12px 12px 16px 24px;
     border: 1px solid ${(props) => props.theme.colors.border};
