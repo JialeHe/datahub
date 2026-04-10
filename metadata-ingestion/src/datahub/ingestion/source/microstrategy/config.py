@@ -241,13 +241,10 @@ class MicroStrategyConfig(
         default=True,
         description=(
             "Extract column-level lineage from cube SQL. "
-            "Enabled by default."
-            "Requires include_cube_schema to be true. "
-            "Requires include_lineage to be true. "
-            "Requires include_warehouse_lineage to be true. "
-            "Requires warehouse_lineage_platform to be set. "
-            "Requires warehouse_lineage_database to be set. "
-            "Requires warehouse_lineage_schema to be set. "
+            "Requires include_cube_schema, include_lineage, and include_warehouse_lineage to be true. "
+            "The warehouse platform is detected automatically. "
+            "Optionally set warehouse_lineage_database or warehouse_lineage_schema "
+            "to qualify bare table names."
         ),
     )
 
@@ -273,18 +270,11 @@ class MicroStrategyConfig(
     include_warehouse_lineage: bool = Field(
         default=False,
         description=(
-            "When true with include_lineage, call the modeling API for each cube and emit "
-            "UpstreamLineage from physical warehouse tables. "
-            "Requires warehouse_lineage_platform (and usually database/schema defaults) "
-            "aligned with how the warehouse is ingested in DataHub."
-        ),
-    )
-
-    warehouse_lineage_platform: Optional[str] = Field(
-        default=None,
-        description=(
-            "DataHub data platform ID for upstream warehouse datasets (e.g. snowflake, mssql). "
-            "Required when include_warehouse_lineage is true."
+            "When true with include_lineage, emit UpstreamLineage from physical warehouse "
+            "tables to cubes, reports, and documents. "
+            "The source platform is detected automatically from GET /api/datasources; "
+            "if that endpoint returns 403, it is inferred from SQL quoting style. "
+            "No manual platform configuration is required."
         ),
     )
 
@@ -323,9 +313,17 @@ class MicroStrategyConfig(
     )
 
     @model_validator(mode="after")  # type: ignore[misc]
-    def warehouse_lineage_requires_platform(self) -> "MicroStrategyConfig":
-        if self.include_warehouse_lineage and not self.warehouse_lineage_platform:
-            raise ValueError(
-                "warehouse_lineage_platform is required when include_warehouse_lineage is true"
+    def warn_if_column_lineage_without_schema(self) -> "MicroStrategyConfig":
+        if (
+            self.include_column_lineage
+            and self.include_warehouse_lineage
+            and not self.warehouse_lineage_database
+            and not self.warehouse_lineage_schema
+        ):
+            import logging
+            logging.getLogger(__name__).warning(
+                "include_column_lineage is true but neither warehouse_lineage_database "
+                "nor warehouse_lineage_schema is set. Column lineage quality may be lower "
+                "for bare table names (no schema prefix in SQL)."
             )
         return self
