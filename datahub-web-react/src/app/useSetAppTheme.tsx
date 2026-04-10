@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 
+import { useIsDarkMode } from '@app/theme/useIsDarkMode';
 import { useAppConfig } from '@app/useAppConfig';
-import { useIsDarkMode } from '@app/useIsDarkMode';
 import light from '@conf/theme/colorThemes/light';
 import themes from '@conf/theme/themes';
 import { Theme } from '@conf/theme/types';

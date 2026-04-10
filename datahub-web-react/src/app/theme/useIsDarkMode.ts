@@ -15,7 +15,7 @@ function saveDarkModeToLocalStorage(isDark: boolean) {
 
 /**
  * Hook that provides the current dark mode state and a toggle function.
- * Persisted in localStorage; defaults to the OS-level preference.
+ * Persisted in localStorage; defaults to light mode.
  *
  * All hook instances in the same tab stay in sync via a custom window event.
  */
@@ -39,18 +39,6 @@ export function useIsDarkMode(): [boolean, () => void] {
         };
         window.addEventListener(DARK_MODE_CHANGE_EVENT, syncHandler);
         return () => window.removeEventListener(DARK_MODE_CHANGE_EVENT, syncHandler);
-    }, []);
-
-    // Listen for OS-level theme changes when the user hasn't explicitly set a preference
-    useEffect(() => {
-        const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
-        const handler = (e: MediaQueryListEvent) => {
-            if (localStorage.getItem(DARK_MODE_KEY) === null) {
-                setIsDarkMode(e.matches);
-            }
-        };
-        mediaQuery.addEventListener('change', handler);
-        return () => mediaQuery.removeEventListener('change', handler);
     }, []);
 
     return [isDarkMode, toggleDarkMode];

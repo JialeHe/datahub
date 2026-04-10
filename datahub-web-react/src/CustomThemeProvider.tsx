@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
 import { ThemeProvider } from 'styled-components';
 
-import GlobalThemeStyles from '@app/GlobalThemeStyles';
-import { loadIsDarkMode } from '@app/useIsDarkMode';
+import GlobalThemeStyles from '@app/theme/GlobalThemeStyles';
+import { loadIsDarkMode } from '@app/theme/useIsDarkMode';
 import { useCustomThemeId } from '@app/useSetAppTheme';
 import themes from '@conf/theme/themes';
 import { Theme } from '@conf/theme/types';

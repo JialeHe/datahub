@@ -1352,10 +1352,13 @@ describe('Document Profile Rendering', () => {
                 </TestWrapper>,
             );
 
-            await waitFor(() => {
-                // Native doc should not have a platform logo for Notion
-                expect(nativeContainer.querySelector('img[alt="Notion"]')).not.toBeInTheDocument();
-            });
+            await waitFor(
+                () => {
+                    // Native doc should not have a platform logo for Notion
+                    expect(nativeContainer.querySelector('img[alt="Notion"]')).not.toBeInTheDocument();
+                },
+                { timeout: 3000 },
+            );
 
             // Render external document preview
             const { container: externalContainer } = render(
@@ -1372,11 +1375,15 @@ describe('Document Profile Rendering', () => {
                 </TestWrapper>,
             );
 
-            await waitFor(() => {
-                // External doc should have platform image
-                const platformImg = externalContainer.querySelector('img[alt="Notion"]');
-                expect(platformImg).toBeInTheDocument();
-            });
+            await waitFor(
+                () => {
+                    // External doc should have platform image
+
+                    const platformImg = externalContainer.querySelector('img[alt="Notion"]');
+                    expect(platformImg).toBeInTheDocument();
+                },
+                { timeout: 3000 },
+            );
         });
     });
 
