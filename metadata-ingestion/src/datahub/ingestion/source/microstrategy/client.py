@@ -653,6 +653,51 @@ class MicroStrategyClient:
         finally:
             self.session.headers = original
 
+    def get_attribute_expression(self, attribute_id: str, project_id: str) -> str:
+        """
+        Return a human-readable expression string for a MicroStrategy attribute.
+
+        GET /api/model/attributes/{id} → forms[].expressions[].expression.text
+
+        Returns the first expression text found across all forms, or empty string.
+        For multi-expression attributes the expressions are joined with " | ".
+        """
+        original = self._set_project_header(project_id)
+        try:
+            data = self._request("GET", f"/api/model/attributes/{attribute_id}")
+            parts = []
+            for form in data.get("forms", []):
+                for expr in form.get("expressions", []):
+                    text = expr.get("expression", {}).get("text", "")
+                    if text and text not in parts:
+                        parts.append(text)
+            return " | ".join(parts)
+        except Exception as e:
+            logger.debug("get_attribute_expression failed for %s: %s", attribute_id, e)
+            return ""
+        finally:
+            self.session.headers = original
+
+    def get_metric_expression(self, metric_id: str, project_id: str) -> str:
+        """
+        Return the formula expression string for a MicroStrategy metric.
+
+        GET /api/model/metrics/{id} → expression.text
+
+        Examples:
+          "Sum(NET_SLS_RTL_AMT)"
+          "({Net Sales Retail Amt} - {Net Sales Retail Amt LY}) / Abs({Net Sales Retail Amt LY}) * 100"
+        """
+        original = self._set_project_header(project_id)
+        try:
+            data = self._request("GET", f"/api/model/metrics/{metric_id}")
+            return data.get("expression", {}).get("text", "")
+        except Exception as e:
+            logger.debug("get_metric_expression failed for %s: %s", metric_id, e)
+            return ""
+        finally:
+            self.session.headers = original
+
     # ── Cube endpoints ────────────────────────────────────────────────────────
 
     def get_cube(self, cube_id: str, project_id: str) -> Dict[str, Any]:

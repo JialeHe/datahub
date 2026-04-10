@@ -38,6 +38,7 @@ from datahub.emitter.mce_builder import (
     make_data_platform_urn,
     make_dataplatform_instance_urn,
     make_dataset_urn_with_platform_instance,
+    make_schema_field_urn,
     make_user_urn,
 )
 from datahub.emitter.mcp import MetadataChangeProposalWrapper
@@ -87,6 +88,8 @@ from datahub.metadata.schema_classes import (
     DatasetPropertiesClass,
     DateTypeClass,
     GlobalTagsClass,
+    InputFieldClass,
+    InputFieldsClass,
     NumberTypeClass,
     OtherSchemaClass,
     OwnerClass,
@@ -1040,6 +1043,13 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 dashboard_urn, dashboard["owner"], certifier
             )
 
+        # Pre-compute the __datasource URN so stubs can anchor their inputFields there.
+        doc_datasource_urn: Optional[str] = (
+            self._document_datasource_urn(dashboard["id"], project)
+            if is_legacy
+            else None
+        )
+
         # Register referenced dataset IDs for dashboard-driven scoping.
         if self._dashboard_driven_mode():
             for ds in embedded_datasets:
@@ -1054,12 +1064,12 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                     ds["id"] not in self.cube_registry
                     and ds["id"] not in self.dataset_registry
                 ):
-                    yield from self._emit_embedded_chart_stub(ds, project)
+                    yield from self._emit_embedded_chart_stub(ds, project, doc_datasource_urn)
         else:
             for ds in embedded_datasets:
                 if is_legacy:
                     self._document_embedded_ids.add(ds["id"])
-                yield from self._emit_embedded_chart_stub(ds, project)
+                yield from self._emit_embedded_chart_stub(ds, project, doc_datasource_urn)
 
         # For legacy documents, emit a companion dataset entity that carries the
         # consolidated warehouse lineage for the entire document. This replaces
@@ -1130,6 +1140,7 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
         self,
         dataset: Dict[str, Any],
         project: Dict[str, Any],
+        datasource_urn: Optional[str] = None,
     ) -> Iterable[MetadataWorkUnit]:
         """
         Emit a minimal chart stub for an embedded document dataset.
@@ -1138,16 +1149,14 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
         dashboardInfo.charts. Without a corresponding chart entity, DataHub
         shows these as unresolved ghost nodes — UUID strings with no name.
 
-        This stub emits just enough to make the node navigable:
+        This stub emits:
           - chartInfo with the dataset name as title
           - status, dataPlatformInstance, container (required for browse)
+          - inputFields (attributes + metrics) if include_report_definitions is enabled,
+            fetched via GET /api/v2/reports/{id}. schemaFieldUrns point to the
+            companion __datasource entity so fields are anchored to the lineage chain.
 
-        NO lineage is emitted on stubs, by design. Warehouse lineage for legacy
-        documents belongs on the companion dataset entity (_emit_document_datasource),
-        not on per-embedded-dataset stubs. Emitting per-stub warehouse lineage
-        creates a bipartite spaghetti graph (N tables × M charts) that is visually
-        useless and semantically misleading — a data steward cares about what tables
-        the document depends on, not which subset each internal query uses.
+        NO warehouse lineage is emitted on stubs — that belongs on __datasource.
         """
         chart_urn = make_chart_urn(
             platform=self.platform,
@@ -1183,6 +1192,25 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
             entityUrn=chart_urn,
             aspect=ContainerClass(container=self._project_key(project).as_urn()),
         ).as_workunit()
+
+        # InputFields — fetch the dataset definition to get attributes and metrics
+        if self.config.include_report_definitions and datasource_urn:
+            try:
+                defn = self.client.get_report(dataset["id"], project["id"])
+                avail = defn.get("definition", {}).get("availableObjects", {}) if defn else {}
+                if avail:
+                    input_fields = self._build_input_fields(avail, datasource_urn, project["id"])
+                    if input_fields:
+                        yield MetadataChangeProposalWrapper(
+                            entityUrn=chart_urn,
+                            aspect=InputFieldsClass(fields=input_fields),
+                        ).as_workunit()
+            except Exception as e:
+                logger.debug(
+                    "Could not fetch definition for embedded dataset %s: %s",
+                    dataset.get("name", dataset["id"]),
+                    e,
+                )
 
     # ── Report processing ─────────────────────────────────────────────────────
 
@@ -1300,6 +1328,20 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
             entityUrn=chart_urn,
             aspect=ContainerClass(container=self._project_key(project).as_urn()),
         ).as_workunit()
+
+        # InputFields — attributes and metrics visible on the chart in DataHub
+        if report_defn:
+            avail = report_defn.get("definition", {}).get("availableObjects", {})
+            if avail:
+                # Point schemaFieldUrns at the first upstream dataset (cube or warehouse table).
+                # Falls back to the chart's own project container URN if no inputs exist.
+                parent_urn = inputs[0] if inputs else self._project_key(project).as_urn()
+                input_fields = self._build_input_fields(avail, parent_urn, project["id"])
+                if input_fields:
+                    yield MetadataChangeProposalWrapper(
+                        entityUrn=chart_urn,
+                        aspect=InputFieldsClass(fields=input_fields),
+                    ).as_workunit()
 
         # Certification tag
         cert = report.get("certifiedInfo", {})
@@ -1561,6 +1603,110 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
             "Unknown MSTR dataType %r — defaulting to StringType", mstr_data_type
         )
         return SchemaFieldDataTypeClass(type=StringTypeClass())
+
+    def _build_input_fields(
+        self,
+        avail: Dict[str, Any],
+        parent_dataset_urn: str,
+        project_id: Optional[str] = None,
+    ) -> List[InputFieldClass]:
+        """
+        Build InputField objects from a MicroStrategy availableObjects dict.
+
+        Each attribute form and each metric becomes an InputField with:
+          - schemaFieldUrn  pointing to parent_dataset_urn (the upstream entity)
+          - schemaField     carrying the type, nativeDataType, role tags, and description
+
+        When include_field_formulas is true and project_id is provided, fetches the
+        expression for each attribute (physical column mapping) and metric (aggregation
+        formula) via the model API and surfaces it as the field description:
+          Attribute: "ORG_DS_NUM | DISTRICT_NUMBER"  (column expressions across tables)
+          Metric:    "Sum(NET_SLS_RTL_AMT)"
+          Calculated metric: "({Net Sales Retail Amt} - {Net Sales Retail Amt LY}) / Abs(...)"
+        """
+        fetch_formulas = self.config.include_field_formulas and bool(project_id)
+        fields: List[InputFieldClass] = []
+        attrs = avail.get("attributes", [])
+        metrics = avail.get("metrics", [])
+
+        for attr in attrs:
+            attr_name = attr.get("name") or attr.get("id", "")
+            attr_id = attr.get("id", "")
+            forms = attr.get("forms", [])
+            multi = len(forms) > 1
+
+            description: Optional[str] = None
+            if fetch_formulas and attr_id:
+                expr = self.client.get_attribute_expression(attr_id, project_id)  # type: ignore[arg-type]
+                if expr:
+                    description = expr
+
+            if not forms:
+                field_path = attr_name
+                fields.append(
+                    InputFieldClass(
+                        schemaFieldUrn=make_schema_field_urn(parent_dataset_urn, field_path),
+                        schemaField=SchemaFieldClass(
+                            fieldPath=field_path,
+                            type=SchemaFieldDataTypeClass(type=StringTypeClass()),
+                            nativeDataType="attribute",
+                            description=description,
+                            globalTags=GlobalTagsClass(
+                                tags=[TagAssociationClass(tag="urn:li:tag:ATTRIBUTE")]
+                            ),
+                        ),
+                    )
+                )
+                continue
+
+            for form in forms:
+                form_name = form.get("name", "")
+                data_type = form.get("dataType", "varChar")
+                form_cat = form.get("baseFormCategory", "")
+                field_path = f"{attr_name}.{form_name}" if multi else attr_name
+                native = f"attribute:{form_cat}" if form_cat else "attribute"
+                tags = [TagAssociationClass(tag="urn:li:tag:ATTRIBUTE")]
+                if form_cat:
+                    tags.append(TagAssociationClass(tag=f"urn:li:tag:{form_cat.upper()}"))
+                fields.append(
+                    InputFieldClass(
+                        schemaFieldUrn=make_schema_field_urn(parent_dataset_urn, field_path),
+                        schemaField=SchemaFieldClass(
+                            fieldPath=field_path,
+                            type=self._mstr_type_to_datahub(data_type),
+                            nativeDataType=native,
+                            description=description,
+                            globalTags=GlobalTagsClass(tags=tags),
+                        ),
+                    )
+                )
+
+        for metric in metrics:
+            field_path = metric.get("name") or metric.get("id", "")
+            metric_id = metric.get("id", "")
+
+            description = None
+            if fetch_formulas and metric_id:
+                expr = self.client.get_metric_expression(metric_id, project_id)  # type: ignore[arg-type]
+                if expr:
+                    description = expr
+
+            fields.append(
+                InputFieldClass(
+                    schemaFieldUrn=make_schema_field_urn(parent_dataset_urn, field_path),
+                    schemaField=SchemaFieldClass(
+                        fieldPath=field_path,
+                        type=SchemaFieldDataTypeClass(type=NumberTypeClass()),
+                        nativeDataType="metric",
+                        description=description,
+                        globalTags=GlobalTagsClass(
+                            tags=[TagAssociationClass(tag="urn:li:tag:METRIC")]
+                        ),
+                    ),
+                )
+            )
+
+        return fields
 
     def _emit_cube_schema(
         self, dataset_urn: str, cube: Dict[str, Any], project_id: str

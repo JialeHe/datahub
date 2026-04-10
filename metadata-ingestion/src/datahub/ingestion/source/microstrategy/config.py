@@ -224,6 +224,18 @@ class MicroStrategyConfig(
         ),
     )
 
+    include_field_formulas: bool = Field(
+        default=True,
+        description=(
+            "When true, fetch attribute and metric expressions from "
+            "GET /api/model/attributes/{id} and GET /api/model/metrics/{id} "
+            "and surface them as the field description in inputFields. "
+            "Attribute expressions show the physical column name and backing tables; "
+            "metric expressions show the aggregation formula (e.g. 'Sum(NET_SLS_RTL_AMT)'). "
+            "Adds one API call per unique attribute/metric. Enabled by default."
+        ),
+    )
+
     include_report_definitions: bool = Field(
         default=False,
         description=(
