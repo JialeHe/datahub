@@ -62,7 +62,6 @@ from datahub.ingestion.api.workunit import MetadataWorkUnit
 from datahub.ingestion.source.common.subtypes import (
     BIAssetSubTypes,
     BIContainerSubTypes,
-    DatasetSubTypes,
 )
 from datahub.ingestion.source.microstrategy.client import (
     MicroStrategyClient,
@@ -411,9 +410,9 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
 
         # IDs of embedded datasets from legacy documents (subtype 14081).
         # These already have named chart stubs emitted by _emit_embedded_chart_stub
-        # and consolidated warehouse lineage on the companion __datasource entity.
-        # They must NOT be routed through _process_report, which would add warehouse
-        # table URNs to chartInfo.inputs and create the spaghetti lineage graph.
+        # with per-dataset warehouse URNs in chartInfo.inputs.
+        # They must NOT be routed through _process_report, which would duplicate
+        # warehouse lineage edges.
         self._document_embedded_ids: Set[str] = set()
 
         domain_config = getattr(self.config, "domain", {})
@@ -996,18 +995,10 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
             else ("modern_dossier" if is_modern else "dossier")
         )
 
-        # For legacy documents, link the dashboard to its companion datasource entity.
-        # DataHub does not support upstreamLineage on dashboards, so datasets[] is used
-        # to create: Snowflake tables → __datasource → Dashboard.
-        datasource_datasets: List[str] = []
-        if is_legacy and self.config.include_lineage:
-            datasource_datasets = [self._document_datasource_urn(dashboard["id"], project)]
-
         dashboard_info = DashboardInfoClass(
             title=dashboard.get("name", dashboard["id"]),
             description=dashboard.get("description") or "",
             charts=chart_urns,
-            datasets=datasource_datasets,
             lastModified=self._build_audit_stamps(
                 dashboard.get("dateCreated"),
                 dashboard.get("dateModified"),
@@ -1043,12 +1034,16 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 dashboard_urn, dashboard["owner"], certifier
             )
 
-        # Pre-compute the __datasource URN so stubs can anchor their inputFields there.
-        doc_datasource_urn: Optional[str] = (
-            self._document_datasource_urn(dashboard["id"], project)
-            if is_legacy
-            else None
-        )
+        # For legacy documents and modern dossiers, fetch warehouse lineage per embedded
+        # dataset and store as a name→tables map so stubs can set inputs[] directly.
+        # This replaces the synthetic __datasource entity — each chart stub now carries its
+        # own specific warehouse tables, matching the standard DataHub BI connector pattern.
+        per_dataset_tables: Dict[str, List[str]] = {}
+        if (is_legacy or is_modern) and self.config.include_lineage and self.config.include_warehouse_lineage:
+            per_dataset_tables = self._fetch_per_dataset_tables(
+                dashboard["id"], project_id, dashboard.get("name", dashboard["id"]),
+                is_legacy=is_legacy,
+            )
 
         # Register referenced dataset IDs for dashboard-driven scoping.
         if self._dashboard_driven_mode():
@@ -1056,26 +1051,24 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 self._dashboard_referenced_ids.add(ds["id"])
                 if is_legacy:
                     # Track embedded document dataset IDs separately so _yield_report_workunits
-                    # can skip them — they get stubs + consolidated lineage via _emit_document_datasource,
-                    # not full report processing (which would add warehouse URNs to chartInfo.inputs).
+                    # can skip them — they get stubs + direct warehouse inputs via per_dataset_tables,
+                    # not full report processing.
                     self._document_embedded_ids.add(ds["id"])
             for ds in embedded_datasets:
                 if (
                     ds["id"] not in self.cube_registry
                     and ds["id"] not in self.dataset_registry
                 ):
-                    yield from self._emit_embedded_chart_stub(ds, project, doc_datasource_urn)
+                    yield from self._emit_embedded_chart_stub(
+                        ds, project, per_dataset_tables.get(ds["name"], [])
+                    )
         else:
             for ds in embedded_datasets:
                 if is_legacy:
                     self._document_embedded_ids.add(ds["id"])
-                yield from self._emit_embedded_chart_stub(ds, project, doc_datasource_urn)
-
-        # For legacy documents, emit a companion dataset entity that carries the
-        # consolidated warehouse lineage for the entire document. This replaces
-        # per-chart-stub warehouse lineage, which creates a spaghetti graph.
-        if is_legacy and self.config.include_lineage:
-            yield from self._emit_document_datasource(dashboard, project, dashboard_urn)
+                yield from self._emit_embedded_chart_stub(
+                    ds, project, per_dataset_tables.get(ds["name"], [])
+                )
 
     def _extract_viz_ids_from_dossier(self, defn: Dict[str, Any]) -> List[str]:
         """
@@ -1140,23 +1133,21 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
         self,
         dataset: Dict[str, Any],
         project: Dict[str, Any],
-        datasource_urn: Optional[str] = None,
+        warehouse_urns: Optional[List[str]] = None,
     ) -> Iterable[MetadataWorkUnit]:
         """
-        Emit a minimal chart stub for an embedded document dataset.
+        Emit a chart stub for an embedded document dataset.
 
         Legacy documents (subtype 14081) reference their datasets by ID in
         dashboardInfo.charts. Without a corresponding chart entity, DataHub
         shows these as unresolved ghost nodes — UUID strings with no name.
 
         This stub emits:
-          - chartInfo with the dataset name as title
+          - chartInfo with the dataset name, inputs pointing directly at the
+            specific warehouse tables this dataset queries (per-dataset SQL parsed
+            from datasets/sqlView — no synthetic __datasource intermediary)
           - status, dataPlatformInstance, container (required for browse)
-          - inputFields (attributes + metrics) if include_report_definitions is enabled,
-            fetched via GET /api/v2/reports/{id}. schemaFieldUrns point to the
-            companion __datasource entity so fields are anchored to the lineage chain.
-
-        NO warehouse lineage is emitted on stubs — that belongs on __datasource.
+          - inputFields (attributes + metrics) if include_report_definitions is enabled
         """
         chart_urn = make_chart_urn(
             platform=self.platform,
@@ -1169,6 +1160,7 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
             aspect=ChartInfoClass(
                 title=dataset.get("name", dataset["id"]),
                 description="",
+                inputs=warehouse_urns or [],
                 lastModified=self._build_audit_stamps(None, None, None),
                 customProperties={
                     "project_id": project["id"],
@@ -1180,7 +1172,7 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
         ).as_workunit()
         yield MetadataChangeProposalWrapper(
             entityUrn=chart_urn,
-            aspect=SubTypesClass(typeNames=[BIAssetSubTypes.REPORT]),
+            aspect=SubTypesClass(typeNames=["Dataset"]),
         ).as_workunit()
         yield MetadataChangeProposalWrapper(
             entityUrn=chart_urn, aspect=StatusClass(removed=False)
@@ -1193,13 +1185,17 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
             aspect=ContainerClass(container=self._project_key(project).as_urn()),
         ).as_workunit()
 
-        # InputFields — fetch the dataset definition to get attributes and metrics
-        if self.config.include_report_definitions and datasource_urn:
+        # InputFields — fetch the dataset definition to get attributes and metrics.
+        # Use the first warehouse URN (if any) as the schemaField parent so fields
+        # are anchored to the actual upstream table in the lineage graph.
+        if self.config.include_report_definitions:
+            parent_urn = (warehouse_urns[0] if warehouse_urns
+                          else self._project_key(project).as_urn())
             try:
                 defn = self.client.get_report(dataset["id"], project["id"])
                 avail = defn.get("definition", {}).get("availableObjects", {}) if defn else {}
                 if avail:
-                    input_fields = self._build_input_fields(avail, datasource_urn, project["id"])
+                    input_fields = self._build_input_fields(avail, parent_urn, project["id"])
                     if input_fields:
                         yield MetadataChangeProposalWrapper(
                             entityUrn=chart_urn,
@@ -1266,6 +1262,17 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
             )
             inputs.extend(registry_inputs)
 
+            # Dashboard-driven: register the referenced cube/dataset so _yield_cube_workunits
+            # (which runs after report processing) includes it even if not directly linked
+            # from a dashboard.
+            if self._dashboard_driven_mode() and registry_inputs:
+                source_id = (
+                    source_for_registry.get("dataSource", {}).get("id")
+                    or source_for_registry.get("sourceId")
+                )
+                if source_id:
+                    self._dashboard_referenced_ids.add(source_id)
+
             # Fall back to warehouse lineage via sqlView for live reports (no cube backing)
             if self.config.include_warehouse_lineage and not registry_inputs:
                 warehouse_inputs, sql = self._get_report_warehouse_upstreams(
@@ -1316,7 +1323,7 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
         ).as_workunit()
         yield MetadataChangeProposalWrapper(
             entityUrn=chart_urn,
-            aspect=SubTypesClass(typeNames=[BIAssetSubTypes.REPORT]),
+            aspect=SubTypesClass(typeNames=[self._report_subtype_name(subtype)]),
         ).as_workunit()
         yield MetadataChangeProposalWrapper(
             entityUrn=chart_urn, aspect=StatusClass(removed=False)
@@ -1469,7 +1476,7 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
 
         yield MetadataChangeProposalWrapper(
             entityUrn=dataset_urn,
-            aspect=SubTypesClass(typeNames=[DatasetSubTypes.VIEW]),
+            aspect=SubTypesClass(typeNames=["Intelligent Cube"]),
         ).as_workunit()
         yield MetadataChangeProposalWrapper(
             entityUrn=dataset_urn, aspect=StatusClass(removed=False)
@@ -1520,19 +1527,19 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 dataset_urn, cube, project, sql=prefetched_sql
             )
 
-    # MSTR report subtype → human-readable label
+    # MSTR report subtype → DataHub display label (matches MSTR UI terminology)
     _REPORT_SUBTYPE_NAMES: Dict[int, str] = {
-        768: "grid",
-        769: "graph",
-        770: "grid_graph",
-        774: "non_interactive",
-        776: "intelligent_cube",
-        777: "multi_layer_grid",
+        768: "Grid Report",
+        769: "Graph Report",
+        770: "Grid and Graph Report",
+        774: "Non-Interactive Report",
+        776: "Intelligent Cube",       # shouldn't reach here — cubes use _process_cube
+        777: "Multi-Layer Grid Report",
     }
 
     @classmethod
     def _report_subtype_name(cls, subtype: int) -> str:
-        return cls._REPORT_SUBTYPE_NAMES.get(subtype, f"report_{subtype}")
+        return cls._REPORT_SUBTYPE_NAMES.get(subtype, BIAssetSubTypes.REPORT)
 
     def _make_certified_tag(self) -> GlobalTagsClass:
         """Emit a 'Certified' tag for objects with certifiedInfo.certified=true."""
@@ -1897,135 +1904,67 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 platform=plat,
             )
 
-    # ── Document datasource entity ───────────────────────────────────────────
+    # ── Per-dataset warehouse table helper ───────────────────────────────────
 
-    def _emit_document_datasource(
-        self,
-        dashboard: Dict[str, Any],
-        project: Dict[str, Any],
-        dashboard_urn: str,
-    ) -> Iterable[MetadataWorkUnit]:
-        """
-        Emit a companion dataset entity for a legacy document that carries its
-        consolidated warehouse lineage.
-
-        Why a companion dataset instead of putting lineage on the dashboard:
-          - DataHub's entity registry does not support upstreamLineage on dashboard entities
-          - Attempting to emit it causes a GMS 500 ("Unknown aspect upstreamLineage for entity dashboard")
-          - A companion dataset entity with a clear naming convention solves this cleanly
-
-        The companion dataset:
-          - Has the same name as the document + " (Data Source)" suffix in properties
-          - Carries upstreamLineage with ALL warehouse tables across all embedded datasets
-            (consolidated — not per-embedded-dataset, which causes the spaghetti graph)
-          - Links back to the dashboard via datasetEdges in dashboardInfo (set by caller)
-          - Is owned by the same owner as the dashboard
-          - Subtyped as "Document Data Source" so users understand what it represents
-
-        The warehouse SQL is fetched by creating a document instance (POST /api/documents/{id}/instances)
-        and reading the datasets/sqlView endpoint — confirmed working in live testing
-        with 97 unique tables from 'Salon Sales To Plan' on jcpenney-qa.cloud.strategy.com.
-        """
-        project_id = project["id"]
-        datasource_urn = self._document_datasource_urn(dashboard["id"], project)
-        doc_name = dashboard.get("name", dashboard["id"])
-
-        ds_props = self._build_common_custom_props(dashboard, project)
-        ds_props["dashboard_id"] = dashboard["id"]
-        ds_props["document_name"] = doc_name
-        ds_props["entity_role"] = "document_datasource"
-
-        yield MetadataChangeProposalWrapper(
-            entityUrn=datasource_urn,
-            aspect=DatasetPropertiesClass(
-                name=f"{doc_name} (Data Source)",
-                description=(
-                    f"Consolidated warehouse data source for the MSTR document '{doc_name}'. "
-                    f"Contains the union of all warehouse tables referenced by embedded datasets."
-                ),
-                customProperties=ds_props,
-                externalUrl=self._build_dashboard_url(dashboard["id"], project_id),
-            ),
-        ).as_workunit()
-
-        yield MetadataChangeProposalWrapper(
-            entityUrn=datasource_urn,
-            aspect=SubTypesClass(typeNames=["Document Data Source"]),
-        ).as_workunit()
-        yield MetadataChangeProposalWrapper(
-            entityUrn=datasource_urn, aspect=StatusClass(removed=False)
-        ).as_workunit()
-        yield MetadataChangeProposalWrapper(
-            entityUrn=datasource_urn, aspect=self._make_platform_instance()
-        ).as_workunit()
-        yield MetadataChangeProposalWrapper(
-            entityUrn=datasource_urn,
-            aspect=ContainerClass(container=self._project_key(project).as_urn()),
-        ).as_workunit()
-
-        if self.config.include_ownership and dashboard.get("owner"):
-            yield from self._emit_ownership(datasource_urn, dashboard["owner"])
-
-        # Fetch consolidated warehouse lineage via document instance + datasets/sqlView
-        if self.config.include_warehouse_lineage:
-            yield from self._emit_document_warehouse_lineage(
-                dashboard["id"], project_id, doc_name, datasource_urn
-            )
-
-    def _emit_document_warehouse_lineage(
+    def _fetch_per_dataset_tables(
         self,
         document_id: str,
         project_id: str,
         doc_name: str,
-        datasource_urn: str,
-    ) -> Iterable[MetadataWorkUnit]:
+        *,
+        is_legacy: bool,
+    ) -> Dict[str, List[str]]:
         """
-        Fetch consolidated warehouse table lineage for a legacy document.
+        Create a document/dossier instance, fetch datasets/sqlView, and return a
+        mapping of dataset name → list of warehouse dataset URNs.
 
-        Creates a document instance, reads the datasets/sqlView endpoint which returns
-        SQL for all embedded datasets, parses all unique warehouse tables across them,
-        and emits a single upstreamLineage with the consolidated set.
+        Each entry in the sqlView response has a ``name`` field that matches the
+        embedded dataset name from the document definition.  That name is used as
+        the join key so each chart stub gets only the warehouse tables it queries.
 
-        This produces a clean single-node lineage graph:
-          Teradata tables (N) → Document Data Source → Dashboard
-        instead of:
-          Teradata tables (N×M) → M chart stubs → Dashboard
-
-        The document instance is always cleaned up in the finally block.
+        The instance is always cleaned up in the finally block.
         """
         instance_id: Optional[str] = None
         try:
-            instance_id = self.client.create_document_instance(document_id, project_id)
+            if is_legacy:
+                instance_id = self.client.create_document_instance(document_id, project_id)
+            else:
+                instance_id = self.client.create_dossier_instance(document_id, project_id)
         except Exception as e:
-            logger.debug("Could not create document instance for %s: %s", doc_name, e)
+            logger.debug(
+                "Could not create instance for document '%s': %s", doc_name, e
+            )
+            return {}
 
         if not instance_id:
-            logger.debug(
-                "Skipping warehouse lineage for document %s — instance creation failed",
-                doc_name,
-            )
-            return
+            return {}
 
-        all_tables: set = set()
-        all_sql_parts: List[str] = []
+        result: Dict[str, List[str]] = {}
         try:
             datasets_sql = self.client.get_dossier_datasets_sql(
                 document_id, instance_id, project_id
             )
             for ds in datasets_sql:
-                sql = ds.get("sqlStatement", "") if isinstance(ds, dict) else ""
-                if sql:
-                    tables = _extract_tables_from_sql(sql)
-                    all_tables.update(tables)
-                    all_sql_parts.append(sql)
+                if not isinstance(ds, dict):
+                    continue
+                name = ds.get("name", "")
+                sql = ds.get("sqlStatement", "")
+                if not name or not sql:
+                    continue
+                tables = _extract_tables_from_sql(sql)
+                urns = self._tables_to_urns(sorted(tables))
+                if urns:
+                    result[name] = urns
             logger.info(
-                "Document '%s': consolidated %s unique warehouse tables from %s embedded datasets",
+                "Document '%s': per-dataset tables resolved for %s/%s datasets",
                 doc_name,
-                len(all_tables),
+                len(result),
                 len(datasets_sql),
             )
         except Exception as e:
-            logger.warning("Failed to fetch document SQL for %s: %s", doc_name, e)
+            logger.warning(
+                "Failed to fetch per-dataset SQL for '%s': %s", doc_name, e
+            )
         finally:
             if instance_id:
                 try:
@@ -2035,21 +1974,7 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 except Exception:
                     pass
 
-        if not all_tables:
-            return
-
-        upstream_urns = self._tables_to_urns(sorted(all_tables))
-        if upstream_urns:
-            yield from self._emit_upstream_lineage(datasource_urn, upstream_urns)
-
-        if self.config.include_column_lineage and all_sql_parts:
-            combined_sql = "\n\n".join(all_sql_parts)
-            plat = self._warehouse_platform or self.platform
-            yield from self._emit_column_lineage_from_sql(
-                sql=combined_sql,
-                downstream_urn=datasource_urn,
-                platform=plat,
-            )
+        return result
 
     # ── Dataset processing ────────────────────────────────────────────────────
 
@@ -2077,7 +2002,7 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
         ).as_workunit()
         yield MetadataChangeProposalWrapper(
             entityUrn=dataset_urn,
-            aspect=SubTypesClass(typeNames=[DatasetSubTypes.VIEW]),
+            aspect=SubTypesClass(typeNames=["Dataset"]),
         ).as_workunit()
         yield MetadataChangeProposalWrapper(
             entityUrn=dataset_urn, aspect=StatusClass(removed=False)
@@ -2257,29 +2182,6 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
             ).as_workunit()
 
     # ── Utility helpers ───────────────────────────────────────────────────────
-
-    def _document_datasource_urn(
-        self, dashboard_id: str, project: Dict[str, Any]
-    ) -> str:
-        """
-        Build the URN for a legacy document's companion datasource dataset entity.
-
-        Legacy documents (subtype 14081) are modeled as two linked entities:
-          - dashboard entity  → carries UI metadata, owner, certification, charts[]
-          - dataset entity    → carries consolidated upstreamLineage from all
-                                embedded dataset SQL views (the warehouse tables)
-
-        The dataset URN uses the suffix "__datasource" to distinguish it from
-        cube/report dataset entities in the same project namespace.
-        URN pattern: urn:li:dataset:(urn:li:dataPlatform:microstrategy,
-                       {project_id}.{dashboard_id}.__datasource, PROD)
-        """
-        return make_dataset_urn_with_platform_instance(
-            platform=self.platform,
-            name=f"{project['id']}.{dashboard_id}.__datasource",
-            env=self.config.env,
-            platform_instance=self.config.platform_instance,
-        )
 
     def _project_key(self, project: Dict[str, Any]) -> ProjectKey:
         return ProjectKey(
