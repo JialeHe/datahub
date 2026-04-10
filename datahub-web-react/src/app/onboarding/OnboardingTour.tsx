@@ -1,5 +1,5 @@
 import { Button } from 'antd';
-import React, { useContext, useEffect, useMemo } from 'react';
+import React, { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import Tour from 'reactour';
 import { useTheme } from 'styled-components';
@@ -64,6 +64,20 @@ export const OnboardingTour = ({ stepIds }: Props) => {
         }
     }, [filteredSteps.length, tourReshow, shouldSkipOnboardingTour, isHomepage, isTourOpen, setIsTourOpen]);
 
+    const prevStepRef = useRef<number | null>(null);
+    const [updateKey, setUpdateKey] = useState(0);
+
+    const handleStepChange = (currStep: number) => {
+        if (prevStepRef.current !== currStep) {
+            const step = filteredSteps[currStep];
+            if (step && step.tabName) {
+                // Force Reactour to recalculate highlight after action scrolls the tab
+                setUpdateKey((prev) => prev + 1);
+            }
+            prevStepRef.current = currStep;
+        }
+    };
+
     function closeTour() {
         setIsTourOpen(false);
         setTourReshow(false);
@@ -115,6 +129,8 @@ export const OnboardingTour = ({ stepIds }: Props) => {
             scrollDuration={500}
             accentColor={accentColor}
             lastStepNextButton={<Button>Let&apos;s go!</Button>}
+            getCurrentStep={handleStepChange}
+            update={updateKey}
         />
     );
 };
