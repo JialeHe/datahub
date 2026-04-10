@@ -55,7 +55,7 @@ export function useSetAppTheme() {
         } else if (isDarkMode) {
             updateTheme(themes.themeV2Dark);
         } else {
-            updateTheme(themes.themeV1);
+            updateTheme(themes.themeV2);
         }
     }, [customThemeId, isDarkMode, updateTheme]);
 }
