@@ -389,7 +389,7 @@ export const NavSidebar = () => {
             },
             {
                 type: NavBarMenuItemTypes.Dropdown,
-                title: 'Help',
+                title: 'Resources',
                 icon: <Question />,
                 selectedIcon: <Question weight="fill" />,
                 key: 'help',
