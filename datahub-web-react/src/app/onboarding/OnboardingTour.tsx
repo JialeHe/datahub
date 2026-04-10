@@ -1,5 +1,5 @@
 import { Button } from 'antd';
-import React, { useContext, useEffect } from 'react';
+import React, { useContext, useEffect, useMemo } from 'react';
 import { useLocation } from 'react-router-dom';
 import Tour from 'reactour';
 import { useTheme } from 'styled-components';
@@ -21,7 +21,8 @@ export const OnboardingTour = ({ stepIds }: Props) => {
     const { educationSteps, setEducationSteps, educationStepIdsAllowlist } = useContext(EducationStepsContext);
     const userUrn = useUserContext()?.user?.urn;
     const theme = useTheme();
-    const { isTourOpen, tourReshow, setTourReshow, setIsTourOpen } = useContext(OnboardingContext);
+    const { isTourOpen, tourReshow, setTourReshow, setIsTourOpen, setIsOnboardingAvailable } =
+        useContext(OnboardingContext);
     const location = useLocation();
     const accentColor = theme.colors.bgSurfaceBrand;
 
@@ -77,9 +78,32 @@ export const OnboardingTour = ({ stepIds }: Props) => {
         });
     }
 
+    const canTourBeShown = useMemo(() => {
+        // Do not show tour for home page (see `WelcomeToDataHubModal`)
+        if (isHomepage) return false;
+
+        return true;
+    }, [isHomepage]);
+
+    const canTourBeReshown = useMemo(() => {
+        // should have `filteredSteps` when `tourReshow` is true
+        // see `getStepsToRender` for details
+        if (!educationSteps) return false;
+        return canTourBeShown && stepIds.length > 0;
+    }, [canTourBeShown, educationSteps, stepIds]);
+
+    // Register and unregister the tour availability in the context
+    // FYI: it's using to hide the tour button when tour is not available
+    useEffect(() => {
+        setIsOnboardingAvailable(canTourBeReshown);
+        return () => setIsOnboardingAvailable(false);
+    }, [canTourBeReshown, setIsOnboardingAvailable]);
+
     // For automatic tours (tourReshow=false), only check if we have steps to show and not on homepage
     // For manual tours (tourReshow=true), also check the global skip flag
-    if (!filteredSteps.length || isHomepage || (tourReshow && shouldSkipOnboardingTour)) return null;
+    if (!canTourBeShown || !filteredSteps.length || (tourReshow && shouldSkipOnboardingTour)) {
+        return null;
+    }
 
     return (
         <Tour
