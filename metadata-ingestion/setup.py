@@ -748,6 +748,7 @@ plugins: Dict[str, Set[str]] = {
     "superset": superset_common,
     "preset": superset_common,
     "tableau": {"tableauserverclient>=0.24.0,<=0.40"} | sqlglot_lib,
+    "microstrategy": usage_common | sqlglot_lib,
     "teradata": sql_common
     | usage_common
     | sqlglot_lib

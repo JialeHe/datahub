@@ -7,6 +7,7 @@ These integration tests verify the MicroStrategy connector against the public de
 ## Test Environment
 
 **Demo Instance**: https://demo.microstrategy.com/MicroStrategyLibrary
+
 - **Authentication**: Anonymous access (Guest user)
 - **Access Level**: Public, no credentials required
 - **No Docker setup needed**: Uses live demo instance
@@ -14,6 +15,7 @@ These integration tests verify the MicroStrategy connector against the public de
 ## Current State: Empty Test Instance
 
 ⚠️ **IMPORTANT**: The MicroStrategy demo instance currently has **empty projects** with:
+
 - 0 dashboards
 - 0 reports
 - 0 cubes
@@ -35,6 +37,7 @@ This is **documented expected behavior** from the implementation phase:
 If the demo instance had data, the golden file would include:
 
 **Container Hierarchy** (CURRENTLY PRESENT):
+
 - `containerProperties` - Project metadata
 - `subTypes` - Container type (PROJECT)
 - `dataPlatformInstance` - Platform linkage
@@ -42,6 +45,7 @@ If the demo instance had data, the golden file would include:
 - `browsePathsV2` - Navigation paths
 
 **Dashboard Entities** (MISSING - no dashboards in demo):
+
 - `dashboardInfo` - Dashboard metadata (name, description, URL)
 - `dashboardKey` - Dashboard identifiers
 - `upstreamLineage` - Lineage to cubes
@@ -49,16 +53,19 @@ If the demo instance had data, the golden file would include:
 - `customProperties` - MicroStrategy-specific properties
 
 **Chart Entities** (MISSING - no reports in demo):
+
 - `chartInfo` - Report metadata
 - `chartKey` - Report identifiers
 - `upstreamLineage` - Lineage to cubes
 
 **Dataset Entities** (MISSING - no cubes/datasets in demo):
+
 - `datasetProperties` - Cube/dataset metadata
 - `schemaMetadata` - Attributes and metrics
 - `upstreamLineage` - Lineage from source tables (if available)
 
 **Lineage Aspects** (MISSING - no entities to link):
+
 - Coarse-grained: Dashboard → Cube
 - Fine-grained: Column-level lineage
 
@@ -67,12 +74,14 @@ If the demo instance had data, the golden file would include:
 ### 1. Integration Test (`test_microstrategy_ingest`)
 
 **What it tests**:
+
 - ✅ Authentication with demo instance (anonymous access)
 - ✅ Project extraction and container generation
 - ✅ Full ingestion pipeline runs successfully
 - ✅ Output matches golden file
 
 **What it WOULD test with populated instance**:
+
 - Dashboard extraction with metadata
 - Report extraction as chart entities
 - Cube extraction with schema (attributes, metrics)
@@ -82,10 +91,12 @@ If the demo instance had data, the golden file would include:
 ### 2. Connection Tests
 
 **Valid credentials** (`test_connection_with_valid_credentials`):
+
 - ✅ Verifies anonymous authentication succeeds
 - ✅ Confirms API connectivity
 
 **Invalid URL** (`test_connection_with_invalid_url`):
+
 - ✅ Verifies connection failure is detected
 - ✅ Confirms error handling works
 
@@ -118,10 +129,12 @@ To create comprehensive integration tests with populated test data, you have sev
 ### Option 1: MicroStrategy Trial Instance (Recommended)
 
 1. **Sign up for MicroStrategy Cloud Trial**:
+
    - Visit https://www.microstrategy.com/en/trial
    - Create a trial instance with sample data
 
 2. **Update test configuration**:
+
    ```yaml
    # tests/integration/microstrategy/microstrategy_to_file.yml
    source:
@@ -135,6 +148,7 @@ To create comprehensive integration tests with populated test data, you have sev
    ```
 
 3. **Set environment variables**:
+
    ```bash
    export MSTR_USERNAME="your-username"
    export MSTR_PASSWORD="your-password"
@@ -150,8 +164,9 @@ To create comprehensive integration tests with populated test data, you have sev
 If MicroStrategy provides an official Docker image:
 
 1. **Create docker-compose.yml**:
+
    ```yaml
-   version: '3.8'
+   version: "3.8"
    services:
      microstrategy:
        image: microstrategy/library:latest
@@ -164,11 +179,13 @@ If MicroStrategy provides an official Docker image:
    ```
 
 2. **Start the container**:
+
    ```bash
    docker-compose up -d
    ```
 
 3. **Populate test data** (via MicroStrategy UI or REST API):
+
    - Create 3-5 projects
    - Add 2+ folders per project
    - Create 3+ dashboards with visualizations
@@ -182,6 +199,7 @@ If MicroStrategy provides an official Docker image:
 If real MicroStrategy instances are unavailable, create a mock server:
 
 1. **Create mock server** (`tests/integration/microstrategy/mock_server.py`):
+
    ```python
    from flask import Flask, jsonify, request
 
@@ -227,6 +245,7 @@ If real MicroStrategy instances are unavailable, create a mock server:
    ```
 
 2. **Start mock server in tests**:
+
    ```python
    import pytest
    from threading import Thread
@@ -245,32 +264,38 @@ If real MicroStrategy instances are unavailable, create a mock server:
 For the integration test to meet DataHub standards, ensure your test environment includes:
 
 **Projects (Containers)**:
+
 - At least 3 projects
 - Each with: name, description, id
 - Example: "Sales Analytics", "Marketing Dashboards", "Finance Reports"
 
 **Folders (Nested Containers)**:
+
 - At least 2 folders per project
 - Parent-child relationships for hierarchy testing
 - Example: "Q1 Reports" → "Regional Sales"
 
 **Dashboards**:
+
 - At least 3 dashboards
 - Each with 2-3 visualizations
 - Must include: chapters[], visualizations[], owner
 - Example: "Executive Dashboard" with "Revenue Chart", "Sales Map", "KPI Grid"
 
 **Reports**:
+
 - At least 3 reports
 - Each with dataSource reference to a cube (for lineage)
 - Must include: type, description, owner
 
 **Intelligent Cubes**:
+
 - At least 2 cubes with schema
 - Attributes: at least 3 (e.g., Region, Product, Date)
 - Metrics: at least 2 (e.g., Revenue, Units Sold)
 
 **Expected Golden File Output**:
+
 - Size: > 10KB (not 2.5KB)
 - Events: > 50 metadata events (not ~8)
 - Contains: dashboardInfo, chartInfo, schemaMetadata, upstreamLineage aspects
@@ -291,6 +316,7 @@ jq '[.[] | .aspect."json"."$type"] | unique' tests/integration/microstrategy/mic
 ```
 
 Expected output:
+
 - File size: > 10KB
 - Event count: > 50
 - Aspect types: containerProperties, dashboardInfo, chartInfo, datasetProperties, schemaMetadata, upstreamLineage, ownership
@@ -308,6 +334,7 @@ When a populated test instance becomes available:
 ## Comparison to Production Connectors
 
 Most DataHub API sources (Looker, Tableau, PowerBI) have comprehensive integration tests with:
+
 - Golden files > 20KB with 100+ events
 - Multiple entity types
 - Complete lineage verification

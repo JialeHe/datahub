@@ -1714,15 +1714,34 @@ class TestReportPatternFiltering:
     def test_report_pattern_allow_filters_by_name(self) -> None:
         """Only reports matching the allow pattern should emit chartInfo."""
         reports = [
-            {"id": "R1", "name": "Revenue Report", "description": "", "type": 3, "subtype": 768},
-            {"id": "R2", "name": "Cost Report", "description": "", "type": 3, "subtype": 768},
-            {"id": "R3", "name": "Revenue Summary", "description": "", "type": 3, "subtype": 768},
+            {
+                "id": "R1",
+                "name": "Revenue Report",
+                "description": "",
+                "type": 3,
+                "subtype": 768,
+            },
+            {
+                "id": "R2",
+                "name": "Cost Report",
+                "description": "",
+                "type": 3,
+                "subtype": 768,
+            },
+            {
+                "id": "R3",
+                "name": "Revenue Summary",
+                "description": "",
+                "type": 3,
+                "subtype": 768,
+            },
         ]
         wus = self._run(reports, {"allow": ["^Revenue.*"]})
         chart_urns = {
             wu.metadata.entityUrn
             for wu in wus
-            if hasattr(wu.metadata, "aspectName") and wu.metadata.aspectName == "chartInfo"
+            if hasattr(wu.metadata, "aspectName")
+            and wu.metadata.aspectName == "chartInfo"
         }
         # R1 and R3 match the allow pattern; R2 should be excluded
         assert any("R1" in u for u in chart_urns)
@@ -1732,14 +1751,27 @@ class TestReportPatternFiltering:
     def test_report_pattern_deny_excludes_by_name(self) -> None:
         """Reports matching the deny pattern should be skipped."""
         reports = [
-            {"id": "R1", "name": "Draft Revenue", "description": "", "type": 3, "subtype": 768},
-            {"id": "R2", "name": "Published Revenue", "description": "", "type": 3, "subtype": 768},
+            {
+                "id": "R1",
+                "name": "Draft Revenue",
+                "description": "",
+                "type": 3,
+                "subtype": 768,
+            },
+            {
+                "id": "R2",
+                "name": "Published Revenue",
+                "description": "",
+                "type": 3,
+                "subtype": 768,
+            },
         ]
         wus = self._run(reports, {"deny": ["^Draft.*"]})
         chart_urns = {
             wu.metadata.entityUrn
             for wu in wus
-            if hasattr(wu.metadata, "aspectName") and wu.metadata.aspectName == "chartInfo"
+            if hasattr(wu.metadata, "aspectName")
+            and wu.metadata.aspectName == "chartInfo"
         }
         assert any("R2" in u for u in chart_urns)
         assert not any("R1" in u for u in chart_urns)
