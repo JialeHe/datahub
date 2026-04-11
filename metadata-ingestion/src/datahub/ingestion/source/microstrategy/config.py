@@ -309,6 +309,18 @@ class MicroStrategyConfig(
         ),
     )
 
+    max_workers: int = Field(
+        default=4,
+        ge=1,
+        description=(
+            "Maximum number of threads used to pre-fetch cube metadata in parallel. "
+            "Each cube requires up to two API calls (sqlView + schema); running these "
+            "concurrently reduces wall-clock ingestion time when many cubes are present. "
+            "Set to 1 to disable parallelism (serial fetch, easier to debug). "
+            "Values above 10 risk hitting MicroStrategy REST API rate limits."
+        ),
+    )
+
     # Stateful ingestion
     stateful_ingestion: Optional[StatefulStaleMetadataRemovalConfig] = Field(
         default=None,

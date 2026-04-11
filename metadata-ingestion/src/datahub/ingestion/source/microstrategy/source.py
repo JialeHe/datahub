@@ -1,3 +1,4 @@
+import concurrent.futures
 import logging
 import re
 from collections import defaultdict
@@ -283,6 +284,23 @@ class CubeLineageResult(NamedTuple):
     sql: Optional[str]
 
 
+class _CubePrefetch(NamedTuple):
+    """Pre-fetched API results for a single cube (fetched in parallel before emit loop).
+
+    sql semantics (three states):
+      None  — not fetched: config disabled OR prefetch raised an exception.
+              _process_cube will retry via the live-fetch fallback.
+      ""    — fetched cleanly; cube has no SQL view (not published, dynamic sourcing).
+              _process_cube uses this value directly — no retry needed.
+      <str> — fetched cleanly; contains the SQL statement.
+    """
+
+    sql: Optional[str]
+    # None means not fetched (config disabled) or fetch failed; _process_cube
+    # will call get_cube live and _build_cube_schema_metadata handles the result.
+    cube_data: Optional[Dict[str, Any]]
+
+
 def _extract_tables_from_sql(sql: str) -> List[str]:
     """
     Parse source warehouse table names from MicroStrategy-generated SQL.
@@ -442,6 +460,12 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
         self.dataset_registry: Dict[str, _DatasetRegistryEntry] = {}
         self._datasets_by_project: Dict[str, List[Dict[str, Any]]] = {}
         self._cubes_by_project: Dict[str, List[Dict[str, Any]]] = {}
+
+        # Expression cache: keyed by "attr:{project_id}:{attr_id}" or
+        # "metric:{project_id}:{metric_id}".  Stores the raw expression string
+        # (empty string when the API returned nothing) so each unique ID is only
+        # fetched once even when the same attribute/metric appears in multiple cubes.
+        self._expr_cache: Dict[str, str] = {}
 
         # Detected warehouse platform — populated at ingestion startup by
         # _detect_warehouse_platform().  Used instead of the removed
@@ -608,9 +632,7 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
         Returns True if a single unambiguous platform was detected.
         """
         datasources = self.client.get_datasources()
-        real = _filter_real_platforms(
-            self._platforms_from_datasource_list(datasources)
-        )
+        real = _filter_real_platforms(self._platforms_from_datasource_list(datasources))
         if len(real) == 1:
             platform = next(iter(real))
             logger.info(
@@ -961,6 +983,46 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 "report-fetch-failed", context=project_name, exc=e
             )
 
+    @property
+    def _should_fetch_cube_sql(self) -> bool:
+        """True when at least one feature needs the cube SQL view."""
+        return self.config.include_cube_view_sql or (
+            self.config.include_lineage and self.config.include_warehouse_lineage
+        )
+
+    def _prefetch_cube(
+        self, cube: Dict[str, Any], project: Dict[str, Any]
+    ) -> _CubePrefetch:
+        """Fetch sqlView and cube schema data for one cube (called from a thread pool)."""
+        project_id = project["id"]
+        sql: Optional[str] = None
+        if self._should_fetch_cube_sql:
+            try:
+                raw = self.client.get_cube_sql_view(cube["id"], project_id)
+                sql = raw if isinstance(raw, str) else ""
+            except Exception as e:
+                # Leave sql=None so _process_cube retries via live-fetch fallback.
+                logger.warning(
+                    "Could not prefetch sqlView for cube %s: %s; will retry live",
+                    cube.get("name", cube["id"]),
+                    e,
+                )
+
+        cube_data: Optional[Dict[str, Any]] = None
+        if self.config.include_cube_schema:
+            try:
+                raw_data = self.client.get_cube(cube["id"], project_id)
+                cube_data = raw_data if isinstance(raw_data, dict) else None
+            except Exception as e:
+                # Leave cube_data=None; _build_cube_schema_metadata will fetch live.
+                logger.warning(
+                    "Could not prefetch schema for cube %s: %s; schema may be skipped",
+                    cube.get("name", cube["id"]),
+                    e,
+                )
+
+        return _CubePrefetch(sql=sql, cube_data=cube_data)
+
     def _yield_cube_workunits(
         self,
         project: Dict[str, Any],
@@ -976,22 +1038,40 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
             self._cubes_by_project[project_id] = cubes
             logger.info("Found %s cubes in %s", len(cubes), project_name)
             driven = self._dashboard_driven_mode()
-            matched = 0
-            for cube in cubes:
-                if driven:
-                    # Dashboard-driven: only process cubes referenced by matched dashboards
-                    if cube["id"] not in self._dashboard_referenced_ids:
-                        continue
-                elif not self.config.cube_pattern.allowed(cube.get("name", "")):
-                    continue
-                matched += 1
-                yield from self._process_cube(cube, project)
+
+            matched_cubes = [
+                cube
+                for cube in cubes
+                if (
+                    (driven and cube["id"] in self._dashboard_referenced_ids)
+                    or (
+                        not driven
+                        and self.config.cube_pattern.allowed(cube.get("name", ""))
+                    )
+                )
+            ]
+
             if driven:
                 logger.info(
-                    "Dashboard-driven: ingested %s of %s cubes (referenced by matched dashboards)",
-                    matched,
+                    "Dashboard-driven: ingesting %s of %s cubes (referenced by matched dashboards)",
+                    len(matched_cubes),
                     len(cubes),
                 )
+
+            # Pre-fetch sqlView + schema for all matched cubes concurrently to
+            # reduce wall-clock time.  max_workers=1 disables parallelism.
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=self.config.max_workers
+            ) as executor:
+                prefetches = list(
+                    executor.map(
+                        lambda c: self._prefetch_cube(c, project), matched_cubes
+                    )
+                )
+
+            for cube, prefetch in zip(matched_cubes, prefetches, strict=True):
+                yield from self._process_cube(cube, project, prefetch=prefetch)
+
         except Exception as e:
             logger.warning("Failed to get cubes for %s: %s", project_name, e)
             self.report.report_warning("cube-fetch-failed", context=project_name, exc=e)
@@ -1548,7 +1628,10 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
     # ── Cube processing ───────────────────────────────────────────────────────
 
     def _process_cube(
-        self, cube: Dict[str, Any], project: Dict[str, Any]
+        self,
+        cube: Dict[str, Any],
+        project: Dict[str, Any],
+        prefetch: Optional[_CubePrefetch] = None,
     ) -> Iterable[Union[MetadataWorkUnit, Entity]]:
         dataset_urn = make_dataset_urn_with_platform_instance(
             platform=self.platform,
@@ -1561,11 +1644,12 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
         cube_props["cube_id"] = cube["id"]
         cube_props["cube_type"] = "intelligent_cube"
 
-        fetch_cube_sql = self.config.include_cube_view_sql or (
-            self.config.include_lineage and self.config.include_warehouse_lineage
-        )
+        # Use pre-fetched SQL when available (sql=None means not fetched or prefetch
+        # failed — fall through to live fetch; sql="" means cleanly empty, use as-is).
         prefetched_sql: Optional[str] = None
-        if fetch_cube_sql:
+        if prefetch is not None and prefetch.sql is not None:
+            prefetched_sql = prefetch.sql
+        elif self._should_fetch_cube_sql:
             try:
                 raw_sql = self.client.get_cube_sql_view(cube["id"], project["id"])
                 prefetched_sql = raw_sql if isinstance(raw_sql, str) else ""
@@ -1592,14 +1676,15 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
 
         schema_metadata: Optional[SchemaMetadataClass] = None
         if self.config.include_cube_schema:
-            schema_metadata = self._build_cube_schema_metadata(cube, project["id"])
+            prefetched_cube_data = prefetch.cube_data if prefetch is not None else None
+            schema_metadata = self._build_cube_schema_metadata(
+                cube, project["id"], prefetched_data=prefetched_cube_data
+            )
 
         upstreams: Optional[UpstreamLineageClass] = None
         sql_for_col_lineage: Optional[str] = None
         if self.config.include_lineage and self.config.include_warehouse_lineage:
-            clu = self._build_cube_warehouse_upstream(
-                cube, project, sql=prefetched_sql
-            )
+            clu = self._build_cube_warehouse_upstream(cube, project, sql=prefetched_sql)
             upstreams = clu.upstream_lineage
             sql_for_col_lineage = clu.sql
 
@@ -1753,9 +1838,12 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 assert (
                     project_id is not None
                 )  # guaranteed by fetch_formulas check above
-                expr = self.client.get_attribute_expression(attr_id, project_id)
-                if expr:
-                    description = expr
+                cache_key = f"attr:{project_id}:{attr_id}"
+                if cache_key not in self._expr_cache:
+                    self._expr_cache[cache_key] = (
+                        self.client.get_attribute_expression(attr_id, project_id) or ""
+                    )
+                description = self._expr_cache[cache_key] or None
 
             if not forms:
                 field_path = attr_name
@@ -1812,9 +1900,12 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 assert (
                     project_id is not None
                 )  # guaranteed by fetch_formulas check above
-                expr = self.client.get_metric_expression(metric_id, project_id)
-                if expr:
-                    description = expr
+                cache_key = f"metric:{project_id}:{metric_id}"
+                if cache_key not in self._expr_cache:
+                    self._expr_cache[cache_key] = (
+                        self.client.get_metric_expression(metric_id, project_id) or ""
+                    )
+                description = self._expr_cache[cache_key] or None
 
             fields.append(
                 InputFieldClass(
@@ -2094,11 +2185,21 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
         return owners
 
     def _build_cube_schema_metadata(
-        self, cube: Dict[str, Any], project_id: str
+        self,
+        cube: Dict[str, Any],
+        project_id: str,
+        prefetched_data: Optional[Dict[str, Any]] = None,
     ) -> Optional[SchemaMetadataClass]:
         """Build SchemaMetadataClass for a cube. Returns None on error or empty schema."""
         try:
-            raw = self.client.get_cube(cube["id"], project_id)
+            # Use pre-fetched cube data when available (avoids a redundant API call
+            # when _yield_cube_workunits has already fetched schema data in parallel).
+            raw: Optional[Dict[str, Any]]
+            if prefetched_data is not None:
+                raw = prefetched_data
+            else:
+                fetched = self.client.get_cube(cube["id"], project_id)
+                raw = fetched if isinstance(fetched, dict) else None
             if not raw or not isinstance(raw, dict):
                 return None
             if _is_iserver_error(raw, ISERVER_CUBE_NOT_PUBLISHED):
@@ -2232,7 +2333,9 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
             UpstreamClass(dataset=u, type=DatasetLineageTypeClass.TRANSFORMED)
             for u in upstream_urns
         ]
-        return CubeLineageResult(UpstreamLineageClass(upstreams=upstreams), resolved_sql)
+        return CubeLineageResult(
+            UpstreamLineageClass(upstreams=upstreams), resolved_sql
+        )
 
     # ── Utility helpers ───────────────────────────────────────────────────────
 
