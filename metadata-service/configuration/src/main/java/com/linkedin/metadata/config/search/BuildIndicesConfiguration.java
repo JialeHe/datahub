@@ -13,6 +13,15 @@ import lombok.experimental.Accessors;
 @Builder(toBuilder = true)
 public class BuildIndicesConfiguration {
 
+  /** Default socket timeout in seconds for slow index operations. */
+  public static final int DEFAULT_SLOW_OPERATION_TIMEOUT_SECONDS = 180;
+
+  /** Default max attempts for getCount retry. */
+  public static final int DEFAULT_COUNT_RETRY_MAX_ATTEMPTS = 2;
+
+  /** Default wait in seconds between getCount retries. */
+  public static final int DEFAULT_COUNT_RETRY_WAIT_SECONDS = 5;
+
   private boolean cloneIndices;
   private boolean allowDocCountMismatch;
   private String retentionUnit;
@@ -27,4 +36,43 @@ public class BuildIndicesConfiguration {
 
   /** Minutes without document-count progress before re-triggering reindex. Default 5. */
   private Integer reindexNoProgressRetryMinutes;
+
+  /**
+   * Socket timeout in seconds for slow index operations (count, refresh, createIndex, reindex,
+   * listTasks, etc.). Set via application.yaml. Default {@link
+   * #DEFAULT_SLOW_OPERATION_TIMEOUT_SECONDS}.
+   */
+  private int slowOperationTimeoutSeconds = DEFAULT_SLOW_OPERATION_TIMEOUT_SECONDS;
+
+  /**
+   * Max attempts for getCount retry on timeout/OpenSearchException. Set via application.yaml.
+   * Default {@link #DEFAULT_COUNT_RETRY_MAX_ATTEMPTS}.
+   */
+  private int countRetryMaxAttempts = DEFAULT_COUNT_RETRY_MAX_ATTEMPTS;
+
+  /**
+   * Wait duration in seconds between getCount retries. Set via application.yaml. Default {@link
+   * #DEFAULT_COUNT_RETRY_WAIT_SECONDS}.
+   */
+  private int countRetryWaitSeconds = DEFAULT_COUNT_RETRY_WAIT_SECONDS;
+
+  /**
+   * When true, createIndex retries once on IOException if index does not exist. Set via
+   * application.yaml.
+   */
+  private boolean createIndexRetryEnabled = true;
+
+  /**
+   * When true, enables non-blocking incremental reindex. Instead of blocking writes and swapping
+   * aliases in-place, creates 'next' indices, copies data via ES _reindex, and a catch-up step
+   * running to get the next index in line with any missed writes
+   */
+  private boolean incrementalReindexEnabled;
+
+  /**
+   * When true (and incrementalReindexEnabled is also true), the MAE consumer dual-writes to the old
+   * backing index for rollback safety. When false, Phase 2 marks all completed indices as
+   * DUAL_WRITE_DISABLED to prevent a later enable from writing to stale or deleted old indices.
+   */
+  private boolean rollbackDualWriteEnabled;
 }
