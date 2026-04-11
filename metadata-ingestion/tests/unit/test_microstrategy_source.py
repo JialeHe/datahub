@@ -1,6 +1,5 @@
 """Unit tests for MicroStrategy source connector."""
 
-import logging
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 from unittest.mock import MagicMock, patch
@@ -18,9 +17,14 @@ from datahub.ingestion.source.microstrategy.config import (
 )
 from datahub.ingestion.source.microstrategy.constants import ISERVER_PROJECT_UNAVAILABLE
 from datahub.ingestion.source.microstrategy.source import (
+    ISERVER_CUBE_NOT_PUBLISHED,
+    ISERVER_DYNAMIC_SOURCING_CUBE,
     FolderKey,
     MicroStrategySource,
     ProjectKey,
+    _extract_tables_from_sql,
+    _is_classcast_error,
+    _is_iserver_error,
 )
 
 
@@ -74,44 +78,12 @@ class TestMicroStrategyConfigValidation:
         )
         assert config.base_url == "http://localhost:8080"
 
-    def test_base_url_validation_accepts_https(self):
-        """Test that https:// URLs are accepted."""
-        config = MicroStrategyConnectionConfig(
-            base_url="https://demo.microstrategy.com", use_anonymous=True
-        )
-        assert config.base_url == "https://demo.microstrategy.com"
-
     def test_base_url_trailing_slashes_removed(self):
         """Test that trailing slashes are removed from base_url."""
         config = MicroStrategyConnectionConfig(
             base_url="https://demo.microstrategy.com///", use_anonymous=True
         )
         assert config.base_url == "https://demo.microstrategy.com"
-
-    def test_include_warehouse_lineage_requires_platform(self):
-        with pytest.raises(ValueError, match="warehouse_lineage_platform"):
-            MicroStrategyConfig.parse_obj(
-                {
-                    "connection": {
-                        "base_url": "https://demo.microstrategy.com",
-                        "use_anonymous": True,
-                    },
-                    "include_warehouse_lineage": True,
-                }
-            )
-
-    def test_include_warehouse_lineage_accepts_platform(self):
-        cfg = MicroStrategyConfig.parse_obj(
-            {
-                "connection": {
-                    "base_url": "https://demo.microstrategy.com",
-                    "use_anonymous": True,
-                },
-                "include_warehouse_lineage": True,
-                "warehouse_lineage_platform": "snowflake",
-            }
-        )
-        assert cfg.warehouse_lineage_platform == "snowflake"
 
 
 class TestContainerKeyURNGeneration:
@@ -174,7 +146,7 @@ class TestProjectFiltering:
                 "deny": [".*Test$"],
             },
         }
-        config = MicroStrategyConfig.parse_obj(config_dict)
+        config = MicroStrategyConfig.model_validate(config_dict)
         ctx = PipelineContext(run_id="test-run")
 
         with patch(
@@ -224,7 +196,7 @@ class TestCubeRegistryResolution:
             },
             "include_lineage": True,
         }
-        config = MicroStrategyConfig.parse_obj(config_dict)
+        config = MicroStrategyConfig.model_validate(config_dict)
         ctx = PipelineContext(run_id="test-run")
 
         with patch(
@@ -303,7 +275,7 @@ class TestOwnershipExtraction:
             },
             "include_ownership": True,
         }
-        config = MicroStrategyConfig.parse_obj(config_dict)
+        config = MicroStrategyConfig.model_validate(config_dict)
         ctx = PipelineContext(run_id="test-run")
 
         with patch(
@@ -358,7 +330,7 @@ class TestOwnershipExtraction:
             },
             "include_ownership": True,
         }
-        config = MicroStrategyConfig.parse_obj(config_dict)
+        config = MicroStrategyConfig.model_validate(config_dict)
         ctx = PipelineContext(run_id="test-run")
 
         with patch(
@@ -420,7 +392,7 @@ class TestDashboardVisualizationExtraction:
             },
             "include_lineage": True,
         }
-        config = MicroStrategyConfig.parse_obj(config_dict)
+        config = MicroStrategyConfig.model_validate(config_dict)
         ctx = PipelineContext(run_id="test-run")
 
         with patch(
@@ -493,8 +465,12 @@ class TestDashboardVisualizationExtraction:
             assert dashboard_info is not None
 
             # Verify 3 chart URNs were created
-            assert len(dashboard_info.charts) == 3  # type: ignore
-            assert all("viz_" in chart_urn for chart_urn in dashboard_info.charts)  # type: ignore
+            # SDK V2 Dashboard stores charts as chartEdges (deprecated charts field is empty)
+            chart_urns = [
+                edge.destinationUrn for edge in (dashboard_info.chartEdges or [])
+            ]  # type: ignore
+            assert len(chart_urns) == 3
+            assert all("viz_" in chart_urn for chart_urn in chart_urns)
 
             mock_client.get_dossier_definition.assert_called_once_with(
                 "dashboard_1", "project_1"
@@ -509,7 +485,7 @@ class TestDashboardVisualizationExtraction:
             },
             "include_lineage": True,
         }
-        config = MicroStrategyConfig.parse_obj(config_dict)
+        config = MicroStrategyConfig.model_validate(config_dict)
         ctx = PipelineContext(run_id="test-run")
 
         with patch(
@@ -555,7 +531,8 @@ class TestDashboardVisualizationExtraction:
             assert len(dashboard_info_workunits) > 0
             dashboard_info = dashboard_info_workunits[0].metadata.aspect  # type: ignore
             assert dashboard_info is not None
-            assert len(dashboard_info.charts) == 0  # type: ignore
+            # SDK V2 Dashboard stores charts as chartEdges (deprecated charts field is empty)
+            assert len(dashboard_info.chartEdges or []) == 0  # type: ignore
 
             mock_client.get_dossier_definition.assert_called_once_with(
                 "dashboard_1", "project_1"
@@ -574,7 +551,7 @@ class TestCubeSchemaExtraction:
             },
             "include_cube_schema": True,
         }
-        config = MicroStrategyConfig.parse_obj(config_dict)
+        config = MicroStrategyConfig.model_validate(config_dict)
         ctx = PipelineContext(run_id="test-run")
 
         with patch(
@@ -602,7 +579,7 @@ class TestCubeSchemaExtraction:
             )
 
             # Schema lives under definition.availableObjects (MSTR REST cube payload)
-            mock_client.get_cube_schema.return_value = {
+            mock_client.get_cube.return_value = {
                 "definition": {
                     "availableObjects": {
                         "attributes": [
@@ -700,7 +677,7 @@ class TestCubeSchemaExtraction:
             },
             "include_cube_schema": True,
         }
-        config = MicroStrategyConfig.parse_obj(config_dict)
+        config = MicroStrategyConfig.model_validate(config_dict)
         ctx = PipelineContext(run_id="test-run")
 
         with patch(
@@ -766,7 +743,7 @@ class TestURLConstruction:
                 "use_anonymous": True,
             },
         }
-        config = MicroStrategyConfig.parse_obj(config_dict)
+        config = MicroStrategyConfig.model_validate(config_dict)
         ctx = PipelineContext(run_id="test-run")
 
         source = MicroStrategySource(config, ctx)
@@ -785,7 +762,7 @@ class TestURLConstruction:
                 "use_anonymous": True,
             },
         }
-        config = MicroStrategyConfig.parse_obj(config_dict)
+        config = MicroStrategyConfig.model_validate(config_dict)
         ctx = PipelineContext(run_id="test-run")
 
         source = MicroStrategySource(config, ctx)
@@ -804,7 +781,7 @@ class TestURLConstruction:
                 "use_anonymous": True,
             },
         }
-        config = MicroStrategyConfig.parse_obj(config_dict)
+        config = MicroStrategyConfig.model_validate(config_dict)
         ctx = PipelineContext(run_id="test-run")
 
         source = MicroStrategySource(config, ctx)
@@ -814,85 +791,6 @@ class TestURLConstruction:
         # Should not have double slashes
         assert "//" not in url.replace("https://", "")  # type: ignore
         assert url.endswith("/project_456/dashboard_123")  # type: ignore
-
-
-class TestAuditStampParsing:
-    """Test timestamp parsing and audit stamp creation."""
-
-    def test_audit_stamps_parse_iso_timestamps(self):
-        """Test that ISO timestamps are correctly parsed to audit stamps."""
-        config_dict = {
-            "connection": {
-                "base_url": "https://demo.microstrategy.com",
-                "use_anonymous": True,
-            },
-        }
-        config = MicroStrategyConfig.parse_obj(config_dict)
-        ctx = PipelineContext(run_id="test-run")
-
-        source = MicroStrategySource(config, ctx)
-        audit_stamps = source._build_audit_stamps(
-            created_time="2024-01-15T10:30:00Z",
-            modified_time="2024-03-12T14:45:00Z",
-            owner_info="john.doe",
-        )
-
-        # Verify timestamps were parsed (milliseconds since epoch)
-        assert audit_stamps.created is not None
-        assert audit_stamps.created.time > 0
-        assert audit_stamps.lastModified is not None
-        assert audit_stamps.lastModified.time > 0
-
-        # Verify actor URN
-        assert "john.doe" in audit_stamps.created.actor
-
-    def test_audit_stamps_handle_missing_timestamps(self):
-        """Test that missing timestamps don't crash audit stamp creation."""
-        config_dict = {
-            "connection": {
-                "base_url": "https://demo.microstrategy.com",
-                "use_anonymous": True,
-            },
-        }
-        config = MicroStrategyConfig.parse_obj(config_dict)
-        ctx = PipelineContext(run_id="test-run")
-
-        source = MicroStrategySource(config, ctx)
-        audit_stamps = source._build_audit_stamps(
-            created_time=None, modified_time=None, owner_info=None
-        )
-
-        # Should return empty audit stamps object without crashing
-        assert audit_stamps is not None
-
-    def test_audit_stamps_handle_invalid_timestamps(self, caplog):
-        """Test that invalid timestamps are handled gracefully with logging."""
-        config_dict = {
-            "connection": {
-                "base_url": "https://demo.microstrategy.com",
-                "use_anonymous": True,
-            },
-        }
-        config = MicroStrategyConfig.parse_obj(config_dict)
-        ctx = PipelineContext(run_id="test-run")
-
-        source = MicroStrategySource(config, ctx)
-
-        with caplog.at_level(logging.DEBUG):
-            audit_stamps = source._build_audit_stamps(
-                created_time="not-a-timestamp",
-                modified_time="also-invalid",
-                owner_info="john.doe",
-            )
-
-            # Should return audit stamps without crashing
-            assert audit_stamps is not None
-
-            # Should log debug message about parsing failure
-            assert any(
-                "Failed to parse timestamps" in record.message
-                for record in caplog.records
-            )
 
 
 class TestErrorHandling:
@@ -906,7 +804,7 @@ class TestErrorHandling:
                 "use_anonymous": True,
             },
         }
-        config = MicroStrategyConfig.parse_obj(config_dict)
+        config = MicroStrategyConfig.model_validate(config_dict)
         ctx = PipelineContext(run_id="test-run")
 
         with patch(
@@ -970,7 +868,7 @@ class TestLoadedProjectFiltering:
                 "use_anonymous": True,
             },
         }
-        config = MicroStrategyConfig.parse_obj(config_dict)
+        config = MicroStrategyConfig.model_validate(config_dict)
         ctx = PipelineContext(run_id="test-run")
 
         with patch(
@@ -1002,7 +900,7 @@ class TestLoadedProjectFiltering:
             },
             "include_unloaded_projects": True,
         }
-        config = MicroStrategyConfig.parse_obj(config_dict)
+        config = MicroStrategyConfig.model_validate(config_dict)
         ctx = PipelineContext(run_id="test-run")
 
         with patch(
@@ -1082,11 +980,10 @@ class TestWarehouseLineageEmission:
             },
             "include_lineage": True,
             "include_warehouse_lineage": True,
-            "warehouse_lineage_platform": "snowflake",
             "warehouse_lineage_database": "db",
             "warehouse_lineage_schema": "public",
         }
-        config = MicroStrategyConfig.parse_obj(config_dict)
+        config = MicroStrategyConfig.model_validate(config_dict)
         ctx = PipelineContext(run_id="test-run")
 
         with patch(
@@ -1100,6 +997,16 @@ class TestWarehouseLineageEmission:
 
             mock_client.get_projects.return_value = [
                 {"id": "project_1", "name": "P1", "status": 0}
+            ]
+            # Mock project datasources so platform auto-detection resolves to snowflake
+            mock_client.get_project_datasources.return_value = [
+                {
+                    "id": "ds1",
+                    "name": "Snowflake Prod",
+                    "datasourceType": "normal",
+                    "database": {"type": "snow_flake"},
+                    "dbms": {"name": "Snowflake"},
+                }
             ]
             mock_client.search_objects.side_effect = create_search_objects_mock(
                 cubes={
@@ -1127,6 +1034,29 @@ class TestWarehouseLineageEmission:
             assert len(lineage.upstreams) == 1  # type: ignore[union-attr]
             assert "snowflake" in lineage.upstreams[0].dataset  # type: ignore[union-attr]
 
+    def test_tables_to_urns_emits_warning_when_platform_undetected(self) -> None:
+        """_tables_to_urns returns [] and records a report warning when no platform is detected."""
+        config = MicroStrategyConfig.model_validate(
+            {
+                "connection": {
+                    "base_url": "https://demo.microstrategy.com",
+                    "use_anonymous": True,
+                },
+                "include_warehouse_lineage": True,
+            }
+        )
+        ctx = PipelineContext(run_id="test-no-platform")
+        source = MicroStrategySource(config, ctx)
+        # _warehouse_platform starts as None — no detection has run
+        assert source._warehouse_platform is None
+
+        result = source._tables_to_urns(["analytics.fact_sales"])
+
+        assert result == []
+        # title is the grouping key set via title="warehouse-lineage-skipped"
+        warning_titles = [w.title for w in source.report.warnings]
+        assert "warehouse-lineage-skipped" in warning_titles
+
 
 class TestApiCallReduction:
     def test_cube_search_once_per_project(self) -> None:
@@ -1136,7 +1066,7 @@ class TestApiCallReduction:
                 "use_anonymous": True,
             },
         }
-        config = MicroStrategyConfig.parse_obj(config_dict)
+        config = MicroStrategyConfig.model_validate(config_dict)
         ctx = PipelineContext(run_id="test-run")
 
         with patch(
@@ -1179,7 +1109,7 @@ class TestApiCallReduction:
             },
             "include_dashboards": False,
         }
-        config = MicroStrategyConfig.parse_obj(config_dict)
+        config = MicroStrategyConfig.model_validate(config_dict)
         ctx = PipelineContext(run_id="test-run")
 
         with patch(
@@ -1213,3 +1143,754 @@ class TestApiCallReduction:
                 or c.kwargs.get("object_type") == 55
             ]
             assert dashboard_calls == []
+
+
+class TestSQLTableExtraction:
+    """Tests for _extract_tables_from_sql() covering all quoting styles."""
+
+    def test_snowflake_double_quote_schema_table(self) -> None:
+        sql = 'SELECT a FROM "analytics"."fact_revenue" WHERE b = 1'
+        assert _extract_tables_from_sql(sql) == ["analytics.fact_revenue"]
+
+    def test_mysql_backtick_quoting(self) -> None:
+        sql = "SELECT a FROM `mydb`.`orders` JOIN `mydb`.`customers` ON 1=1"
+        result = _extract_tables_from_sql(sql)
+        assert "mydb.orders" in result
+        assert "mydb.customers" in result
+
+    def test_bare_schema_dot_table(self) -> None:
+        sql = "SELECT * FROM sales.revenue_by_region"
+        assert _extract_tables_from_sql(sql) == ["sales.revenue_by_region"]
+
+    def test_join_tables_collected(self) -> None:
+        sql = (
+            'SELECT a, b FROM "dbo"."fact_sales" '
+            'JOIN "dbo"."dim_date" ON fact_sales.date_id = dim_date.id'
+        )
+        result = _extract_tables_from_sql(sql)
+        assert "dbo.fact_sales" in result
+        assert "dbo.dim_date" in result
+
+    def test_volatile_temp_tables_skipped(self) -> None:
+        # Teradata-style volatile tables: uppercase + 10+ chars starting with T
+        sql = (
+            "CREATE VOLATILE TABLE TD7U1ZQ9CSP000 AS "
+            "(SELECT * FROM analytics.fact_revenue)"
+        )
+        result = _extract_tables_from_sql(sql)
+        assert "analytics.fact_revenue" in result
+        assert not any("TD7U1ZQ9CSP000" in t for t in result)
+
+    def test_sql_keywords_not_captured_as_tables(self) -> None:
+        sql = "SELECT a FROM schema1.table1 WHERE a > 0 GROUP BY a ORDER BY a"
+        result = _extract_tables_from_sql(sql)
+        assert result == ["schema1.table1"]
+        for kw in ("where", "group", "order", "select"):
+            assert kw not in result
+
+    def test_empty_sql_returns_empty(self) -> None:
+        assert _extract_tables_from_sql("") == []
+        assert _extract_tables_from_sql("   ") == []
+
+    def test_non_string_returns_empty(self) -> None:
+        assert _extract_tables_from_sql(None) == []  # type: ignore[arg-type]
+
+    def test_deduplicates_same_table(self) -> None:
+        sql = (
+            'SELECT a FROM "dbo"."orders" '
+            'JOIN "dbo"."orders" o2 ON o2.id = orders.parent_id'
+        )
+        result = _extract_tables_from_sql(sql)
+        assert result.count("dbo.orders") == 1
+
+    def test_case_insensitive_from_join(self) -> None:
+        sql = "SELECT 1 FROM schema.tbl1 INNER JOIN schema.tbl2 ON 1=1"
+        result = _extract_tables_from_sql(sql)
+        assert len(result) == 2
+
+
+class TestWarehousePlatformDetection:
+    """Tests for _detect_warehouse_platform() tier logic."""
+
+    def _make_source(self, **extra_config) -> MicroStrategySource:
+        config_dict = {
+            "connection": {
+                "base_url": "https://demo.microstrategy.com",
+                "use_anonymous": True,
+            },
+            "include_warehouse_lineage": True,
+            **extra_config,
+        }
+        config = MicroStrategyConfig.model_validate(config_dict)
+        ctx = PipelineContext(run_id="detect-platform-test")
+        with patch(
+            "datahub.ingestion.source.microstrategy.source.MicroStrategyClient"
+        ) as mock_client_class:
+            mock_client = MagicMock()
+            mock_client_class.return_value = mock_client
+            source = MicroStrategySource.__new__(MicroStrategySource)
+            source.config = config
+            source.ctx = ctx
+            source.client = mock_client
+            source._warehouse_platform = None
+            source.report = MagicMock()
+        return source
+
+    def test_tier1_project_datasources_single_platform(self) -> None:
+        source = self._make_source()
+        source.client.get_project_datasources = MagicMock(
+            return_value=[
+                {
+                    "datasourceType": "normal",
+                    "database": {"type": "snow_flake"},
+                    "dbms": {"name": "Snowflake"},
+                    "name": "SF Prod",
+                }
+            ]
+        )
+        source._detect_warehouse_platform(project_id="proj_1")
+        assert source._warehouse_platform == "snowflake"
+
+    def test_tier1_multiple_platforms_falls_through(self) -> None:
+        source = self._make_source()
+        source.client.get_project_datasources = MagicMock(
+            return_value=[
+                {
+                    "datasourceType": "normal",
+                    "database": {"type": "snow_flake"},
+                    "dbms": {"name": "Snowflake"},
+                    "name": "SF",
+                },
+                {
+                    "datasourceType": "normal",
+                    "database": {"type": "mysql"},
+                    "dbms": {"name": "MySQL"},
+                    "name": "MySQL Dev",
+                },
+            ]
+        )
+        # Tier 1 is ambiguous; Tier 2 is empty → platform stays None
+        source.client.get_datasources = MagicMock(return_value=[])
+        source.client.search_warehouse_tables = MagicMock(return_value=[])
+        source._detect_warehouse_platform(project_id="proj_1")
+        assert source._warehouse_platform is None
+
+    def test_tier2_env_datasources_used_when_tier1_empty(self) -> None:
+        source = self._make_source()
+        source.client.get_project_datasources = MagicMock(return_value=[])
+        source.client.get_datasources = MagicMock(
+            return_value=[
+                {
+                    "datasourceType": "normal",
+                    "database": {"type": "redshift"},
+                    "dbms": {"name": "Redshift"},
+                    "name": "RS Prod",
+                }
+            ]
+        )
+        source._detect_warehouse_platform(project_id="proj_1")
+        assert source._warehouse_platform == "redshift"
+
+    def test_already_resolved_skips_detection(self) -> None:
+        source = self._make_source()
+        source._warehouse_platform = "bigquery"
+        source.client.get_project_datasources = MagicMock()
+        source._detect_warehouse_platform(project_id="proj_1")
+        # Should NOT call any client methods since platform is already known
+        source.client.get_project_datasources.assert_not_called()
+
+    def test_tier2_env_datasources_when_project_datasources_fails(self) -> None:
+        """Tier 1 raises an exception; Tier 2 env-level datasources resolves Snowflake."""
+        source = self._make_source()
+        source.client.get_project_datasources = MagicMock(
+            side_effect=Exception("HTTP 500")
+        )
+        source.client.get_datasources = MagicMock(
+            return_value=[
+                {
+                    "datasourceType": "normal",
+                    "database": {"type": "snow_flake"},
+                    "dbms": {"name": "Snowflake"},
+                    "name": "SF Prod",
+                }
+            ]
+        )
+        source._detect_warehouse_platform(project_id="proj_1")
+        # Tier 1 raised — Tier 2 should still succeed
+        assert source._warehouse_platform == "snowflake"
+
+    def test_tier3_tables_api_detection(self) -> None:
+        """Tiers 1–2 return empty; Tier 3a (v2/tables) resolves BigQuery."""
+        source = self._make_source()
+        source.client.get_project_datasources = MagicMock(return_value=[])
+        source.client.get_datasources = MagicMock(return_value=[])
+        # Tier 3: search_warehouse_tables returns one table
+        source.client.search_warehouse_tables = MagicMock(
+            return_value=[{"id": "TBL001", "name": "fact_orders"}]
+        )
+        # get_table_definition returns a primaryDataSource reference
+        source.client.get_table_definition = MagicMock(
+            return_value={"primaryDataSource": {"objectId": "DS001", "name": "BQ Prod"}}
+        )
+        # get_datasource_by_id returns a BigQuery datasource
+        source.client.get_datasource_by_id = MagicMock(
+            return_value={
+                "datasourceType": "normal",
+                "database": {"type": "big_query"},
+                "dbms": {"name": "BigQuery"},
+                "name": "BQ Prod",
+            }
+        )
+        source._detect_warehouse_platform(project_id="proj_1")
+        assert source._warehouse_platform == "bigquery"
+
+    def test_tier3b_model_tables_fallback(self) -> None:
+        """Tier 3a (v2/tables) returns no ds_id; Tier 3b (model/tables) resolves Redshift."""
+        source = self._make_source()
+        source.client.get_project_datasources = MagicMock(return_value=[])
+        source.client.get_datasources = MagicMock(return_value=[])
+        # Tier 3 setup: one warehouse table
+        source.client.search_warehouse_tables = MagicMock(
+            return_value=[{"id": "TBL001", "name": "fact_revenue"}]
+        )
+        # get_table_definition returns no primaryDataSource → triggers 3b
+        source.client.get_table_definition = MagicMock(return_value={})
+        # Tier 3b: list_model_tables finds the table by name
+        source.client.list_model_tables = MagicMock(
+            return_value={
+                "tables": [
+                    {"information": {"name": "fact_revenue", "objectId": "MTBL001"}}
+                ],
+                "total": 1,
+            }
+        )
+        # get_model_table_definition returns the datasource reference
+        source.client.get_model_table_definition = MagicMock(
+            return_value={"primaryDataSource": {"objectId": "DS002", "name": "RS Prod"}}
+        )
+        # get_datasource_by_id returns a Redshift datasource
+        source.client.get_datasource_by_id = MagicMock(
+            return_value={
+                "datasourceType": "normal",
+                "database": {"type": "redshift"},
+                "dbms": {"name": "Redshift"},
+                "name": "RS Prod",
+            }
+        )
+        source._detect_warehouse_platform(project_id="proj_1")
+        assert source._warehouse_platform == "redshift"
+
+
+class TestIServerErrorHandling:
+    """Tests for iServer error code helpers and ClassCast detection."""
+
+    def test_is_iserver_error_matches_code(self) -> None:
+        body = {"iServerCode": -2147209151, "message": "Project not loaded"}
+        assert _is_iserver_error(body, -2147209151) is True
+
+    def test_is_iserver_error_wrong_code(self) -> None:
+        body = {"iServerCode": -2147072488}
+        assert _is_iserver_error(body, -2147209151) is False
+
+    def test_is_iserver_error_missing_key(self) -> None:
+        body = {"message": "some error"}
+        assert _is_iserver_error(body, -2147209151) is False
+
+    def test_is_classcast_error_cannot_be_cast(self) -> None:
+        body = {"message": "java.lang.Object cannot be cast to ..."}
+        assert _is_classcast_error(body) is True
+
+    def test_is_classcast_error_classcast_in_message(self) -> None:
+        body = {"message": "ClassCastException in rendering"}
+        assert _is_classcast_error(body) is True
+
+    def test_is_classcast_error_unrelated_message(self) -> None:
+        body = {"message": "Object not found"}
+        assert _is_classcast_error(body) is False
+
+    def test_is_classcast_error_empty_body(self) -> None:
+        assert _is_classcast_error({}) is False
+
+    def test_client_raises_project_unavailable_on_iserver_code(self) -> None:
+        config = MicroStrategyConnectionConfig.model_validate(
+            {
+                "base_url": "https://demo.microstrategy.com",
+                "use_anonymous": True,
+            }
+        )
+        client = MicroStrategyClient.__new__(MicroStrategyClient)
+        client.config = config
+        client._base_url = "https://demo.microstrategy.com"
+
+        mock_response = MagicMock()
+        mock_response.content = b'{"iServerCode": -2147209151, "message": "Not loaded"}'
+        mock_response.json.return_value = {
+            "iServerCode": -2147209151,
+            "message": "Not loaded",
+            "ticketId": "T1",
+        }
+
+        with pytest.raises(MicroStrategyProjectUnavailableError):
+            client._raise_if_iserver_project_unavailable(
+                mock_response, "/api/v2/cubes/C1"
+            )
+
+
+class TestReportProcessing:
+    """Tests for _process_report() behavior with and without a dataSource."""
+
+    BASE_CONFIG = {
+        "connection": {
+            "base_url": "https://demo.microstrategy.com",
+            "use_anonymous": True,
+        },
+        "include_lineage": True,
+        "include_ownership": True,
+        "include_reports": True,
+        "include_dashboards": False,
+        "include_folders": False,
+        "include_cubes": False,
+        "include_datasets": False,
+        "include_report_definitions": False,
+        "include_warehouse_lineage": False,
+    }
+
+    def _run_with_reports(
+        self,
+        reports: List[Dict[str, Any]],
+        # cube_search_results: raw cube objects as returned by search_objects (type=776).
+        # _build_registries populates cube_registry from these, same as the real flow.
+        cube_search_results: Optional[List[Dict[str, Any]]] = None,
+        extra_config: Optional[Dict[str, Any]] = None,
+    ) -> List[Any]:
+        config_dict = {**self.BASE_CONFIG, **(extra_config or {})}
+        config = MicroStrategyConfig.model_validate(config_dict)
+        ctx = PipelineContext(run_id="report-test")
+
+        with patch(
+            "datahub.ingestion.source.microstrategy.source.MicroStrategyClient"
+        ) as mock_client_class:
+            mock_client = MagicMock()
+            mock_client_class.return_value = mock_client
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+
+            mock_client.get_projects.return_value = [
+                {"id": "proj_1", "name": "Proj", "status": 0},
+            ]
+            mock_client.get_folders.return_value = []
+            mock_client.get_datasets.return_value = []
+            mock_client.get_project_datasources.return_value = []
+            mock_client.get_datasources.return_value = []
+            mock_client.search_objects.side_effect = create_search_objects_mock(
+                reports={"proj_1": reports},
+                cubes={"proj_1": cube_search_results or []},
+            )
+
+            source = MicroStrategySource(config, ctx)
+            return list(source.get_workunits())
+
+    def test_report_without_datasource_emits_chart(self) -> None:
+        reports = [
+            {
+                "id": "R001",
+                "name": "Revenue Report",
+                "description": "test",
+                "type": 3,
+                "subtype": 768,
+                "owner": {"id": "USR1", "name": "Admin"},
+                "dateCreated": "2023-01-01T00:00:00.000+0000",
+                "dateModified": "2024-01-01T00:00:00.000+0000",
+            }
+        ]
+        wus = self._run_with_reports(reports)
+        aspect_names = [wu.metadata.aspectName for wu in wus]
+        assert "chartInfo" in aspect_names
+
+    def test_report_with_cube_datasource_emits_lineage(self) -> None:
+        cube_id = "CUBE_ABC"
+        reports = [
+            {
+                "id": "R002",
+                "name": "Cube-backed Report",
+                "description": "",
+                "type": 3,
+                "subtype": 768,
+                "dataSource": {"id": cube_id},
+                "owner": {"id": "USR1", "name": "Admin"},
+                "dateCreated": "2023-01-01T00:00:00.000+0000",
+                "dateModified": "2024-01-01T00:00:00.000+0000",
+            }
+        ]
+        # Provide the cube via search_objects so _build_registries populates cube_registry
+        cube_search = [
+            {
+                "id": cube_id,
+                "name": "Revenue Cube",
+                "description": "",
+                "type": 3,
+                "subtype": 776,
+                "owner": {"id": "USR1", "name": "Admin"},
+                "dateCreated": "2023-01-01T00:00:00.000+0000",
+                "dateModified": "2024-01-01T00:00:00.000+0000",
+            }
+        ]
+        wus = self._run_with_reports(reports, cube_search_results=cube_search)
+        aspect_names = [wu.metadata.aspectName for wu in wus]
+        assert "chartInfo" in aspect_names
+        # Charts encode lineage in ChartInfoClass.inputs (not a separate upstreamLineage aspect)
+        chart_wu = next(wu for wu in wus if wu.metadata.aspectName == "chartInfo")
+        chart_inputs = chart_wu.metadata.aspect.inputs or []
+        assert any(cube_id in urn for urn in chart_inputs), (
+            f"Expected cube {cube_id} in chartInfo.inputs, got: {chart_inputs}"
+        )
+
+    def test_report_with_ownership_emits_ownership_aspect(self) -> None:
+        reports = [
+            {
+                "id": "R003",
+                "name": "Owned Report",
+                "description": "",
+                "type": 3,
+                "subtype": 768,
+                "owner": {"id": "USR1", "name": "Alice"},
+                "dateCreated": "2023-01-01T00:00:00.000+0000",
+                "dateModified": "2024-01-01T00:00:00.000+0000",
+            }
+        ]
+        wus = self._run_with_reports(reports)
+        aspect_names = [wu.metadata.aspectName for wu in wus]
+        assert "ownership" in aspect_names
+
+
+class TestCubeIServerErrorCodes:
+    """Test that unpublished and dynamic-sourcing cubes are skipped gracefully."""
+
+    BASE_CONFIG = {
+        "connection": {
+            "base_url": "https://demo.microstrategy.com",
+            "use_anonymous": True,
+        },
+        "include_cube_schema": True,
+        "include_warehouse_lineage": False,
+    }
+
+    def _make_source(self) -> MicroStrategySource:
+        config = MicroStrategyConfig.model_validate(self.BASE_CONFIG)
+        ctx = PipelineContext(run_id="test-iserver-codes")
+        return MicroStrategySource(config, ctx)
+
+    def test_cube_not_published_returns_none_schema(self) -> None:
+        """_build_cube_schema_metadata skips cubes that report CUBE_NOT_PUBLISHED."""
+        source = self._make_source()
+        cube = {"id": "C001", "name": "Unpublished Cube"}
+        project_id = "P001"
+
+        source.client = MagicMock()
+        source.client.get_cube.return_value = {
+            "iServerCode": ISERVER_CUBE_NOT_PUBLISHED,
+            "message": "Cube not in memory",
+        }
+
+        result = source._build_cube_schema_metadata(cube, project_id)
+        assert result is None
+
+    def test_dynamic_sourcing_cube_returns_none_schema(self) -> None:
+        """_build_cube_schema_metadata skips cubes that report DYNAMIC_SOURCING_CUBE."""
+        source = self._make_source()
+        cube = {"id": "C002", "name": "Dynamic Cube"}
+        project_id = "P001"
+
+        source.client = MagicMock()
+        source.client.get_cube.return_value = {
+            "iServerCode": ISERVER_DYNAMIC_SOURCING_CUBE,
+            "message": "Attribute form cache cube",
+        }
+
+        result = source._build_cube_schema_metadata(cube, project_id)
+        assert result is None
+
+
+class TestLibraryDatasetIngestion:
+    """Test that library datasets are emitted as SDK V2 Dataset entities."""
+
+    BASE_CONFIG = {
+        "connection": {
+            "base_url": "https://demo.microstrategy.com",
+            "use_anonymous": True,
+        },
+        "include_lineage": False,
+        "include_ownership": True,
+        "include_cubes": False,
+        "include_dashboards": False,
+        "include_reports": False,
+        "include_folders": False,
+        "include_datasets": True,
+    }
+
+    def test_library_dataset_emits_dataset_entity(self) -> None:
+        """_process_dataset emits a Dataset entity whose URN encodes project+dataset IDs."""
+        config = MicroStrategyConfig.model_validate(self.BASE_CONFIG)
+        ctx = PipelineContext(run_id="test-library-dataset")
+        source = MicroStrategySource(config, ctx)
+
+        project = {"id": "PROJ001", "name": "My Project"}
+        dataset = {
+            "id": "DS001",
+            "name": "Customer Dataset",
+            "description": "Customer dimension table",
+            "type": 3,
+            "owner": {"id": "USR1", "name": "Alice"},
+        }
+
+        entities = list(source._process_dataset(dataset, project))
+        assert len(entities) == 1
+        entity = entities[0]
+        # URN encodes project.id + dataset.id
+        assert "PROJ001" in str(entity.urn)
+        assert "DS001" in str(entity.urn)
+
+    def test_library_dataset_includes_ownership_when_enabled(self) -> None:
+        """_process_dataset emits an ownership aspect when include_ownership=True."""
+        config = MicroStrategyConfig.model_validate(self.BASE_CONFIG)
+        ctx = PipelineContext(run_id="test-library-dataset-ownership")
+        source = MicroStrategySource(config, ctx)
+
+        project = {"id": "PROJ001", "name": "My Project"}
+        dataset = {
+            "id": "DS002",
+            "name": "Sales Dataset",
+            "type": 3,
+            "owner": {"id": "USR2", "name": "Bob"},
+        }
+
+        entities = list(source._process_dataset(dataset, project))
+        # Expand SDK V2 entity into individual aspect work units to check ownership
+        wus = [wu for entity in entities for wu in entity.as_workunits()]
+        aspect_names = [wu.metadata.aspectName for wu in wus]
+        assert "ownership" in aspect_names
+
+
+# ── Pattern filtering tests ────────────────────────────────────────────────────
+
+
+class TestReportPatternFiltering:
+    """report_pattern allow/deny controls which reports are processed."""
+
+    def _run(self, reports: List[Dict[str, Any]], pattern: Dict) -> List[Any]:
+        config = MicroStrategyConfig.model_validate(
+            {
+                "connection": {
+                    "base_url": "https://demo.microstrategy.com",
+                    "use_anonymous": True,
+                },
+                "include_folders": False,
+                "include_dashboards": False,
+                "include_cubes": False,
+                "include_datasets": False,
+                "include_lineage": False,
+                "report_pattern": pattern,
+            }
+        )
+        ctx = PipelineContext(run_id="report-pattern-test")
+        with patch(
+            "datahub.ingestion.source.microstrategy.source.MicroStrategyClient"
+        ) as mock_cls:
+            mock_client = MagicMock()
+            mock_cls.return_value = mock_client
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.get_projects.return_value = [
+                {"id": "P1", "name": "Proj", "status": 0}
+            ]
+            mock_client.get_folders.return_value = []
+            mock_client.get_datasets.return_value = []
+            mock_client.search_objects.side_effect = create_search_objects_mock(
+                reports={"P1": reports}
+            )
+            source = MicroStrategySource(config, ctx)
+            return list(source.get_workunits())
+
+    def test_report_pattern_allow_filters_by_name(self) -> None:
+        """Only reports matching the allow pattern should emit chartInfo."""
+        reports = [
+            {"id": "R1", "name": "Revenue Report", "description": "", "type": 3, "subtype": 768},
+            {"id": "R2", "name": "Cost Report", "description": "", "type": 3, "subtype": 768},
+            {"id": "R3", "name": "Revenue Summary", "description": "", "type": 3, "subtype": 768},
+        ]
+        wus = self._run(reports, {"allow": ["^Revenue.*"]})
+        chart_urns = {
+            wu.metadata.entityUrn
+            for wu in wus
+            if hasattr(wu.metadata, "aspectName") and wu.metadata.aspectName == "chartInfo"
+        }
+        # R1 and R3 match the allow pattern; R2 should be excluded
+        assert any("R1" in u for u in chart_urns)
+        assert any("R3" in u for u in chart_urns)
+        assert not any("R2" in u for u in chart_urns)
+
+    def test_report_pattern_deny_excludes_by_name(self) -> None:
+        """Reports matching the deny pattern should be skipped."""
+        reports = [
+            {"id": "R1", "name": "Draft Revenue", "description": "", "type": 3, "subtype": 768},
+            {"id": "R2", "name": "Published Revenue", "description": "", "type": 3, "subtype": 768},
+        ]
+        wus = self._run(reports, {"deny": ["^Draft.*"]})
+        chart_urns = {
+            wu.metadata.entityUrn
+            for wu in wus
+            if hasattr(wu.metadata, "aspectName") and wu.metadata.aspectName == "chartInfo"
+        }
+        assert any("R2" in u for u in chart_urns)
+        assert not any("R1" in u for u in chart_urns)
+
+
+class TestCubePatternFiltering:
+    """cube_pattern allow/deny controls which cubes are processed."""
+
+    def _run(self, cubes: List[Dict[str, Any]], pattern: Dict) -> List[Any]:
+        config = MicroStrategyConfig.model_validate(
+            {
+                "connection": {
+                    "base_url": "https://demo.microstrategy.com",
+                    "use_anonymous": True,
+                },
+                "include_folders": False,
+                "include_dashboards": False,
+                "include_reports": False,
+                "include_datasets": False,
+                "include_lineage": False,
+                "include_cubes": True,
+                "cube_pattern": pattern,
+            }
+        )
+        ctx = PipelineContext(run_id="cube-pattern-test")
+        with patch(
+            "datahub.ingestion.source.microstrategy.source.MicroStrategyClient"
+        ) as mock_cls:
+            mock_client = MagicMock()
+            mock_cls.return_value = mock_client
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.get_projects.return_value = [
+                {"id": "P1", "name": "Proj", "status": 0}
+            ]
+            mock_client.get_folders.return_value = []
+            mock_client.get_datasets.return_value = []
+            mock_client.get_cube_sql_view.return_value = ""
+            mock_client.search_objects.side_effect = create_search_objects_mock(
+                cubes={"P1": cubes}
+            )
+            source = MicroStrategySource(config, ctx)
+            return list(source.get_workunits())
+
+    def test_cube_pattern_allow_filters_by_name(self) -> None:
+        """Only cubes matching the allow pattern should emit datasetProperties."""
+        cubes = [
+            {"id": "C1", "name": "Revenue Cube", "description": "", "subtype": 776},
+            {"id": "C2", "name": "Cost Cube", "description": "", "subtype": 776},
+        ]
+        wus = self._run(cubes, {"allow": ["^Revenue.*"]})
+        dataset_prop_urns = {
+            wu.metadata.entityUrn
+            for wu in wus
+            if hasattr(wu.metadata, "aspectName")
+            and wu.metadata.aspectName == "datasetProperties"
+        }
+        assert any("C1" in u for u in dataset_prop_urns)
+        assert not any("C2" in u for u in dataset_prop_urns)
+
+    def test_cube_pattern_deny_excludes_by_name(self) -> None:
+        """Cubes matching the deny pattern should be skipped."""
+        cubes = [
+            {"id": "C1", "name": "Prod Cube", "description": "", "subtype": 776},
+            {"id": "C2", "name": "Test Cube", "description": "", "subtype": 776},
+        ]
+        wus = self._run(cubes, {"deny": [".*Test.*"]})
+        dataset_prop_urns = {
+            wu.metadata.entityUrn
+            for wu in wus
+            if hasattr(wu.metadata, "aspectName")
+            and wu.metadata.aspectName == "datasetProperties"
+        }
+        assert any("C1" in u for u in dataset_prop_urns)
+        assert not any("C2" in u for u in dataset_prop_urns)
+
+
+class TestFolderPatternFiltering:
+    """folder_pattern allow/deny controls which folders are emitted as containers."""
+
+    def _run(self, folders: List[Dict[str, Any]], pattern: Dict) -> List[Any]:
+        config = MicroStrategyConfig.model_validate(
+            {
+                "connection": {
+                    "base_url": "https://demo.microstrategy.com",
+                    "use_anonymous": True,
+                },
+                "include_folders": True,
+                "include_dashboards": False,
+                "include_reports": False,
+                "include_cubes": False,
+                "include_datasets": False,
+                "include_lineage": False,
+                "folder_pattern": pattern,
+            }
+        )
+        ctx = PipelineContext(run_id="folder-pattern-test")
+        with patch(
+            "datahub.ingestion.source.microstrategy.source.MicroStrategyClient"
+        ) as mock_cls:
+            mock_client = MagicMock()
+            mock_cls.return_value = mock_client
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client.get_projects.return_value = [
+                {"id": "P1", "name": "Proj", "status": 0}
+            ]
+            mock_client.get_folders.return_value = folders
+            mock_client.get_datasets.return_value = []
+            mock_client.search_objects.side_effect = create_search_objects_mock()
+            source = MicroStrategySource(config, ctx)
+            return list(source.get_workunits())
+
+    def test_folder_pattern_allow_emits_only_matching_containers(self) -> None:
+        """Folders not matching the allow pattern should not produce container aspects."""
+        folders = [
+            {"id": "F1", "name": "Public Reports", "type": 8, "subtype": 8192},
+            {"id": "F2", "name": "Private Reports", "type": 8, "subtype": 8192},
+        ]
+        wus = self._run(folders, {"allow": ["^Public.*"]})
+        container_aspects = [
+            wu
+            for wu in wus
+            if hasattr(wu.metadata, "aspectName")
+            and wu.metadata.aspectName == "containerProperties"
+        ]
+        container_display_names = {
+            wu.metadata.aspect.name  # type: ignore[union-attr]
+            for wu in container_aspects
+            if hasattr(wu.metadata, "aspect")
+        }
+        assert "Public Reports" in container_display_names
+        assert "Private Reports" not in container_display_names
+
+    def test_folder_pattern_deny_excludes_matching_folders(self) -> None:
+        """Folders matching the deny pattern should not produce container aspects."""
+        folders = [
+            {"id": "F1", "name": "Shared Reports", "type": 8, "subtype": 8192},
+            {"id": "F2", "name": "Archive Reports", "type": 8, "subtype": 8192},
+        ]
+        wus = self._run(folders, {"deny": ["^Archive.*"]})
+        container_aspects = [
+            wu
+            for wu in wus
+            if hasattr(wu.metadata, "aspectName")
+            and wu.metadata.aspectName == "containerProperties"
+        ]
+        container_display_names = {
+            wu.metadata.aspect.name  # type: ignore[union-attr]
+            for wu in container_aspects
+            if hasattr(wu.metadata, "aspect")
+        }
+        assert "Shared Reports" in container_display_names
+        assert "Archive Reports" not in container_display_names

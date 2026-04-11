@@ -128,26 +128,6 @@ class ObjectType:
     COLUMN = 26  # Column
 
 
-# Subtype Mappings
-class SubTypes:
-    """DataHub subtype mappings."""
-
-    # Container subtypes
-    PROJECT = "BIContainerSubTypes.PROJECT"
-    FOLDER = "BIContainerSubTypes.LOOKER_FOLDER"
-
-    # Dashboard subtypes
-    DASHBOARD = "dashboard"
-    DOSSIER = "dossier"  # Legacy name
-
-    # Chart subtypes
-    REPORT = "report"
-
-    # Dataset subtypes
-    CUBE = "cube"
-    DATASET = "dataset"
-
-
 # Default Values
 class Defaults:
     """Default configuration values."""

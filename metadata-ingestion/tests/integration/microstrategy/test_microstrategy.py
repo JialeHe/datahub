@@ -61,7 +61,6 @@ def test_microstrategy_ingest(pytestconfig, tmp_path):
                     "include_lineage": True,
                     "include_ownership": True,
                     "include_cube_schema": True,
-                    "include_usage": False,  # Usage requires special permissions
                 },
             },
             "sink": {

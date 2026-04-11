@@ -1,47 +1,30 @@
-"""
-DataHub source for MicroStrategy.
-
-Extracts metadata including:
-- Projects (as containers)
-- Folders (as nested containers)
-- Dashboards/Dossiers  — subtype-routed: 14081 legacy doc, 14336 modern dossier
-- Reports (as charts)  — with warehouse table lineage via sqlView
-- Intelligent Cubes (as datasets) — with warehouse table lineage via sqlView
-- Datasets
-- Ownership information
-- Column-level lineage via SqlParsingAggregator (optional)
-
-Fixes applied vs. original:
-  1. Cube schema reads from definition.availableObjects (not top-level)
-  2. Cube warehouse lineage uses sqlView SQL parsing (not get_model_cube/physicalTables)
-  3. Report warehouse lineage added via resolve_prompts instance + sqlView
-  4. Document/dossier → warehouse tables: not emitted on dashboard URNs (GMS has no
-     upstreamLineage aspect for dashboard); use dashboard→chart links and report inputs
-  5. Column-level lineage via SqlParsingAggregator
-  6. Dashboard subtype routing: 14081->documents, 14336->dossiers, skip 14082/14087/14088
-  7. Visualization extraction fixed to include pages layer for dossiers
-  8. Explicit iServerCode error handling (-2147209151, -2147072488, -2147212800)
-  9. Cube schema emits one field per attribute FORM not per attribute — correct
-     column count, data types, and fieldPaths for multi-form attributes
-"""
-
 import logging
 import re
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from collections import defaultdict
+from datetime import datetime
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    List,
+    NamedTuple,
+    Optional,
+    Set,
+    TypedDict,
+    Union,
+)
 
 from dateutil import parser as date_parser
 
 from datahub.configuration.common import AllowDenyPattern
 from datahub.emitter.mce_builder import (
+    Aspect,
     make_chart_urn,
-    make_dashboard_urn,
     make_data_platform_urn,
-    make_dataplatform_instance_urn,
     make_dataset_urn_with_platform_instance,
     make_schema_field_urn,
     make_user_urn,
 )
-from datahub.emitter.mcp import MetadataChangeProposalWrapper
 from datahub.emitter.mcp_builder import ContainerKey, gen_containers
 from datahub.ingestion.api.common import PipelineContext
 from datahub.ingestion.api.decorators import (
@@ -75,16 +58,9 @@ from datahub.ingestion.source.state.stale_entity_removal_handler import (
 from datahub.ingestion.source.state.stateful_ingestion_base import (
     StatefulIngestionSourceBase,
 )
-from datahub.metadata.com.linkedin.pegasus2avro.common import ChangeAuditStamps
 from datahub.metadata.schema_classes import (
-    AuditStampClass,
     BooleanTypeClass,
-    ChartInfoClass,
-    ContainerClass,
-    DashboardInfoClass,
-    DataPlatformInstanceClass,
     DatasetLineageTypeClass,
-    DatasetPropertiesClass,
     DateTypeClass,
     GlobalTagsClass,
     InputFieldClass,
@@ -92,20 +68,22 @@ from datahub.metadata.schema_classes import (
     NumberTypeClass,
     OtherSchemaClass,
     OwnerClass,
-    OwnershipClass,
     OwnershipTypeClass,
     SchemaFieldClass,
     SchemaFieldDataTypeClass,
     SchemaMetadataClass,
     StatusClass,
     StringTypeClass,
-    SubTypesClass,
     TagAssociationClass,
     TimeTypeClass,
     UpstreamClass,
     UpstreamLineageClass,
     ViewPropertiesClass,
 )
+from datahub.sdk.chart import Chart as SdkChart
+from datahub.sdk.dashboard import Dashboard as SdkDashboard
+from datahub.sdk.dataset import Dataset as SdkDataset
+from datahub.sdk.entity import Entity
 from datahub.sql_parsing.sql_parsing_aggregator import SqlParsingAggregator
 from datahub.utilities.registries.domain_registry import DomainRegistry
 
@@ -120,62 +98,62 @@ logger = logging.getLogger(__name__)
 # has no registered DataHub connector.
 _MSTR_DBTYPE_TO_DATAHUB: Dict[str, str] = {
     # Teradata
-    "teradata":                 "teradata",
-    "teradata_13":              "teradata",
-    "teradata_14":              "teradata",
-    "teradata_15":              "teradata",
-    "teradata_16":              "teradata",
+    "teradata": "teradata",
+    "teradata_13": "teradata",
+    "teradata_14": "teradata",
+    "teradata_15": "teradata",
+    "teradata_16": "teradata",
     # Snowflake
-    "snow_flake":               "snowflake",
-    "snowflake":                "snowflake",
+    "snow_flake": "snowflake",
+    "snowflake": "snowflake",
     # SQL Server / Azure
-    "sql_server":               "mssql",
-    "sql_server_2016":          "mssql",
-    "sql_server_2017":          "mssql",
-    "sql_server_2019":          "mssql",
-    "azure_sql_database":       "mssql",
-    "azure_synapse_analytics":  "mssql",
+    "sql_server": "mssql",
+    "sql_server_2016": "mssql",
+    "sql_server_2017": "mssql",
+    "sql_server_2019": "mssql",
+    "azure_sql_database": "mssql",
+    "azure_synapse_analytics": "mssql",
     # Oracle
-    "oracle":                   "oracle",
-    "oracle_11gr2":             "oracle",
-    "oracle_12c":               "oracle",
-    "oracle_122":               "oracle",
-    "oracle_18c":               "oracle",
-    "oracle_19c":               "oracle",
-    "oracle_21c":               "oracle",
+    "oracle": "oracle",
+    "oracle_11gr2": "oracle",
+    "oracle_12c": "oracle",
+    "oracle_122": "oracle",
+    "oracle_18c": "oracle",
+    "oracle_19c": "oracle",
+    "oracle_21c": "oracle",
     # PostgreSQL
-    "postgre_sql":              "postgres",
-    "postgre_sql_90":           "postgres",
-    "postgre_sql_10":           "postgres",
+    "postgre_sql": "postgres",
+    "postgre_sql_90": "postgres",
+    "postgre_sql_10": "postgres",
     # Redshift
-    "amazon_redshift":          "redshift",
-    "redshift":                 "redshift",
+    "amazon_redshift": "redshift",
+    "redshift": "redshift",
     # BigQuery
-    "big_query":                "bigquery",
-    "google_big_query":         "bigquery",
-    "google_big_query_ff_sql":  "bigquery",
+    "big_query": "bigquery",
+    "google_big_query": "bigquery",
+    "google_big_query_ff_sql": "bigquery",
     # MySQL / MariaDB
-    "my_sql":                   "mysql",
-    "mysql":                    "mysql",
-    "maria_db":                 "mysql",
+    "my_sql": "mysql",
+    "mysql": "mysql",
+    "maria_db": "mysql",
     # Databricks / Spark
-    "databricks":               "databricks",
-    "spark_sql":                "spark",
-    "spark_config":             "spark",
+    "databricks": "databricks",
+    "spark_sql": "spark",
+    "spark_config": "spark",
     # Hive
-    "hive":                     "hive",
-    "cloudera_hive":            "hive",
-    "cloudera_impala":          "hive",
+    "hive": "hive",
+    "cloudera_hive": "hive",
+    "cloudera_impala": "hive",
     # SAP HANA
-    "sap_hana":                 "saphana",
+    "sap_hana": "saphana",
     # IBM DB2
-    "db2":                      "db2",
-    "db2_11":                   "db2",
-    "ibm_db2":                  "db2",
+    "db2": "db2",
+    "db2_11": "db2",
+    "ibm_db2": "db2",
     # IBM Informix (no dedicated DataHub platform — use synthetic ID)
-    "informix":                 "informix",
+    "informix": "informix",
     # ClickHouse / StarRocks
-    "click_house":              "clickhouse",
+    "click_house": "clickhouse",
 }
 
 
@@ -199,29 +177,45 @@ def _mstr_dbtype_to_platform(db_type: str, dbms_name: str = "") -> Optional[str]
 
     # Fuzzy match on dbms.name
     name = (dbms_name or "").lower()
-    if "teradata"   in name: return "teradata"
-    if "snowflake"  in name: return "snowflake"
-    if "sql server" in name or "sqlserver" in name: return "mssql"
-    if "synapse"    in name: return "mssql"
-    if "oracle"     in name: return "oracle"
-    if "postgres"   in name or "postgresql" in name: return "postgres"
-    if "redshift"   in name: return "redshift"
-    if "bigquery"   in name or "big query" in name: return "bigquery"
-    if "mysql"      in name: return "mysql"
-    if "mariadb"    in name or "maria db" in name: return "mysql"
-    if "databricks" in name: return "databricks"
-    if "spark"      in name: return "spark"
-    if "hive"       in name: return "hive"
-    if "hana"       in name: return "saphana"
-    if "db2"        in name: return "db2"
-    if "informix"   in name: return "informix"
-    if "clickhouse" in name or "click house" in name: return "clickhouse"
+    if "teradata" in name:
+        return "teradata"
+    if "snowflake" in name:
+        return "snowflake"
+    if "sql server" in name or "sqlserver" in name:
+        return "mssql"
+    if "synapse" in name:
+        return "mssql"
+    if "oracle" in name:
+        return "oracle"
+    if "postgres" in name or "postgresql" in name:
+        return "postgres"
+    if "redshift" in name:
+        return "redshift"
+    if "bigquery" in name or "big query" in name:
+        return "bigquery"
+    if "mysql" in name:
+        return "mysql"
+    if "mariadb" in name or "maria db" in name:
+        return "mysql"
+    if "databricks" in name:
+        return "databricks"
+    if "spark" in name:
+        return "spark"
+    if "hive" in name:
+        return "hive"
+    if "hana" in name:
+        return "saphana"
+    if "db2" in name:
+        return "db2"
+    if "informix" in name:
+        return "informix"
+    if "clickhouse" in name or "click house" in name:
+        return "clickhouse"
 
     # Synthetic fallback — preserve lineage for unknown/SaaS types
     if key and key not in ("unknown", "url_auth", ""):
         return f"mstr:{key}"
     return None
-
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -238,6 +232,55 @@ ISERVER_PROJECT_UNAVAILABLE = -2147209151  # project not loaded  → fail fast
 ISERVER_CUBE_NOT_PUBLISHED = -2147072488  # cube not in memory  → definition only
 ISERVER_DYNAMIC_SOURCING_CUBE = -2147212800  # attr form cache cube → definition only
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+class _CubeRegistryEntry(TypedDict):
+    """Entry in the per-cube registry populated by _build_registries."""
+
+    project_id: str
+    name: str
+
+
+class _DatasetRegistryEntry(TypedDict):
+    """Entry in the per-library-dataset registry populated by _build_registries."""
+
+    project_id: str
+    name: str
+
+
+def _filter_real_platforms(
+    mapping: Dict[str, List[str]],
+) -> Dict[str, List[str]]:
+    """Exclude MicroStrategy-internal (mstr:) pseudo-platform entries."""
+    return {p: names for p, names in mapping.items() if not p.startswith("mstr:")}
+
+
+class DatasourceRef(NamedTuple):
+    """Datasource ID and display name returned by model-table resolution."""
+
+    id: str
+    name: str
+
+
+class DocumentVizExtraction(NamedTuple):
+    """Viz chart URNs and embedded dataset records extracted from a document definition."""
+
+    chart_urns: List[str]
+    datasets: List[Dict[str, Any]]
+
+
+class ReportLineageResult(NamedTuple):
+    """Warehouse upstream URNs and raw SQL from a report sqlView call."""
+
+    upstream_urns: List[str]
+    sql: Optional[str]
+
+
+class CubeLineageResult(NamedTuple):
+    """Upstream lineage aspect and SQL string from cube warehouse lineage building."""
+
+    upstream_lineage: Optional[UpstreamLineageClass]
+    sql: Optional[str]
 
 
 def _extract_tables_from_sql(sql: str) -> List[str]:
@@ -338,7 +381,9 @@ class FolderKey(ContainerKey):
 @support_status(SupportStatus.INCUBATING)
 @capability(SourceCapability.PLATFORM_INSTANCE, "Enabled by default", supported=True)
 @capability(
-    SourceCapability.DOMAINS, "Supported via the `domain` config field", supported=True
+    SourceCapability.DOMAINS,
+    "Not supported — no domain config field or domain aspect emission",
+    supported=False,
 )
 @capability(SourceCapability.CONTAINERS, "Enabled by default", supported=True)
 @capability(SourceCapability.DESCRIPTIONS, "Enabled by default", supported=True)
@@ -393,8 +438,8 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
         )
 
         # Global registries for cross-project lineage resolution
-        self.cube_registry: Dict[str, Dict[str, Any]] = {}
-        self.dataset_registry: Dict[str, Dict[str, Any]] = {}
+        self.cube_registry: Dict[str, _CubeRegistryEntry] = {}
+        self.dataset_registry: Dict[str, _DatasetRegistryEntry] = {}
         self._datasets_by_project: Dict[str, List[Dict[str, Any]]] = {}
         self._cubes_by_project: Dict[str, List[Dict[str, Any]]] = {}
 
@@ -415,25 +460,20 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
         # warehouse lineage edges.
         self._document_embedded_ids: Set[str] = set()
 
-        domain_config = getattr(self.config, "domain", {})
         self.domain_registry = DomainRegistry(
-            cached_domains=[
-                domain_id
-                for domain_id in (domain_config.values() if domain_config else [])
-            ],
+            cached_domains=[],
             graph=self.ctx.graph,
         )
 
     @classmethod
     def create(cls, config_dict: dict, ctx: PipelineContext) -> "MicroStrategySource":
-        config = MicroStrategyConfig.parse_obj(config_dict)
+        config = MicroStrategyConfig.model_validate(config_dict)
         return cls(config, ctx)
 
     # ── Main extraction ───────────────────────────────────────────────────────
 
-    def get_workunits_internal(self) -> Iterable[MetadataWorkUnit]:
+    def get_workunits_internal(self) -> Iterable[Union[MetadataWorkUnit, Entity]]:
         with self.client:
-
             try:
                 projects = self.client.get_projects()
             except MicroStrategyProjectUnavailableError as e:
@@ -467,168 +507,203 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 try:
                     yield from self._process_project(project)
                 except MicroStrategyProjectUnavailableError as e:
+                    project_name = project.get("name", project.get("id"))
                     logger.warning(
                         "Skipping project %s — IServer unavailable: %s",
-                        project.get("name", project.get("id")),
+                        project_name,
                         e,
                     )
+                    self.report.report_warning(
+                        "project-unavailable",
+                        context=str(project_name),
+                        exc=e,
+                    )
+
+    @staticmethod
+    def _platforms_from_datasource_list(
+        dss: List[Dict[str, Any]],
+    ) -> Dict[str, List[str]]:
+        """Map normal-type datasources to {platform: [names]}."""
+        mapping: Dict[str, List[str]] = defaultdict(list)
+        for ds in dss:
+            if ds.get("datasourceType") == "normal":
+                db_type = ds.get("database", {}).get("type", "")
+                dbms_name = ds.get("dbms", {}).get("name", "")
+                platform = _mstr_dbtype_to_platform(db_type, dbms_name)
+                if platform:
+                    mapping[platform].append(ds.get("name", "?"))
+        return dict(mapping)
 
     def _detect_warehouse_platform(self, project_id: Optional[str] = None) -> None:
         """
-        Detect the warehouse platform for the given project using a four-tier
-        strategy, stopping as soon as a definitive answer is found:
-
-        Tier 1 — GET /api/projects/{projectId}/datasources  (project-scoped, URL path)
-            Most targeted: returns ONLY the datasources attached to this project.
-            Unlike the env-level endpoint which may return hundreds of mixed sources,
-            this typically returns one to a few entries, making detection unambiguous.
-            Project ID goes in the URL path — NOT as X-MSTR-ProjectID header.
-
-        Tier 2 — GET /api/datasources  (env-level, no project header)
-            Falls back to the environment-wide list. Works on single-platform
-            environments where exactly one real warehouse platform is configured.
-
-        Tier 3 — Tables API + per-datasource lookup  (project-scoped)
-            When Tiers 1–2 are ambiguous or unavailable, fetch a warehouse table,
-            read its primaryDataSource.objectId, then resolve the datasource by ID.
-            First tries GET /api/v2/tables/{id}; if that returns 404 (not available
-            on all MSTR versions), falls back to the model tables path:
-              GET /api/model/tables (paginated, match by name)
-              → GET /api/model/tables/{model_table_id} → primaryDataSource.objectId
-              → GET /api/datasources/{id}
-            NOTE: type-53 "DB Table" IDs from /api/searches/results are NOT valid
-            model Table IDs — must list and match by name first.
+        Detect the warehouse platform using a three-tier fallback strategy,
+        stopping as soon as a definitive answer is found.
 
         Sets self._warehouse_platform (str) or leaves it None.
         Called once per project at the top of _process_project.
         """
-        if self._warehouse_platform and not self._warehouse_platform.startswith("mstr:"):
+        if self._warehouse_platform and not self._warehouse_platform.startswith(
+            "mstr:"
+        ):
             # Already resolved from a previous project — reuse.
             return
 
-        from collections import defaultdict
-
-        def _platforms_from_datasource_list(
-            dss: List[Dict[str, Any]],
-        ) -> Dict[str, List[str]]:
-            """Map normal-type datasources to {platform: [names]}."""
-            mapping: Dict[str, List[str]] = defaultdict(list)
-            for ds in dss:
-                if ds.get("datasourceType") == "normal":
-                    db_type   = ds.get("database", {}).get("type", "")
-                    dbms_name = ds.get("dbms", {}).get("name", "")
-                    platform  = _mstr_dbtype_to_platform(db_type, dbms_name)
-                    if platform:
-                        mapping[platform].append(ds.get("name", "?"))
-            return dict(mapping)
-
-        # ── Tier 1: project-scoped /api/projects/{id}/datasources ────────────
+        if project_id and self._try_tier1_project_datasources(project_id):
+            return
+        if self._try_tier2_env_datasources():
+            return
         if project_id:
+            self._try_tier3_tables_api(project_id)
+
+    def _try_tier1_project_datasources(self, project_id: str) -> bool:
+        """
+        Tier 1: GET /api/projects/{id}/datasources — project-scoped.
+
+        Most targeted: returns ONLY the datasources attached to this project.
+        Project ID goes in the URL path — NOT as X-MSTR-ProjectID header.
+        Returns True if a single unambiguous platform was detected.
+        """
+        try:
             proj_dss = self.client.get_project_datasources(project_id)
-            if proj_dss:
-                real = {
-                    p: names
-                    for p, names in _platforms_from_datasource_list(proj_dss).items()
-                    if not p.startswith("mstr:")
-                }
-                if len(real) == 1:
-                    platform = next(iter(real))
+        except Exception as e:
+            logger.warning(
+                "Tier 1 datasource lookup failed for project %s, falling back: %s",
+                project_id,
+                e,
+            )
+            self.report.report_warning(
+                "Tier 1 datasource lookup failed; falling back to env-level detection.",
+                context=project_id,
+                title="warehouse-platform-detection-failed",
+                exc=e,
+            )
+            return False
+
+        real = _filter_real_platforms(self._platforms_from_datasource_list(proj_dss))
+        if len(real) == 1:
+            platform = next(iter(real))
+            logger.info(
+                "Warehouse platform detected from project datasources "
+                "(GET /api/projects/%s/datasources): %s",
+                project_id,
+                platform,
+            )
+            self._warehouse_platform = platform
+            return True
+        if real:
+            logger.info(
+                "Multiple platforms in project datasources (%s) for project %s "
+                "— falling back to Tables API.",
+                list(real),
+                project_id,
+            )
+        return False
+
+    def _try_tier2_env_datasources(self) -> bool:
+        """
+        Tier 2: GET /api/datasources — env-level, no project header.
+
+        Falls back to the environment-wide list. Works on single-platform
+        environments where exactly one real warehouse platform is configured.
+        Returns True if a single unambiguous platform was detected.
+        """
+        datasources = self.client.get_datasources()
+        real = _filter_real_platforms(
+            self._platforms_from_datasource_list(datasources)
+        )
+        if len(real) == 1:
+            platform = next(iter(real))
+            logger.info(
+                "Warehouse platform detected from /api/datasources: %s", platform
+            )
+            self._warehouse_platform = platform
+            return True
+        if real:
+            logger.info(
+                "Multiple warehouse platforms in /api/datasources (%s) — "
+                "using Tables API for project-scoped lookup.",
+                len(real),
+            )
+        return False
+
+    def _try_tier3_tables_api(self, project_id: str) -> bool:
+        """
+        Tier 3: Tables API + per-datasource lookup — project-scoped.
+
+        Fetches a sample warehouse table, reads its primaryDataSource.objectId,
+        then resolves the datasource. First tries GET /api/v2/tables/{id}; if
+        that returns nothing, falls back to the model tables path.
+        Returns True if a platform was detected.
+        """
+        try:
+            tables = self.client.search_warehouse_tables(project_id, limit=5)
+            for table in tables:
+                table_id = table.get("id")
+                table_name = table.get("name", table_id)
+                if not table_id:
+                    continue
+
+                # 3a: try GET /api/v2/tables/{id} first
+                defn = self.client.get_table_definition(table_id, project_id)
+                ds_ref = defn.get("primaryDataSource") or {}
+                ds_id = ds_ref.get("objectId")
+                ds_name = ds_ref.get("name", "?")
+
+                # 3b: if v2/tables returned nothing, fall back to model tables path
+                if not ds_id and table_name:
+                    ref = self._resolve_datasource_via_model_tables(
+                        table_name, project_id
+                    )
+                    ds_id, ds_name = ref.id, ref.name
+
+                if not ds_id:
+                    continue
+
+                ds_obj = self.client.get_datasource_by_id(ds_id, project_id)
+                db_type = ds_obj.get("database", {}).get("type", "")
+                dbms_name = ds_obj.get("dbms", {}).get("name", "")
+                platform = _mstr_dbtype_to_platform(db_type, dbms_name)
+
+                if platform and not platform.startswith("mstr:"):
                     logger.info(
-                        "Warehouse platform detected from project datasources "
-                        "(GET /api/projects/%s/datasources): %s",
-                        project_id, platform,
+                        "Warehouse platform detected from Tables API "
+                        "(table '%s' → datasource '%s' → %s).",
+                        table_name,
+                        ds_name,
+                        platform,
                     )
                     self._warehouse_platform = platform
-                    return
-                if real:
-                    logger.info(
-                        "Multiple platforms in project datasources (%s) for project %s "
-                        "— falling back to Tables API.",
-                        list(real), project_id,
-                    )
+                    return True
 
-        # ── Tier 2: env-level /api/datasources ───────────────────────────────
-        datasources = self.client.get_datasources()
-        if datasources:
-            real = {
-                p: names
-                for p, names in _platforms_from_datasource_list(datasources).items()
-                if not p.startswith("mstr:")
-            }
-            if len(real) == 1:
-                platform = next(iter(real))
-                logger.info(
-                    "Warehouse platform detected from /api/datasources: %s", platform
-                )
-                self._warehouse_platform = platform
-                return
-            if real:
-                logger.info(
-                    "Multiple warehouse platforms in /api/datasources (%s) — "
-                    "using Tables API for project-scoped lookup.",
-                    len(real),
-                )
-
-        # ── Tier 3: Tables API — project-scoped DSN lookup ───────────────────
-        if project_id:
-            try:
-                tables = self.client.search_warehouse_tables(project_id, limit=5)
-                for table in tables:
-                    table_id   = table.get("id")
-                    table_name = table.get("name", table_id)
-                    if not table_id:
-                        continue
-
-                    # 3a: try GET /api/v2/tables/{id} first
-                    defn   = self.client.get_table_definition(table_id, project_id)
-                    ds_ref = defn.get("primaryDataSource") or {}
-                    ds_id  = ds_ref.get("objectId")
-                    ds_name = ds_ref.get("name", "?")
-
-                    # 3b: if v2/tables returned nothing, fall back to model tables path
-                    if not ds_id and table_name:
-                        ds_id, ds_name = self._resolve_datasource_via_model_tables(
-                            table_name, project_id
-                        )
-
-                    if not ds_id:
-                        continue
-
-                    ds_obj    = self.client.get_datasource_by_id(ds_id, project_id)
-                    db_type   = ds_obj.get("database", {}).get("type", "")
-                    dbms_name = ds_obj.get("dbms", {}).get("name", "")
-                    platform  = _mstr_dbtype_to_platform(db_type, dbms_name)
-
-                    if platform and not platform.startswith("mstr:"):
-                        logger.info(
-                            "Warehouse platform detected from Tables API "
-                            "(table '%s' → datasource '%s' → %s).",
-                            table_name, ds_name, platform,
-                        )
-                        self._warehouse_platform = platform
-                        return
-
-                logger.warning(
-                    "Tables API did not resolve a warehouse platform for project %s.",
-                    project_id,
-                )
-            except Exception as e:
-                logger.warning(
-                    "Tables API platform lookup failed for project %s: %s",
-                    project_id, e,
-                )
+            logger.warning(
+                "Tables API did not resolve a warehouse platform for project %s.",
+                project_id,
+            )
+        except Exception as e:
+            logger.warning(
+                "Tables API platform lookup failed for project %s: %s",
+                project_id,
+                e,
+            )
+            self.report.report_warning(
+                "Tables API platform lookup failed; warehouse platform not resolved.",
+                context=project_id,
+                title="warehouse-platform-detection-failed",
+                exc=e,
+            )
+        return False
 
     def _resolve_datasource_via_model_tables(
         self, table_name: str, project_id: str
-    ) -> tuple:
+    ) -> DatasourceRef:
         """
         Find a table's primaryDataSource by searching the model tables list.
 
-        Called from _detect_warehouse_platform Tier 3b when GET /api/v2/tables/{id}
-        returns 404. Paginates GET /api/model/tables to find the model Table ID
+        Called from _try_tier3_tables_api when GET /api/v2/tables/{id} returns
+        nothing. Paginates GET /api/model/tables to find the model Table ID
         matching table_name (case-insensitive), then fetches its definition.
 
-        Returns (datasource_objectId, datasource_name) or ("", "?") if not found.
+        Returns a DatasourceRef with id="" and name="?" if not found.
         """
         PAGE = 200
         offset = 0
@@ -646,24 +721,29 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                     model_id = info.get("objectId")
                     if not model_id:
                         continue
-                    defn   = self.client.get_model_table_definition(model_id, project_id)
+                    defn = self.client.get_model_table_definition(model_id, project_id)
                     ds_ref = defn.get("primaryDataSource") or {}
-                    ds_id  = ds_ref.get("objectId", "")
+                    ds_id = ds_ref.get("objectId", "")
                     ds_name = ds_ref.get("name", "?")
                     if ds_id:
                         logger.debug(
                             "Model tables path: '%s' → model ID %s → datasource '%s' (%s)",
-                            table_name, model_id, ds_name, ds_id,
+                            table_name,
+                            model_id,
+                            ds_name,
+                            ds_id,
                         )
-                    return ds_id, ds_name
+                    return DatasourceRef(ds_id, ds_name)
             offset += len(entries)
             if not entries or (total is not None and offset >= total):
                 break
         logger.debug(
             "Model tables path: '%s' not found across %s model tables in project %s",
-            table_name, total, project_id,
+            table_name,
+            total,
+            project_id,
         )
-        return "", "?"
+        return DatasourceRef("", "?")
 
     # ── Registry building ─────────────────────────────────────────────────────
 
@@ -718,7 +798,9 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 )
                 self._cubes_by_project[project_id] = cubes
                 for cube in cubes:
-                    self.cube_registry[cube["id"]] = {**cube, "project_id": project_id}
+                    self.cube_registry[cube["id"]] = _CubeRegistryEntry(
+                        project_id=project_id, name=cube.get("name", cube["id"])
+                    )
                 logger.debug(
                     "Registered %s cubes from %s", len(cubes), project.get("name")
                 )
@@ -740,7 +822,9 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 datasets = self.client.get_datasets(project_id)
                 self._datasets_by_project[project_id] = datasets
                 for ds in datasets:
-                    self.dataset_registry[ds["id"]] = {**ds, "project_id": project_id}
+                    self.dataset_registry[ds["id"]] = _DatasetRegistryEntry(
+                        project_id=project_id, name=ds.get("name", ds["id"])
+                    )
             except Exception as e:
                 logger.warning(
                     "Failed dataset registry for %s: %s", project.get("name"), e
@@ -751,7 +835,9 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
 
     # ── Project processing ────────────────────────────────────────────────────
 
-    def _process_project(self, project: Dict[str, Any]) -> Iterable[MetadataWorkUnit]:
+    def _process_project(
+        self, project: Dict[str, Any]
+    ) -> Iterable[Union[MetadataWorkUnit, Entity]]:
         project_id = project["id"]
         project_name = project.get("name", project_id)
         logger.info("Processing project: %s", project_name)
@@ -794,7 +880,12 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 project, project_id, project_name
             )
 
-    def _yield_folder_workunits(self, project, project_id, project_name):
+    def _yield_folder_workunits(
+        self,
+        project: Dict[str, Any],
+        project_id: str,
+        project_name: str,
+    ) -> Iterable[Union[MetadataWorkUnit, Entity]]:
         try:
             folders = self.client.get_folders(project_id)
             for folder in folders:
@@ -802,8 +893,16 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                     yield from self._emit_folder_container(folder, project)
         except Exception as e:
             logger.warning("Failed to get folders for %s: %s", project_name, e)
+            self.report.report_warning(
+                "folder-fetch-failed", context=project_name, exc=e
+            )
 
-    def _yield_dashboard_workunits(self, project, project_id, project_name):
+    def _yield_dashboard_workunits(
+        self,
+        project: Dict[str, Any],
+        project_id: str,
+        project_name: str,
+    ) -> Iterable[Union[MetadataWorkUnit, Entity]]:
         try:
             all_type55 = list(self.client.search_objects(project_id, object_type=55))
             # Filter to actual content objects — skip themes and templates
@@ -821,8 +920,16 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                     yield from self._process_dashboard(dashboard, project)
         except Exception as e:
             logger.warning("Failed to get dashboards for %s: %s", project_name, e)
+            self.report.report_warning(
+                "dashboard-fetch-failed", context=project_name, exc=e
+            )
 
-    def _yield_report_workunits(self, project, project_id, project_name):
+    def _yield_report_workunits(
+        self,
+        project: Dict[str, Any],
+        project_id: str,
+        project_name: str,
+    ) -> Iterable[Union[MetadataWorkUnit, Entity]]:
         try:
             reports = list(self.client.search_objects(project_id, object_type=3))
             logger.info("Found %s reports in %s", len(reports), project_name)
@@ -850,8 +957,16 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 )
         except Exception as e:
             logger.warning("Failed to get reports for %s: %s", project_name, e)
+            self.report.report_warning(
+                "report-fetch-failed", context=project_name, exc=e
+            )
 
-    def _yield_cube_workunits(self, project, project_id, project_name):
+    def _yield_cube_workunits(
+        self,
+        project: Dict[str, Any],
+        project_id: str,
+        project_name: str,
+    ) -> Iterable[Union[MetadataWorkUnit, Entity]]:
         try:
             cubes = self._cubes_by_project.get(project_id) or list(
                 self.client.search_objects(
@@ -879,13 +994,22 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 )
         except Exception as e:
             logger.warning("Failed to get cubes for %s: %s", project_name, e)
+            self.report.report_warning("cube-fetch-failed", context=project_name, exc=e)
 
-    def _yield_library_dataset_workunits(self, project, project_id, project_name):
+    def _yield_library_dataset_workunits(
+        self,
+        project: Dict[str, Any],
+        project_id: str,
+        project_name: str,
+    ) -> Iterable[Union[MetadataWorkUnit, Entity]]:
         try:
             for ds in self._datasets_by_project.get(project_id, []):
                 yield from self._process_dataset(ds, project)
         except Exception as e:
             logger.warning("Failed to emit datasets for %s: %s", project_name, e)
+            self.report.report_warning(
+                "dataset-fetch-failed", context=project_name, exc=e
+            )
 
     # ── Container emission ────────────────────────────────────────────────────
 
@@ -901,11 +1025,13 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
         yield from gen_containers(
             container_key=project_key,
             name=project.get("name", project["id"]),
-            sub_types=[BIContainerSubTypes.TABLEAU_PROJECT],
+            sub_types=[BIContainerSubTypes.MICROSTRATEGY_PROJECT],
             description=project.get("description"),
         )
 
-    def _emit_folder_container(self, folder, project) -> Iterable[MetadataWorkUnit]:
+    def _emit_folder_container(
+        self, folder: Dict[str, Any], project: Dict[str, Any]
+    ) -> Iterable[MetadataWorkUnit]:
         folder_key = FolderKey(
             folder=folder["id"],
             project=project["id"],
@@ -916,7 +1042,7 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
         yield from gen_containers(
             container_key=folder_key,
             name=folder.get("name", folder["id"]),
-            sub_types=[BIContainerSubTypes.LOOKER_FOLDER],
+            sub_types=[BIContainerSubTypes.MICROSTRATEGY_FOLDER],
             description=folder.get("description"),
             parent_container_key=ProjectKey(
                 project=project["id"],
@@ -930,7 +1056,7 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
 
     def _process_dashboard(
         self, dashboard: Dict[str, Any], project: Dict[str, Any]
-    ) -> Iterable[MetadataWorkUnit]:
+    ) -> Iterable[Union[MetadataWorkUnit, Entity]]:
         """
         Process dashboard or document.
 
@@ -953,12 +1079,6 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 )
                 return
 
-        dashboard_urn = make_dashboard_urn(
-            platform=self.platform,
-            name=dashboard["id"],
-            platform_instance=self.config.platform_instance,
-        )
-
         chart_urns: List[str] = []
         # embedded_datasets: list of {"id": ..., "name": ...} from legacy document definition
         # used to emit named chart stubs so dashboard→chart links resolve in DataHub
@@ -970,9 +1090,9 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                     defn = self.client.get_document_definition(
                         dashboard["id"], project_id
                     )
-                    chart_urns, embedded_datasets = self._extract_viz_ids_from_document(
-                        defn
-                    )
+                    doc_extraction = self._extract_viz_ids_from_document(defn)
+                    chart_urns = doc_extraction.chart_urns
+                    embedded_datasets = doc_extraction.datasets
                 else:
                     defn = self.client.get_dossier_definition(
                         dashboard["id"], project_id
@@ -985,6 +1105,11 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                     subtype,
                     e,
                 )
+                self.report.report_warning(
+                    "dashboard-definition-failed",
+                    context=f"{dashboard.get('name')} (subtype={subtype})",
+                    exc=e,
+                )
 
         dash_props = self._build_common_custom_props(dashboard, project)
         dash_props["dashboard_id"] = dashboard["id"]
@@ -995,53 +1120,46 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
             else ("modern_dossier" if is_modern else "dossier")
         )
 
-        dashboard_info = DashboardInfoClass(
-            title=dashboard.get("name", dashboard["id"]),
-            description=dashboard.get("description") or "",
-            charts=chart_urns,
-            lastModified=self._build_audit_stamps(
-                dashboard.get("dateCreated"),
-                dashboard.get("dateModified"),
-                dashboard.get("owner"),
-            ),
-            dashboardUrl=self._build_dashboard_url(dashboard["id"], project_id),
-            customProperties=dash_props,
-        )
-
-        yield MetadataChangeProposalWrapper(
-            entityUrn=dashboard_urn, aspect=dashboard_info
-        ).as_workunit()
-        yield MetadataChangeProposalWrapper(
-            entityUrn=dashboard_urn, aspect=StatusClass(removed=False)
-        ).as_workunit()
-        yield MetadataChangeProposalWrapper(
-            entityUrn=dashboard_urn, aspect=self._make_platform_instance()
-        ).as_workunit()
-        yield MetadataChangeProposalWrapper(
-            entityUrn=dashboard_urn,
-            aspect=ContainerClass(container=self._project_key(project).as_urn()),
-        ).as_workunit()
-
         cert = dashboard.get("certifiedInfo", {})
+        extra_aspects: List[Aspect] = [StatusClass(removed=False)]
         if cert.get("certified"):
-            yield MetadataChangeProposalWrapper(
-                entityUrn=dashboard_urn, aspect=self._make_certified_tag()
-            ).as_workunit()
+            extra_aspects.append(self._make_certified_tag())
 
+        owners = None
         if self.config.include_ownership and dashboard.get("owner"):
             certifier = cert.get("certifier") if cert.get("certified") else None
-            yield from self._emit_ownership(
-                dashboard_urn, dashboard["owner"], certifier
-            )
+            owners = self._build_owners(dashboard["owner"], certifier) or None
+
+        yield SdkDashboard(
+            name=dashboard["id"],
+            platform=self.platform,
+            platform_instance=self.config.platform_instance,
+            display_name=dashboard.get("name", dashboard["id"]),
+            description=dashboard.get("description") or "",
+            charts=chart_urns,
+            dashboard_url=self._build_dashboard_url(dashboard["id"], project_id),
+            custom_properties=dash_props,
+            parent_container=self._project_key(project).as_urn(),
+            owners=owners,
+            created_at=self._parse_datetime(dashboard.get("dateCreated")),
+            last_modified=self._parse_datetime(dashboard.get("dateModified")),
+            extra_aspects=extra_aspects,
+        )
 
         # For legacy documents and modern dossiers, fetch warehouse lineage per embedded
         # dataset and store as a name→tables map so stubs can set inputs[] directly.
         # This replaces the synthetic __datasource entity — each chart stub now carries its
         # own specific warehouse tables, matching the standard DataHub BI connector pattern.
         per_dataset_tables: Dict[str, List[str]] = {}
-        if (is_legacy or is_modern) and self.config.include_lineage and self.config.include_warehouse_lineage:
+        if (
+            (is_legacy or is_modern)
+            and self.config.include_lineage
+            and self.config.include_warehouse_lineage
+        ):
             per_dataset_tables = self._fetch_per_dataset_tables(
-                dashboard["id"], project_id, dashboard.get("name", dashboard["id"]),
+                dashboard["id"],
+                project_id,
+                dashboard.get("name", dashboard["id"]),
                 is_legacy=is_legacy,
             )
 
@@ -1086,6 +1204,12 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                             viz_ids.append(str(viz_id))
         except Exception as e:
             logger.warning("Failed to extract dossier viz IDs: %s", e)
+            self.report.report_warning(
+                "Failed to extract visualization IDs from dossier definition.",
+                context=str(defn.get("id", "")),
+                title="dashboard-viz-extraction-failed",
+                exc=e,
+            )
         return [
             make_chart_urn(
                 platform=self.platform,
@@ -1097,12 +1221,12 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
 
     def _extract_viz_ids_from_document(
         self, defn: Dict[str, Any]
-    ) -> Tuple[List[str], List[Dict[str, Any]]]:
+    ) -> DocumentVizExtraction:
         """
         Extract chart URNs and named dataset records from legacy document definition.
         Structure: datasets[] → each entry has id (chart URN key) and name.
 
-        Returns (chart_urns, datasets) so callers can emit named stubs for each
+        Returns a DocumentVizExtraction so callers can emit named stubs for each
         embedded dataset, resolving the ghost-node problem in the DataHub lineage graph.
         """
         datasets: List[Dict[str, Any]] = []
@@ -1118,6 +1242,12 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                     )
         except Exception as e:
             logger.warning("Failed to extract document chart IDs: %s", e)
+            self.report.report_warning(
+                "Failed to extract dataset chart IDs from document definition.",
+                context=str(defn.get("id", "")),
+                title="dashboard-viz-extraction-failed",
+                exc=e,
+            )
 
         chart_urns = [
             make_chart_urn(
@@ -1127,14 +1257,14 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
             )
             for ds in datasets
         ]
-        return chart_urns, datasets
+        return DocumentVizExtraction(chart_urns, datasets)
 
     def _emit_embedded_chart_stub(
         self,
         dataset: Dict[str, Any],
         project: Dict[str, Any],
         warehouse_urns: Optional[List[str]] = None,
-    ) -> Iterable[MetadataWorkUnit]:
+    ) -> Iterable[Union[MetadataWorkUnit, Entity]]:
         """
         Emit a chart stub for an embedded document dataset.
 
@@ -1149,58 +1279,28 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
           - status, dataPlatformInstance, container (required for browse)
           - inputFields (attributes + metrics) if include_report_definitions is enabled
         """
-        chart_urn = make_chart_urn(
-            platform=self.platform,
-            name=dataset["id"],
-            platform_instance=self.config.platform_instance,
-        )
-
-        yield MetadataChangeProposalWrapper(
-            entityUrn=chart_urn,
-            aspect=ChartInfoClass(
-                title=dataset.get("name", dataset["id"]),
-                description="",
-                inputs=warehouse_urns or [],
-                lastModified=self._build_audit_stamps(None, None, None),
-                customProperties={
-                    "project_id": project["id"],
-                    "project_name": project.get("name", ""),
-                    "dataset_id": dataset["id"],
-                    "source": "embedded_document_dataset",
-                },
-            ),
-        ).as_workunit()
-        yield MetadataChangeProposalWrapper(
-            entityUrn=chart_urn,
-            aspect=SubTypesClass(typeNames=["Dataset"]),
-        ).as_workunit()
-        yield MetadataChangeProposalWrapper(
-            entityUrn=chart_urn, aspect=StatusClass(removed=False)
-        ).as_workunit()
-        yield MetadataChangeProposalWrapper(
-            entityUrn=chart_urn, aspect=self._make_platform_instance()
-        ).as_workunit()
-        yield MetadataChangeProposalWrapper(
-            entityUrn=chart_urn,
-            aspect=ContainerClass(container=self._project_key(project).as_urn()),
-        ).as_workunit()
+        extra_aspects: List[Aspect] = [StatusClass(removed=False)]
 
         # InputFields — fetch the dataset definition to get attributes and metrics.
-        # Use the first warehouse URN (if any) as the schemaField parent so fields
-        # are anchored to the actual upstream table in the lineage graph.
         if self.config.include_report_definitions:
-            parent_urn = (warehouse_urns[0] if warehouse_urns
-                          else self._project_key(project).as_urn())
+            parent_urn = (
+                warehouse_urns[0]
+                if warehouse_urns
+                else self._project_key(project).as_urn()
+            )
             try:
                 defn = self.client.get_report(dataset["id"], project["id"])
-                avail = defn.get("definition", {}).get("availableObjects", {}) if defn else {}
+                avail = (
+                    defn.get("definition", {}).get("availableObjects", {})
+                    if defn
+                    else {}
+                )
                 if avail:
-                    input_fields = self._build_input_fields(avail, parent_urn, project["id"])
+                    input_fields = self._build_input_fields(
+                        avail, parent_urn, project["id"]
+                    )
                     if input_fields:
-                        yield MetadataChangeProposalWrapper(
-                            entityUrn=chart_urn,
-                            aspect=InputFieldsClass(fields=input_fields),
-                        ).as_workunit()
+                        extra_aspects.append(InputFieldsClass(fields=input_fields))
             except Exception as e:
                 logger.debug(
                     "Could not fetch definition for embedded dataset %s: %s",
@@ -1208,11 +1308,29 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                     e,
                 )
 
+        yield SdkChart(
+            name=dataset["id"],
+            platform=self.platform,
+            platform_instance=self.config.platform_instance,
+            display_name=dataset.get("name", dataset["id"]),
+            description="",
+            input_datasets=warehouse_urns or [],
+            custom_properties={
+                "project_id": project["id"],
+                "project_name": project.get("name", ""),
+                "dataset_id": dataset["id"],
+                "source": "embedded_document_dataset",
+            },
+            subtype="Dataset",
+            parent_container=self._project_key(project).as_urn(),
+            extra_aspects=extra_aspects,
+        )
+
     # ── Report processing ─────────────────────────────────────────────────────
 
     def _process_report(
         self, report: Dict[str, Any], project: Dict[str, Any]
-    ) -> Iterable[MetadataWorkUnit]:
+    ) -> Iterable[Union[MetadataWorkUnit, Entity]]:
         """
         Process a report (emitted as a DataHub chart entity).
 
@@ -1266,20 +1384,19 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
             # (which runs after report processing) includes it even if not directly linked
             # from a dashboard.
             if self._dashboard_driven_mode() and registry_inputs:
-                source_id = (
-                    source_for_registry.get("dataSource", {}).get("id")
-                    or source_for_registry.get("sourceId")
-                )
+                source_id = source_for_registry.get("dataSource", {}).get(
+                    "id"
+                ) or source_for_registry.get("sourceId")
                 if source_id:
                     self._dashboard_referenced_ids.add(source_id)
 
             # Fall back to warehouse lineage via sqlView for live reports (no cube backing)
             if self.config.include_warehouse_lineage and not registry_inputs:
-                warehouse_inputs, sql = self._get_report_warehouse_upstreams(
+                rlu = self._get_report_warehouse_upstreams(
                     report["id"], project["id"], report.get("name", "")
                 )
-                inputs.extend(warehouse_inputs)
-                sql_for_column_lineage = sql
+                inputs.extend(rlu.upstream_urns)
+                sql_for_column_lineage = rlu.sql
 
         # Build enriched customProperties
         subtype = report.get("subtype", 0)
@@ -1305,64 +1422,47 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 if metrics:
                     custom_props["metric_count"] = str(len(metrics))
 
-        chart_info = ChartInfoClass(
-            title=effective.get("name", report["id"]),
-            description=effective.get("description") or "",
-            inputs=inputs,
-            lastModified=self._build_audit_stamps(
-                effective.get("dateCreated"),
-                effective.get("dateModified"),
-                effective.get("owner"),
-            ),
-            externalUrl=self._build_report_url(report["id"], project["id"]),
-            customProperties=custom_props,
-        )
-
-        yield MetadataChangeProposalWrapper(
-            entityUrn=chart_urn, aspect=chart_info
-        ).as_workunit()
-        yield MetadataChangeProposalWrapper(
-            entityUrn=chart_urn,
-            aspect=SubTypesClass(typeNames=[self._report_subtype_name(subtype)]),
-        ).as_workunit()
-        yield MetadataChangeProposalWrapper(
-            entityUrn=chart_urn, aspect=StatusClass(removed=False)
-        ).as_workunit()
-        yield MetadataChangeProposalWrapper(
-            entityUrn=chart_urn, aspect=self._make_platform_instance()
-        ).as_workunit()
-        yield MetadataChangeProposalWrapper(
-            entityUrn=chart_urn,
-            aspect=ContainerClass(container=self._project_key(project).as_urn()),
-        ).as_workunit()
+        cert = report.get("certifiedInfo", {})
+        extra_aspects: List[Aspect] = [StatusClass(removed=False)]
+        if cert.get("certified"):
+            extra_aspects.append(self._make_certified_tag())
 
         # InputFields — attributes and metrics visible on the chart in DataHub
         if report_defn:
             avail = report_defn.get("definition", {}).get("availableObjects", {})
             if avail:
-                # Point schemaFieldUrns at the first upstream dataset (cube or warehouse table).
-                # Falls back to the chart's own project container URN if no inputs exist.
-                parent_urn = inputs[0] if inputs else self._project_key(project).as_urn()
-                input_fields = self._build_input_fields(avail, parent_urn, project["id"])
+                parent_urn = (
+                    inputs[0] if inputs else self._project_key(project).as_urn()
+                )
+                input_fields = self._build_input_fields(
+                    avail, parent_urn, project["id"]
+                )
                 if input_fields:
-                    yield MetadataChangeProposalWrapper(
-                        entityUrn=chart_urn,
-                        aspect=InputFieldsClass(fields=input_fields),
-                    ).as_workunit()
+                    extra_aspects.append(InputFieldsClass(fields=input_fields))
 
-        # Certification tag
-        cert = report.get("certifiedInfo", {})
-        if cert.get("certified"):
-            yield MetadataChangeProposalWrapper(
-                entityUrn=chart_urn, aspect=self._make_certified_tag()
-            ).as_workunit()
-
-        # Ownership — pass certifier separately so they get TECHNICAL_OWNER role
+        owners = None
         if self.config.include_ownership and effective.get("owner"):
             certifier = cert.get("certifier") if cert.get("certified") else None
-            yield from self._emit_ownership(chart_urn, effective["owner"], certifier)
+            owners = self._build_owners(effective["owner"], certifier) or None
 
-        # Column-level lineage from SQL
+        yield SdkChart(
+            name=report["id"],
+            platform=self.platform,
+            platform_instance=self.config.platform_instance,
+            display_name=effective.get("name", report["id"]),
+            description=effective.get("description") or "",
+            input_datasets=inputs,
+            chart_url=self._build_report_url(report["id"], project["id"]),
+            custom_properties=custom_props,
+            subtype=self._report_subtype_name(subtype),
+            parent_container=self._project_key(project).as_urn(),
+            owners=owners,
+            created_at=self._parse_datetime(effective.get("dateCreated")),
+            last_modified=self._parse_datetime(effective.get("dateModified")),
+            extra_aspects=extra_aspects,
+        )
+
+        # Column-level lineage from SQL — still emitted as MWUs
         if sql_for_column_lineage and self.config.include_column_lineage:
             plat = self._warehouse_platform
             yield from self._emit_column_lineage_from_sql(
@@ -1382,18 +1482,10 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
             )
             if not data_source_id:
                 return []
-            if data_source_id in self.cube_registry:
-                info = self.cube_registry[data_source_id]
-                inputs.append(
-                    make_dataset_urn_with_platform_instance(
-                        platform=self.platform,
-                        name=f"{info['project_id']}.{data_source_id}",
-                        env=self.config.env,
-                        platform_instance=self.config.platform_instance,
-                    )
-                )
-            elif data_source_id in self.dataset_registry:
-                info = self.dataset_registry[data_source_id]
+            info = self.cube_registry.get(data_source_id) or self.dataset_registry.get(
+                data_source_id
+            )
+            if info:
                 inputs.append(
                     make_dataset_urn_with_platform_instance(
                         platform=self.platform,
@@ -1415,22 +1507,21 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
         report_id: str,
         project_id: str,
         name: str,
-    ) -> Tuple[List[str], Optional[str]]:
+    ) -> ReportLineageResult:
         """
         Get warehouse table URNs for a live report via sqlView.
 
         Uses executionStage=resolve_prompts so the report's SQL plan is
         resolved without executing the query against the warehouse.
-        Returns (upstream_urns, raw_sql_for_column_lineage).
         """
         try:
             instance_id = self.client.create_report_instance(report_id, project_id)
         except Exception as e:
             logger.debug("Could not create report instance for %s: %s", name, e)
-            return [], None
+            return ReportLineageResult([], None)
 
         if not instance_id:
-            return [], None
+            return ReportLineageResult([], None)
 
         sql: Optional[str] = None
         try:
@@ -1440,20 +1531,25 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
         finally:
             try:
                 self.client.delete_report_instance(report_id, instance_id, project_id)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(
+                    "Failed to delete report instance %s for %s: %s",
+                    instance_id,
+                    report_id,
+                    e,
+                )
 
         if not sql:
-            return [], None
+            return ReportLineageResult([], None)
 
         tables = _extract_tables_from_sql(sql)
-        return self._tables_to_urns(list(set(tables))), sql
+        return ReportLineageResult(self._tables_to_urns(list(set(tables))), sql)
 
     # ── Cube processing ───────────────────────────────────────────────────────
 
     def _process_cube(
         self, cube: Dict[str, Any], project: Dict[str, Any]
-    ) -> Iterable[MetadataWorkUnit]:
+    ) -> Iterable[Union[MetadataWorkUnit, Entity]]:
         dataset_urn = make_dataset_urn_with_platform_instance(
             platform=self.platform,
             name=f"{project['id']}.{cube['id']}",
@@ -1465,33 +1561,8 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
         cube_props["cube_id"] = cube["id"]
         cube_props["cube_type"] = "intelligent_cube"
 
-        yield MetadataChangeProposalWrapper(
-            entityUrn=dataset_urn,
-            aspect=DatasetPropertiesClass(
-                name=cube.get("name", cube["id"]),
-                description=cube.get("description"),
-                customProperties=cube_props,
-            ),
-        ).as_workunit()
-
-        yield MetadataChangeProposalWrapper(
-            entityUrn=dataset_urn,
-            aspect=SubTypesClass(typeNames=["Intelligent Cube"]),
-        ).as_workunit()
-        yield MetadataChangeProposalWrapper(
-            entityUrn=dataset_urn, aspect=StatusClass(removed=False)
-        ).as_workunit()
-        yield MetadataChangeProposalWrapper(
-            entityUrn=dataset_urn, aspect=self._make_platform_instance()
-        ).as_workunit()
-        yield MetadataChangeProposalWrapper(
-            entityUrn=dataset_urn,
-            aspect=ContainerClass(container=self._project_key(project).as_urn()),
-        ).as_workunit()
-
         fetch_cube_sql = self.config.include_cube_view_sql or (
-            self.config.include_lineage
-            and self.config.include_warehouse_lineage
+            self.config.include_lineage and self.config.include_warehouse_lineage
         )
         prefetched_sql: Optional[str] = None
         if fetch_cube_sql:
@@ -1506,25 +1577,60 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 )
                 prefetched_sql = ""
 
-        if prefetched_sql and self.config.include_cube_view_sql:
-            yield from self._emit_cube_view_definition(dataset_urn, prefetched_sql)
-
-        if self.config.include_cube_schema:
-            yield from self._emit_cube_schema(dataset_urn, cube, project["id"])
-
         cert = cube.get("certifiedInfo", {})
+        extra_aspects: List[Aspect] = [StatusClass(removed=False)]
         if cert.get("certified"):
-            yield MetadataChangeProposalWrapper(
-                entityUrn=dataset_urn, aspect=self._make_certified_tag()
-            ).as_workunit()
+            extra_aspects.append(self._make_certified_tag())
+        if prefetched_sql and self.config.include_cube_view_sql:
+            extra_aspects.append(
+                ViewPropertiesClass(
+                    materialized=False,
+                    viewLanguage="SQL",
+                    viewLogic=prefetched_sql,
+                )
+            )
 
+        schema_metadata: Optional[SchemaMetadataClass] = None
+        if self.config.include_cube_schema:
+            schema_metadata = self._build_cube_schema_metadata(cube, project["id"])
+
+        upstreams: Optional[UpstreamLineageClass] = None
+        sql_for_col_lineage: Optional[str] = None
+        if self.config.include_lineage and self.config.include_warehouse_lineage:
+            clu = self._build_cube_warehouse_upstream(
+                cube, project, sql=prefetched_sql
+            )
+            upstreams = clu.upstream_lineage
+            sql_for_col_lineage = clu.sql
+
+        owners = None
         if self.config.include_ownership and cube.get("owner"):
             certifier = cert.get("certifier") if cert.get("certified") else None
-            yield from self._emit_ownership(dataset_urn, cube["owner"], certifier)
+            owners = self._build_owners(cube["owner"], certifier) or None
 
-        if self.config.include_lineage and self.config.include_warehouse_lineage:
-            yield from self._emit_cube_warehouse_lineage(
-                dataset_urn, cube, project, sql=prefetched_sql
+        yield SdkDataset(
+            platform=self.platform,
+            name=f"{project['id']}.{cube['id']}",
+            platform_instance=self.config.platform_instance,
+            env=self.config.env,
+            display_name=cube.get("name", cube["id"]),
+            description=cube.get("description"),
+            custom_properties=cube_props,
+            subtype="Intelligent Cube",
+            parent_container=self._project_key(project).as_urn(),
+            schema=schema_metadata,
+            upstreams=upstreams,
+            owners=owners,
+            extra_aspects=extra_aspects,
+        )
+
+        # Column-level lineage still emitted as MWUs
+        if sql_for_col_lineage and self.config.include_column_lineage:
+            plat = self._warehouse_platform or self.platform
+            yield from self._emit_column_lineage_from_sql(
+                sql=sql_for_col_lineage,
+                downstream_urn=dataset_urn,
+                platform=plat,
             )
 
     # MSTR report subtype → DataHub display label (matches MSTR UI terminology)
@@ -1533,7 +1639,7 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
         769: "Graph Report",
         770: "Grid and Graph Report",
         774: "Non-Interactive Report",
-        776: "Intelligent Cube",       # shouldn't reach here — cubes use _process_cube
+        776: "Intelligent Cube",  # shouldn't reach here — cubes use _process_cube
         777: "Multi-Layer Grid Report",
     }
 
@@ -1644,7 +1750,10 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
 
             description: Optional[str] = None
             if fetch_formulas and attr_id:
-                expr = self.client.get_attribute_expression(attr_id, project_id)  # type: ignore[arg-type]
+                assert (
+                    project_id is not None
+                )  # guaranteed by fetch_formulas check above
+                expr = self.client.get_attribute_expression(attr_id, project_id)
                 if expr:
                     description = expr
 
@@ -1652,7 +1761,9 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 field_path = attr_name
                 fields.append(
                     InputFieldClass(
-                        schemaFieldUrn=make_schema_field_urn(parent_dataset_urn, field_path),
+                        schemaFieldUrn=make_schema_field_urn(
+                            parent_dataset_urn, field_path
+                        ),
                         schemaField=SchemaFieldClass(
                             fieldPath=field_path,
                             type=SchemaFieldDataTypeClass(type=StringTypeClass()),
@@ -1674,10 +1785,14 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 native = f"attribute:{form_cat}" if form_cat else "attribute"
                 tags = [TagAssociationClass(tag="urn:li:tag:ATTRIBUTE")]
                 if form_cat:
-                    tags.append(TagAssociationClass(tag=f"urn:li:tag:{form_cat.upper()}"))
+                    tags.append(
+                        TagAssociationClass(tag=f"urn:li:tag:{form_cat.upper()}")
+                    )
                 fields.append(
                     InputFieldClass(
-                        schemaFieldUrn=make_schema_field_urn(parent_dataset_urn, field_path),
+                        schemaFieldUrn=make_schema_field_urn(
+                            parent_dataset_urn, field_path
+                        ),
                         schemaField=SchemaFieldClass(
                             fieldPath=field_path,
                             type=self._mstr_type_to_datahub(data_type),
@@ -1694,13 +1809,18 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
 
             description = None
             if fetch_formulas and metric_id:
-                expr = self.client.get_metric_expression(metric_id, project_id)  # type: ignore[arg-type]
+                assert (
+                    project_id is not None
+                )  # guaranteed by fetch_formulas check above
+                expr = self.client.get_metric_expression(metric_id, project_id)
                 if expr:
                     description = expr
 
             fields.append(
                 InputFieldClass(
-                    schemaFieldUrn=make_schema_field_urn(parent_dataset_urn, field_path),
+                    schemaFieldUrn=make_schema_field_urn(
+                        parent_dataset_urn, field_path
+                    ),
                     schemaField=SchemaFieldClass(
                         fieldPath=field_path,
                         type=SchemaFieldDataTypeClass(type=NumberTypeClass()),
@@ -1714,195 +1834,6 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
             )
 
         return fields
-
-    def _emit_cube_schema(
-        self, dataset_urn: str, cube: Dict[str, Any], project_id: str
-    ) -> Iterable[MetadataWorkUnit]:
-        """
-        Emit schema metadata for a cube.
-
-        MicroStrategy schema model:
-          - Attribute  — a logical business concept (e.g. "Fiscal Week", "Division")
-          - Form       — a physical column expression of that attribute (e.g. "DESC", "ID")
-          - Metric     — a calculated measure (e.g. "Net Sales Retail Amt")
-
-        A single attribute can have multiple forms, each backed by a different
-        warehouse column with a different data type. This method emits one
-        SchemaField per form, not per attribute, so DataHub reflects the real
-        column structure.
-
-        fieldPath convention (confirmed against JCP cube definition):
-          Single-form attribute  → attribute name only     e.g. "Division Number"
-          Multi-form attribute   → "AttributeName.FormName" e.g. "Fiscal Week.DESC"
-          Metric                 → metric name              e.g. "Net Sales Retail Amt"
-
-        This gives DataHub accurate:
-          - Column count  (71 fields from 55 attributes on Attribute Form Caching Cube WBP)
-          - Column types  (varChar → String, decimal/Int64 → Number, date → Date, etc.)
-          - Native types  ("attribute:DESC", "attribute:NUMBER", "metric") for BI context
-        """
-        try:
-            raw = self.client.get_cube_schema(cube["id"], project_id)
-            avail = raw.get("definition", {}).get("availableObjects", {})
-            attrs = avail.get("attributes", [])
-            metrics = avail.get("metrics", [])
-
-            if not attrs and not metrics:
-                logger.debug(
-                    "Cube %s has 0 attributes and 0 metrics — may be a system/caching cube",
-                    cube.get("name"),
-                )
-                return
-
-            fields: List[SchemaFieldClass] = []
-
-            for attr in attrs:
-                attr_name = attr.get("name") or attr.get("id", "")
-                forms = attr.get("forms", [])
-                multi = len(forms) > 1
-
-                if not forms:
-                    # No forms defined — emit attribute name as a bare string field
-                    fields.append(
-                        SchemaFieldClass(
-                            fieldPath=attr_name,
-                            type=SchemaFieldDataTypeClass(type=StringTypeClass()),
-                            nativeDataType="attribute",
-                            description=attr.get("description"),
-                        )
-                    )
-                    continue
-
-                for form in forms:
-                    form_name = form.get("name", "")
-                    data_type = form.get("dataType", "varChar")
-                    form_cat = form.get("baseFormCategory", "")
-
-                    # Qualify fieldPath only when multiple forms exist to avoid collisions
-                    field_path = f"{attr_name}.{form_name}" if multi else attr_name
-
-                    fields.append(
-                        SchemaFieldClass(
-                            fieldPath=field_path,
-                            type=self._mstr_type_to_datahub(data_type),
-                            nativeDataType=f"attribute:{form_cat}"
-                            if form_cat
-                            else "attribute",
-                            description=attr.get("description"),
-                        )
-                    )
-
-            for metric in metrics:
-                fields.append(
-                    SchemaFieldClass(
-                        fieldPath=metric.get("name") or metric.get("id", ""),
-                        type=SchemaFieldDataTypeClass(type=NumberTypeClass()),
-                        nativeDataType="metric",
-                        description=metric.get("description"),
-                    )
-                )
-
-            if not fields:
-                return
-
-            yield MetadataChangeProposalWrapper(
-                entityUrn=dataset_urn,
-                aspect=SchemaMetadataClass(
-                    schemaName=cube.get("name", cube["id"]),
-                    platform=make_data_platform_urn(self.platform),
-                    version=0,
-                    hash="",
-                    platformSchema=OtherSchemaClass(rawSchema=""),
-                    fields=fields,
-                ),
-            ).as_workunit()
-
-        except Exception as e:
-            logger.warning("Failed to get schema for cube %s: %s", cube.get("name"), e)
-
-    def _emit_report_schema(
-        self,
-        chart_urn: str,
-        report_id: str,
-        report_defn: Dict[str, Any],
-    ) -> Iterable[MetadataWorkUnit]:
-        """
-        NOT USED — schemaMetadata is not a valid aspect for chart entities in DataHub.
-        GMS returns: "Unknown aspect schemaMetadata for entity chart" (500).
-
-        Report field metadata (attributes, metrics, forms) from definition.availableObjects
-        is instead surfaced via customProperties on chartInfo, which is valid for charts.
-        This method is kept as a no-op stub in case future DataHub versions support
-        a schema-like aspect for charts, or if we switch to emitting reports as datasets.
-        """
-        return
-        yield  # make Python treat this as a generator
-
-    def _emit_cube_view_definition(
-        self, dataset_urn: str, sql: str
-    ) -> Iterable[MetadataWorkUnit]:
-        if not sql.strip():
-            return
-        yield MetadataChangeProposalWrapper(
-            entityUrn=dataset_urn,
-            aspect=ViewPropertiesClass(
-                materialized=False,
-                viewLanguage="SQL",
-                viewLogic=sql,
-            ),
-        ).as_workunit()
-
-    def _emit_cube_warehouse_lineage(
-        self,
-        dataset_urn: str,
-        cube: Dict[str, Any],
-        project: Dict[str, Any],
-        sql: Optional[str] = None,
-    ) -> Iterable[MetadataWorkUnit]:
-        """
-        Emit warehouse table → cube lineage via sqlView SQL parsing.
-
-        FIX: Uses get_cube_sql_view() (confirmed working) instead of
-        get_model_cube() which requires 'Use Architect Editors' privilege
-        and returns 0 physicalTables on most service accounts.
-        """
-        project_id = project["id"]
-        cube_name = cube.get("name", cube["id"])
-
-        resolved_sql: str = ""
-        if sql is not None:
-            resolved_sql = sql if isinstance(sql, str) else ""
-        else:
-            try:
-                raw = self.client.get_cube_sql_view(cube["id"], project_id)
-                resolved_sql = raw if isinstance(raw, str) else ""
-            except Exception as e:
-                # iServerCode -2147072488 = not published, -2147212800 = dynamic sourcing
-                logger.debug("Skipping warehouse lineage for cube %s: %s", cube_name, e)
-                return
-
-        if not resolved_sql:
-            return
-
-        tables = _extract_tables_from_sql(resolved_sql)
-        if not tables:
-            logger.debug("No source tables parsed from sqlView for cube %s", cube_name)
-            return
-
-        upstream_urns = self._tables_to_urns(list(set(tables)))
-        if not upstream_urns:
-            return
-
-        yield from self._emit_upstream_lineage(dataset_urn, upstream_urns)
-
-        # Column-level lineage from cube SQL
-        if self.config.include_column_lineage:
-            plat = self._warehouse_platform or self.platform
-            yield from self._emit_column_lineage_from_sql(
-                sql=resolved_sql,
-                downstream_urn=dataset_urn,
-                platform=plat,
-            )
 
     # ── Per-dataset warehouse table helper ───────────────────────────────────
 
@@ -1927,13 +1858,15 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
         instance_id: Optional[str] = None
         try:
             if is_legacy:
-                instance_id = self.client.create_document_instance(document_id, project_id)
+                instance_id = self.client.create_document_instance(
+                    document_id, project_id
+                )
             else:
-                instance_id = self.client.create_dossier_instance(document_id, project_id)
+                instance_id = self.client.create_dossier_instance(
+                    document_id, project_id
+                )
         except Exception as e:
-            logger.debug(
-                "Could not create instance for document '%s': %s", doc_name, e
-            )
+            logger.debug("Could not create instance for document '%s': %s", doc_name, e)
             return {}
 
         if not instance_id:
@@ -1962,8 +1895,12 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 len(datasets_sql),
             )
         except Exception as e:
-            logger.warning(
-                "Failed to fetch per-dataset SQL for '%s': %s", doc_name, e
+            logger.warning("Failed to fetch per-dataset SQL for '%s': %s", doc_name, e)
+            self.report.report_warning(
+                "Failed to fetch per-dataset SQL for document.",
+                context=doc_name,
+                title="document-sql-fetch-failed",
+                exc=e,
             )
         finally:
             if instance_id:
@@ -1971,8 +1908,13 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                     self.client.delete_dossier_instance(
                         document_id, instance_id, project_id
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(
+                        "Failed to delete dossier instance %s for %s: %s",
+                        instance_id,
+                        document_id,
+                        e,
+                    )
 
         return result
 
@@ -1980,43 +1922,28 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
 
     def _process_dataset(
         self, dataset: Dict[str, Any], project: Dict[str, Any]
-    ) -> Iterable[MetadataWorkUnit]:
-        dataset_urn = make_dataset_urn_with_platform_instance(
+    ) -> Iterable[Union[MetadataWorkUnit, Entity]]:
+        owners = None
+        if self.config.include_ownership and dataset.get("owner"):
+            owners = self._build_owners(dataset["owner"]) or None
+
+        yield SdkDataset(
             platform=self.platform,
             name=f"{project['id']}.{dataset['id']}",
-            env=self.config.env,
             platform_instance=self.config.platform_instance,
+            env=self.config.env,
+            display_name=dataset.get("name", dataset["id"]),
+            description=dataset.get("description"),
+            custom_properties={
+                "project_id": project["id"],
+                "project_name": project.get("name", ""),
+                "dataset_id": dataset["id"],
+            },
+            subtype="Dataset",
+            parent_container=self._project_key(project).as_urn(),
+            owners=owners,
+            extra_aspects=[StatusClass(removed=False)],
         )
-
-        yield MetadataChangeProposalWrapper(
-            entityUrn=dataset_urn,
-            aspect=DatasetPropertiesClass(
-                name=dataset.get("name", dataset["id"]),
-                description=dataset.get("description"),
-                customProperties={
-                    "project_id": project["id"],
-                    "project_name": project.get("name", ""),
-                    "dataset_id": dataset["id"],
-                },
-            ),
-        ).as_workunit()
-        yield MetadataChangeProposalWrapper(
-            entityUrn=dataset_urn,
-            aspect=SubTypesClass(typeNames=["Dataset"]),
-        ).as_workunit()
-        yield MetadataChangeProposalWrapper(
-            entityUrn=dataset_urn, aspect=StatusClass(removed=False)
-        ).as_workunit()
-        yield MetadataChangeProposalWrapper(
-            entityUrn=dataset_urn, aspect=self._make_platform_instance()
-        ).as_workunit()
-        yield MetadataChangeProposalWrapper(
-            entityUrn=dataset_urn,
-            aspect=ContainerClass(container=self._project_key(project).as_urn()),
-        ).as_workunit()
-
-        if self.config.include_ownership and dataset.get("owner"):
-            yield from self._emit_ownership(dataset_urn, dataset["owner"])
 
     # ── Lineage helpers ───────────────────────────────────────────────────────
 
@@ -2024,6 +1951,14 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
         """Convert parsed table names to DataHub dataset URNs."""
         plat = self._warehouse_platform
         if not plat:
+            if tables:
+                self.report.report_warning(
+                    "No warehouse platform detected; skipping upstream table(s). "
+                    "Platform is auto-detected from /api/datasources and /api/v2/tables — "
+                    "check that the service account has access to those endpoints.",
+                    context=f"skipped {len(tables)} table(s)",
+                    title="warehouse-lineage-skipped",
+                )
             return []
         urns = []
         for table in sorted(tables):
@@ -2045,28 +1980,13 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
         """
         if "." in table:
             return table
-        db = (getattr(self.config, "warehouse_lineage_database", None) or "").strip()
-        schema = (getattr(self.config, "warehouse_lineage_schema", None) or "").strip()
+        db = (self.config.warehouse_lineage_database or "").strip()
+        schema = (self.config.warehouse_lineage_schema or "").strip()
         if db and schema:
             return f"{db}.{schema}.{table}"
         if schema:
             return f"{schema}.{table}"
         return table
-
-    def _emit_upstream_lineage(
-        self,
-        downstream_urn: str,
-        upstream_urns: List[str],
-    ) -> Iterable[MetadataWorkUnit]:
-        """Emit UpstreamLineageClass for dataset entities (not dashboard — see entity-registry)."""
-        upstreams = [
-            UpstreamClass(dataset=u, type=DatasetLineageTypeClass.TRANSFORMED)
-            for u in upstream_urns
-        ]
-        yield MetadataChangeProposalWrapper(
-            entityUrn=downstream_urn,
-            aspect=UpstreamLineageClass(upstreams=upstreams),
-        ).as_workunit()
 
     def _emit_column_lineage_from_sql(
         self,
@@ -2109,15 +2029,15 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 try:
                     aggregator.add_observed_query(
                         query=stmt,
-                        default_db=getattr(
-                            self.config, "warehouse_lineage_database", None
-                        ),
-                        default_schema=getattr(
-                            self.config, "warehouse_lineage_schema", None
-                        ),
+                        default_db=self.config.warehouse_lineage_database,
+                        default_schema=self.config.warehouse_lineage_schema,
                     )
-                except Exception:
-                    pass  # individual statement failure should not abort the whole thing
+                except Exception as _col_err:
+                    logger.debug(
+                        "Column lineage parse failed for a SQL statement in %s: %s",
+                        downstream_urn,
+                        _col_err,
+                    )
 
             for wu in aggregator.gen_metadata():
                 yield wu
@@ -2127,59 +2047,192 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 "Column lineage generation failed for %s: %s", downstream_urn, e
             )
 
-    # ── Ownership helpers ─────────────────────────────────────────────────────
+    # ── SDK V2 helpers ────────────────────────────────────────────────────────
 
-    def _emit_ownership(
+    def _parse_datetime(self, date_str: Optional[str]) -> Optional[datetime]:
+        """Parse an ISO date string into a datetime object for SDK V2 entities."""
+        if not date_str:
+            return None
+        try:
+            return date_parser.parse(date_str)
+        except Exception as e:
+            logger.debug("Failed to parse date string '%s': %s", date_str, e)
+            return None
+
+    def _build_owners(
         self,
-        entity_urn: str,
-        owner_info: Any,
+        owner_info: Union[str, Dict[str, Any]],
         certifier_info: Optional[Dict[str, Any]] = None,
-    ) -> Iterable[MetadataWorkUnit]:
-        """
-        Emit ownership aspect.
+    ) -> List[OwnerClass]:
+        """Build OwnerClass list for SDK V2 entity constructors."""
 
-        owner_info may come from two sources with different shapes:
-          - Search result owner: {"id": "...", "name": "Paul Hanlon", "expired": false}
-            → name is a display name, not a username. We use it directly.
-          - Full definition owner: {"username": "phanlon", "email": "p@jcp.com", ...}
-            → prefer username, fall back to email, fall back to name.
-
-        certifier_info (optional): {"fullName": "svankaya", "username": "..."}
-            → emit as TECHNICAL_OWNER alongside the data owner.
-        """
-        owners: List[OwnerClass] = []
-
-        def _resolve_urn(info: Any) -> Optional[str]:
+        def _resolve_urn(info: Union[str, Dict[str, Any]]) -> Optional[str]:
             if isinstance(info, str):
                 return make_user_urn(info)
             if isinstance(info, dict):
                 identifier = (
                     info.get("username")
                     or info.get("email")
-                    or info.get("name")  # display name fallback (search result shape)
+                    or info.get("name")
                     or info.get("fullName")
                 )
                 return make_user_urn(identifier) if identifier else None
             return None
 
+        owners: List[OwnerClass] = []
         owner_urn = _resolve_urn(owner_info)
         if owner_urn:
             owners.append(
                 OwnerClass(owner=owner_urn, type=OwnershipTypeClass.DATAOWNER)
             )
-
         if certifier_info:
             cert_urn = _resolve_urn(certifier_info)
             if cert_urn and cert_urn != owner_urn:
                 owners.append(
                     OwnerClass(owner=cert_urn, type=OwnershipTypeClass.TECHNICAL_OWNER)
                 )
+        return owners
 
-        if owners:
-            yield MetadataChangeProposalWrapper(
-                entityUrn=entity_urn,
-                aspect=OwnershipClass(owners=owners),
-            ).as_workunit()
+    def _build_cube_schema_metadata(
+        self, cube: Dict[str, Any], project_id: str
+    ) -> Optional[SchemaMetadataClass]:
+        """Build SchemaMetadataClass for a cube. Returns None on error or empty schema."""
+        try:
+            raw = self.client.get_cube(cube["id"], project_id)
+            if not raw or not isinstance(raw, dict):
+                return None
+            if _is_iserver_error(raw, ISERVER_CUBE_NOT_PUBLISHED):
+                self.report.report_warning(
+                    "cube-not-published", context=str(cube.get("name"))
+                )
+                logger.debug(
+                    "Cube %s not published (iServerCode=%s); skipping schema",
+                    cube.get("name"),
+                    ISERVER_CUBE_NOT_PUBLISHED,
+                )
+                return None
+            if _is_iserver_error(raw, ISERVER_DYNAMIC_SOURCING_CUBE):
+                self.report.report_warning(
+                    "cube-dynamic-sourcing", context=str(cube.get("name"))
+                )
+                logger.debug(
+                    "Cube %s uses dynamic sourcing (iServerCode=%s); skipping schema",
+                    cube.get("name"),
+                    ISERVER_DYNAMIC_SOURCING_CUBE,
+                )
+                return None
+
+            avail = raw.get("definition", {}).get("availableObjects", {})
+            attrs = avail.get("attributes", [])
+            metrics = avail.get("metrics", [])
+
+            if not attrs and not metrics:
+                logger.debug(
+                    "Cube %s has 0 attributes and 0 metrics — may be a system/caching cube",
+                    cube.get("name"),
+                )
+                return None
+
+            fields: List[SchemaFieldClass] = []
+
+            for attr in attrs:
+                attr_name = attr.get("name") or attr.get("id", "")
+                forms = attr.get("forms", [])
+                multi = len(forms) > 1
+
+                if not forms:
+                    fields.append(
+                        SchemaFieldClass(
+                            fieldPath=attr_name,
+                            type=SchemaFieldDataTypeClass(type=StringTypeClass()),
+                            nativeDataType="attribute",
+                            description=attr.get("description"),
+                        )
+                    )
+                    continue
+
+                for form in forms:
+                    form_name = form.get("name", "")
+                    data_type = form.get("dataType", "varChar")
+                    form_cat = form.get("baseFormCategory", "")
+                    field_path = f"{attr_name}.{form_name}" if multi else attr_name
+                    fields.append(
+                        SchemaFieldClass(
+                            fieldPath=field_path,
+                            type=self._mstr_type_to_datahub(data_type),
+                            nativeDataType=f"attribute:{form_cat}"
+                            if form_cat
+                            else "attribute",
+                            description=attr.get("description"),
+                        )
+                    )
+
+            for metric in metrics:
+                fields.append(
+                    SchemaFieldClass(
+                        fieldPath=metric.get("name") or metric.get("id", ""),
+                        type=SchemaFieldDataTypeClass(type=NumberTypeClass()),
+                        nativeDataType="metric",
+                        description=metric.get("description"),
+                    )
+                )
+
+            if not fields:
+                return None
+
+            return SchemaMetadataClass(
+                schemaName=cube.get("name", cube["id"]),
+                platform=make_data_platform_urn(self.platform),
+                version=0,
+                hash="",
+                platformSchema=OtherSchemaClass(rawSchema=""),
+                fields=fields,
+            )
+        except Exception as e:
+            logger.warning("Failed to get schema for cube %s: %s", cube.get("name"), e)
+            self.report.report_warning(
+                "cube-schema-failed", context=str(cube.get("name")), exc=e
+            )
+            return None
+
+    def _build_cube_warehouse_upstream(
+        self,
+        cube: Dict[str, Any],
+        project: Dict[str, Any],
+        sql: Optional[str] = None,
+    ) -> CubeLineageResult:
+        """Build UpstreamLineageClass for warehouse→cube lineage."""
+        project_id = project["id"]
+        cube_name = cube.get("name", cube["id"])
+
+        resolved_sql: str = ""
+        if sql is not None:
+            resolved_sql = sql if isinstance(sql, str) else ""
+        else:
+            try:
+                raw = self.client.get_cube_sql_view(cube["id"], project_id)
+                resolved_sql = raw if isinstance(raw, str) else ""
+            except Exception as e:
+                logger.debug("Skipping warehouse lineage for cube %s: %s", cube_name, e)
+                return CubeLineageResult(None, None)
+
+        if not resolved_sql:
+            return CubeLineageResult(None, None)
+
+        tables = _extract_tables_from_sql(resolved_sql)
+        if not tables:
+            logger.debug("No source tables parsed from sqlView for cube %s", cube_name)
+            return CubeLineageResult(None, None)
+
+        upstream_urns = self._tables_to_urns(list(set(tables)))
+        if not upstream_urns:
+            return CubeLineageResult(None, None)
+
+        upstreams = [
+            UpstreamClass(dataset=u, type=DatasetLineageTypeClass.TRANSFORMED)
+            for u in upstream_urns
+        ]
+        return CubeLineageResult(UpstreamLineageClass(upstreams=upstreams), resolved_sql)
 
     # ── Utility helpers ───────────────────────────────────────────────────────
 
@@ -2191,56 +2244,17 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
             env=self.config.env,
         )
 
-    def _make_platform_instance(self) -> DataPlatformInstanceClass:
-        return DataPlatformInstanceClass(
-            platform=make_data_platform_urn(self.platform),
-            instance=(
-                make_dataplatform_instance_urn(
-                    self.platform, self.config.platform_instance
-                )
-                if self.config.platform_instance
-                else None
-            ),
-        )
-
-    def _build_audit_stamps(
-        self,
-        created_time: Optional[str],
-        modified_time: Optional[str],
-        owner_info: Optional[Any],
-    ) -> ChangeAuditStamps:
-        actor_urn = "urn:li:corpuser:unknown"
-        if owner_info:
-            if isinstance(owner_info, str):
-                actor_urn = make_user_urn(owner_info)
-            elif isinstance(owner_info, dict):
-                username = owner_info.get("username") or owner_info.get("email")
-                if username:
-                    actor_urn = make_user_urn(username)
-
-        stamps = ChangeAuditStamps()
-        try:
-            if created_time:
-                ts = int(date_parser.parse(created_time).timestamp() * 1000)
-                stamps.created = AuditStampClass(time=ts, actor=actor_urn)
-            if modified_time:
-                ts = int(date_parser.parse(modified_time).timestamp() * 1000)
-                stamps.lastModified = AuditStampClass(time=ts, actor=actor_urn)
-        except Exception as e:
-            logger.debug("Failed to parse timestamps: %s", e)
-        return stamps
+    def _build_object_url(self, object_id: str, project_id: str) -> Optional[str]:
+        if not self.config.connection.base_url:
+            return None
+        base = self.config.connection.base_url.rstrip("/")
+        return f"{base}/app/{project_id}/{object_id}"
 
     def _build_dashboard_url(self, dashboard_id: str, project_id: str) -> Optional[str]:
-        if not self.config.connection.base_url:
-            return None
-        base = self.config.connection.base_url.rstrip("/")
-        return f"{base}/app/{project_id}/{dashboard_id}"
+        return self._build_object_url(dashboard_id, project_id)
 
     def _build_report_url(self, report_id: str, project_id: str) -> Optional[str]:
-        if not self.config.connection.base_url:
-            return None
-        base = self.config.connection.base_url.rstrip("/")
-        return f"{base}/app/{project_id}/{report_id}"
+        return self._build_object_url(report_id, project_id)
 
     def get_report(self) -> SourceReport:
         return self.report
@@ -2252,7 +2266,7 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
         test_report = TestConnectionReport()
         test_report.capability_report = {}
         try:
-            config = MicroStrategyConfig.parse_obj(config_dict)
+            config = MicroStrategyConfig.model_validate(config_dict)
             client = MicroStrategyClient(config.connection)
             if client.test_connection():
                 test_report.basic_connectivity = CapabilityReport(capable=True)

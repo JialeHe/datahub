@@ -10,8 +10,10 @@ Handles:
 """
 
 import logging
+import types
+from contextlib import contextmanager
 from datetime import datetime, timedelta
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Type, Union
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -31,16 +33,19 @@ logger = logging.getLogger(__name__)
 
 class MicroStrategyAPIError(Exception):
     """Base exception for MicroStrategy API errors."""
+
     pass
 
 
 class MicroStrategyAuthenticationError(MicroStrategyAPIError):
     """Raised when authentication fails."""
+
     pass
 
 
 class MicroStrategyPermissionError(MicroStrategyAPIError):
     """Raised when API returns permission denied."""
+
     pass
 
 
@@ -80,16 +85,16 @@ class MicroStrategyClient:
     """
 
     # API Endpoints
-    AUTH_LOGIN  = "/api/auth/login"
+    AUTH_LOGIN = "/api/auth/login"
     AUTH_LOGOUT = "/api/auth/logout"
-    SESSIONS    = "/api/sessions"
+    SESSIONS = "/api/sessions"
 
     # Session timeout defaults (MicroStrategy standard is 30 minutes)
     DEFAULT_SESSION_TIMEOUT = timedelta(minutes=30)
-    REFRESH_THRESHOLD       = timedelta(minutes=5)
+    REFRESH_THRESHOLD = timedelta(minutes=5)
 
     def __init__(self, config: MicroStrategyConnectionConfig):
-        self.config  = config
+        self.config = config
         self.base_url = config.base_url.rstrip("/")
 
         # Session state
@@ -118,7 +123,8 @@ class MicroStrategyClient:
                 return None
             data = response.json()
             return data if isinstance(data, dict) else None
-        except Exception:
+        except Exception as e:
+            logger.warning("Failed to parse response JSON from %s: %s", response.url, e)
             return None
 
     def _raise_if_iserver_project_unavailable(
@@ -135,7 +141,7 @@ class MicroStrategyClient:
             )
 
     @staticmethod
-    def _is_legacy_classcast_message(body: Any) -> bool:
+    def _is_legacy_classcast_message(body: Union[Dict[str, Any], str, None]) -> bool:
         if body is None:
             return False
         text = str(body.get("message", "")) if isinstance(body, dict) else str(body)
@@ -152,20 +158,35 @@ class MicroStrategyClient:
         self.session.headers.update({"X-MSTR-ProjectID": project_id})
         return original
 
+    @contextmanager
+    def _project_context(self, project_id: str) -> Iterator[None]:
+        """Context manager that sets X-MSTR-ProjectID and restores headers on exit."""
+        original = self._set_project_header(project_id)
+        try:
+            yield
+        finally:
+            # requests.Session.headers is typed as CaseInsensitiveDict, but we restore
+            # from a plain dict snapshot — the assignment is safe at runtime.
+            self.session.headers = original  # type: ignore[assignment]
+
     # ── Context manager ───────────────────────────────────────────────────────
 
     def __enter__(self) -> "MicroStrategyClient":
         self.login()
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc_val: Optional[BaseException],
+        exc_tb: Optional[types.TracebackType],
+    ) -> None:
         try:
             self.logout()
         except Exception as e:
             logger.error("Session cleanup error during exit: %s", e)
             if exc_type is None:
                 raise
-        return False
 
     # ── Authentication ────────────────────────────────────────────────────────
 
@@ -198,12 +219,15 @@ class MicroStrategyClient:
             logger.info("Successfully authenticated to MicroStrategy")
         except requests.exceptions.HTTPError as e:
             if e.response.status_code in [401, 403]:
+                logger.debug("Authentication failed response body: %s", e.response.text)
                 raise MicroStrategyAuthenticationError(
-                    f"Authentication failed: {e.response.text}"
+                    f"Authentication failed: HTTP {e.response.status_code}"
                 ) from e
             raise MicroStrategyAPIError(f"Login request failed: {e}") from e
         except requests.exceptions.RequestException as e:
-            raise MicroStrategyAPIError(f"Failed to connect to MicroStrategy: {e}") from e
+            raise MicroStrategyAPIError(
+                f"Failed to connect to MicroStrategy: {e}"
+            ) from e
 
     def _activate_session(self) -> None:
         try:
@@ -263,7 +287,7 @@ class MicroStrategyClient:
         *,
         timeout: Optional[int] = None,
         legacy_classcast_500_returns_empty: bool = False,
-    ) -> Any:
+    ) -> Union[Dict[str, Any], List[Any]]:
         """
         Make authenticated API request with automatic token refresh.
 
@@ -286,7 +310,9 @@ class MicroStrategyClient:
         """
         self._ensure_valid_token()
         url = f"{self.base_url}{endpoint}"
-        effective_timeout = timeout if timeout is not None else self.config.timeout_seconds
+        effective_timeout = (
+            timeout if timeout is not None else self.config.timeout_seconds
+        )
 
         try:
             response = self.session.request(
@@ -298,9 +324,12 @@ class MicroStrategyClient:
             )
 
             if response.status_code == 403:
-                raise MicroStrategyPermissionError(
-                    f"Permission denied for {endpoint}: {response.text}"
+                logger.debug(
+                    "Permission denied response body for %s: %s",
+                    endpoint,
+                    response.text,
                 )
+                raise MicroStrategyPermissionError(f"Permission denied for {endpoint}")
 
             self._raise_if_iserver_project_unavailable(response, endpoint)
 
@@ -322,8 +351,14 @@ class MicroStrategyClient:
             if e.response.status_code == 404:
                 logger.debug("Resource not found: %s", url)
                 return {}
+            logger.debug(
+                "HTTP %s error response body for %s: %s",
+                e.response.status_code,
+                endpoint,
+                e.response.text,
+            )
             raise MicroStrategyAPIError(
-                f"HTTP {e.response.status_code} error for {endpoint}: {e.response.text}"
+                f"HTTP {e.response.status_code} error for {endpoint}"
             ) from e
         except requests.exceptions.Timeout:
             raise MicroStrategyAPIError(f"Request timeout for {endpoint}") from None
@@ -385,11 +420,10 @@ class MicroStrategyClient:
         return self._request("GET", f"/api/v2/projects/{project_id}")
 
     def get_folders(self, project_id: str) -> List[Dict[str, Any]]:
-        original = self._set_project_header(project_id)
-        try:
-            return list(self._paginated_request(f"/api/v2/projects/{project_id}/folders"))
-        finally:
-            self.session.headers = original
+        with self._project_context(project_id):
+            return list(
+                self._paginated_request(f"/api/v2/projects/{project_id}/folders")
+            )
 
     def get_folder(self, folder_id: str) -> Dict[str, Any]:
         return self._request("GET", f"/api/v2/folders/{folder_id}")
@@ -423,18 +457,16 @@ class MicroStrategyClient:
         # restore by assignment — same pattern as _set_project_header to avoid
         # any mutation hazard in the finally block.
         original_headers = dict(self.session.headers)
-        stripped = {k: v for k, v in original_headers.items() if k != "X-MSTR-ProjectID"}
+        stripped = {
+            k: v for k, v in original_headers.items() if k != "X-MSTR-ProjectID"
+        }
         self.session.headers = stripped  # type: ignore[assignment]
         try:
             data = self._request("GET", "/api/datasources")
             if isinstance(data, list):
                 return data
             if isinstance(data, dict):
-                return (
-                    data.get("datasources")
-                    or data.get("result")
-                    or []
-                )
+                return data.get("datasources") or data.get("result") or []
             return []
         except MicroStrategyPermissionError:
             logger.info(
@@ -446,7 +478,8 @@ class MicroStrategyClient:
             logger.warning(
                 "GET /api/datasources failed (%s: %s) — "
                 "platform will be inferred from SQL quoting style instead.",
-                type(e).__name__, e,
+                type(e).__name__,
+                e,
             )
             return []
         finally:
@@ -482,7 +515,7 @@ class MicroStrategyClient:
             )
             return []
         except Exception as e:
-            logger.debug("get_project_datasources failed for %s: %s", project_id, e)
+            logger.warning("get_project_datasources failed for %s: %s", project_id, e)
             return []
 
     # ── Object search (primary discovery method) ──────────────────────────────
@@ -504,28 +537,37 @@ class MicroStrategyClient:
             55  = Dashboard/Dossier/Document (subtype 14081=legacy, 14336=modern)
             776 = Intelligent Cube (search API, subtype of type 3)
         """
-        original = self._set_project_header(project_id)
-        try:
-            objects = list(self._paginated_request(
-                "/api/searches/results",
-                params={"type": object_type},
-                page_size=limit,
-            ))
-            logger.info("Found %s objects (type=%s) in project %s", len(objects), object_type, project_id)
+        with self._project_context(project_id):
+            objects = list(
+                self._paginated_request(
+                    "/api/searches/results",
+                    params={"type": object_type},
+                    page_size=limit,
+                )
+            )
+            logger.info(
+                "Found %s objects (type=%s) in project %s",
+                len(objects),
+                object_type,
+                project_id,
+            )
             return objects
-        finally:
-            self.session.headers = original
 
-    def get_object(self, object_id: str, object_type: int, project_id: str) -> Dict[str, Any]:
-        original = self._set_project_header(project_id)
-        try:
-            data = self._request("GET", f"/api/objects/{object_id}", params={"type": object_type})
+    def get_object(
+        self, object_id: str, object_type: int, project_id: str
+    ) -> Dict[str, Any]:
+        with self._project_context(project_id):
+            data = self._request(
+                "GET", f"/api/objects/{object_id}", params={"type": object_type}
+            )
             return data if isinstance(data, dict) else {}
-        finally:
-            self.session.headers = original
 
-    def search_warehouse_tables(self, project_id: str, limit: int = 1000) -> List[Dict[str, Any]]:
-        return self.search_objects(project_id, SEARCH_OBJECT_TYPE_WAREHOUSE_TABLE, limit=limit)
+    def search_warehouse_tables(
+        self, project_id: str, limit: int = 1000
+    ) -> List[Dict[str, Any]]:
+        return self.search_objects(
+            project_id, SEARCH_OBJECT_TYPE_WAREHOUSE_TABLE, limit=limit
+        )
 
     def get_table_definition(self, table_id: str, project_id: str) -> Dict[str, Any]:
         """
@@ -548,14 +590,12 @@ class MicroStrategyClient:
         The objectId can then be passed to get_datasource_by_id() to resolve
         the database.type (e.g. 'teradata') for the platform mapping.
         """
-        original = self._set_project_header(project_id)
-        try:
-            return self._request("GET", f"/api/v2/tables/{table_id}")
-        except Exception as e:
-            logger.debug("get_table_definition failed for %s: %s", table_id, e)
-            return {}
-        finally:
-            self.session.headers = original
+        with self._project_context(project_id):
+            try:
+                return self._request("GET", f"/api/v2/tables/{table_id}")
+            except Exception as e:
+                logger.debug("get_table_definition failed for %s: %s", table_id, e)
+                return {}
 
     def list_model_tables(
         self, project_id: str, *, limit: int = 200, offset: int = 0
@@ -574,21 +614,24 @@ class MicroStrategyClient:
         Returns empty dict on 403 (requires 'Use Architect Editors' privilege in
         some MSTR versions) or any other failure.
         """
-        original = self._set_project_header(project_id)
-        try:
-            data = self._request(
-                "GET", "/api/model/tables",
-                params={"limit": limit, "offset": offset},
-            )
-            return data if isinstance(data, dict) else {}
-        except MicroStrategyPermissionError:
-            logger.debug("GET /api/model/tables returned 403 for project %s", project_id)
-            return {}
-        except Exception as e:
-            logger.debug("list_model_tables failed for project %s: %s", project_id, e)
-            return {}
-        finally:
-            self.session.headers = original
+        with self._project_context(project_id):
+            try:
+                data = self._request(
+                    "GET",
+                    "/api/model/tables",
+                    params={"limit": limit, "offset": offset},
+                )
+                return data if isinstance(data, dict) else {}
+            except MicroStrategyPermissionError:
+                logger.debug(
+                    "GET /api/model/tables returned 403 for project %s", project_id
+                )
+                return {}
+            except Exception as e:
+                logger.debug(
+                    "list_model_tables failed for project %s: %s", project_id, e
+                )
+                return {}
 
     def get_model_table_definition(
         self, model_table_id: str, project_id: str
@@ -605,18 +648,18 @@ class MicroStrategyClient:
         DB Table IDs from /api/searches/results are NOT valid here and will
         return 500 with a 'type mismatch' error.
         """
-        original = self._set_project_header(project_id)
-        try:
-            return self._request("GET", f"/api/model/tables/{model_table_id}")
-        except Exception as e:
-            logger.debug(
-                "get_model_table_definition failed for %s: %s", model_table_id, e
-            )
-            return {}
-        finally:
-            self.session.headers = original
+        with self._project_context(project_id):
+            try:
+                return self._request("GET", f"/api/model/tables/{model_table_id}")
+            except Exception as e:
+                logger.debug(
+                    "get_model_table_definition failed for %s: %s", model_table_id, e
+                )
+                return {}
 
-    def get_datasource_by_id(self, datasource_id: str, project_id: str) -> Dict[str, Any]:
+    def get_datasource_by_id(
+        self, datasource_id: str, project_id: str
+    ) -> Dict[str, Any]:
         """
         Return a single datasource object by its ID.
 
@@ -639,19 +682,18 @@ class MicroStrategyClient:
         Returns empty dict on 403/404 or any other failure — caller should
         fall back to SQL inference in that case.
         """
-        original = self._set_project_header(project_id)
-        try:
-            return self._request("GET", f"/api/datasources/{datasource_id}")
-        except MicroStrategyPermissionError:
-            logger.debug(
-                "GET /api/datasources/%s returned 403 with project header", datasource_id
-            )
-            return {}
-        except Exception as e:
-            logger.debug("get_datasource_by_id failed for %s: %s", datasource_id, e)
-            return {}
-        finally:
-            self.session.headers = original
+        with self._project_context(project_id):
+            try:
+                return self._request("GET", f"/api/datasources/{datasource_id}")
+            except MicroStrategyPermissionError:
+                logger.debug(
+                    "GET /api/datasources/%s returned 403 with project header",
+                    datasource_id,
+                )
+                return {}
+            except Exception as e:
+                logger.debug("get_datasource_by_id failed for %s: %s", datasource_id, e)
+                return {}
 
     def get_attribute_expression(self, attribute_id: str, project_id: str) -> str:
         """
@@ -662,21 +704,21 @@ class MicroStrategyClient:
         Returns the first expression text found across all forms, or empty string.
         For multi-expression attributes the expressions are joined with " | ".
         """
-        original = self._set_project_header(project_id)
-        try:
-            data = self._request("GET", f"/api/model/attributes/{attribute_id}")
-            parts = []
-            for form in data.get("forms", []):
-                for expr in form.get("expressions", []):
-                    text = expr.get("expression", {}).get("text", "")
-                    if text and text not in parts:
-                        parts.append(text)
-            return " | ".join(parts)
-        except Exception as e:
-            logger.debug("get_attribute_expression failed for %s: %s", attribute_id, e)
-            return ""
-        finally:
-            self.session.headers = original
+        with self._project_context(project_id):
+            try:
+                data = self._request("GET", f"/api/model/attributes/{attribute_id}")
+                parts = []
+                for form in data.get("forms", []):
+                    for expr in form.get("expressions", []):
+                        text = expr.get("expression", {}).get("text", "")
+                        if text and text not in parts:
+                            parts.append(text)
+                return " | ".join(parts)
+            except Exception as e:
+                logger.debug(
+                    "get_attribute_expression failed for %s: %s", attribute_id, e
+                )
+                return ""
 
     def get_metric_expression(self, metric_id: str, project_id: str) -> str:
         """
@@ -688,45 +730,23 @@ class MicroStrategyClient:
           "Sum(NET_SLS_RTL_AMT)"
           "({Net Sales Retail Amt} - {Net Sales Retail Amt LY}) / Abs({Net Sales Retail Amt LY}) * 100"
         """
-        original = self._set_project_header(project_id)
-        try:
-            data = self._request("GET", f"/api/model/metrics/{metric_id}")
-            return data.get("expression", {}).get("text", "")
-        except Exception as e:
-            logger.debug("get_metric_expression failed for %s: %s", metric_id, e)
-            return ""
-        finally:
-            self.session.headers = original
+        with self._project_context(project_id):
+            try:
+                data = self._request("GET", f"/api/model/metrics/{metric_id}")
+                return data.get("expression", {}).get("text", "")
+            except Exception as e:
+                logger.debug("get_metric_expression failed for %s: %s", metric_id, e)
+                return ""
 
     # ── Cube endpoints ────────────────────────────────────────────────────────
 
     def get_cube(self, cube_id: str, project_id: str) -> Dict[str, Any]:
-        original = self._set_project_header(project_id)
-        try:
+        with self._project_context(project_id):
             return self._request(
-                "GET", f"/api/v2/cubes/{cube_id}",
+                "GET",
+                f"/api/v2/cubes/{cube_id}",
                 legacy_classcast_500_returns_empty=True,
             )
-        finally:
-            self.session.headers = original
-
-    def get_cube_schema(self, cube_id: str, project_id: str) -> Dict[str, Any]:
-        """
-        Get cube schema (attributes and metrics).
-
-        FIX: Uses GET /api/v2/cubes/{id} (the full cube definition endpoint)
-        instead of /api/v2/cubes/{id}/schema, which doesn't exist in MSTR REST API.
-        The definition response nests schema under definition.availableObjects —
-        source.py reads the correct path after this call.
-        """
-        original = self._set_project_header(project_id)
-        try:
-            return self._request(
-                "GET", f"/api/v2/cubes/{cube_id}",
-                legacy_classcast_500_returns_empty=True,
-            )
-        finally:
-            self.session.headers = original
 
     def get_cube_sql_view(self, cube_id: str, project_id: str) -> str:
         """
@@ -738,21 +758,21 @@ class MicroStrategyClient:
         Confirmed working via live testing (16 tables from XRBIA_DM schema, JCP).
         Does NOT require 'Use Architect Editors' privilege — only standard access.
         """
-        original = self._set_project_header(project_id)
-        try:
-            data = self._request("GET", f"/api/v2/cubes/{cube_id}/sqlView")
-            return data.get("sqlStatement", "") if isinstance(data, dict) else ""
-        finally:
-            self.session.headers = original
+        with self._project_context(project_id):
+            try:
+                data = self._request("GET", f"/api/v2/cubes/{cube_id}/sqlView")
+                return data.get("sqlStatement", "") if isinstance(data, dict) else ""
+            except requests.HTTPError as e:
+                if e.response is not None and e.response.status_code in (400, 404):
+                    # Cube has no SQL view (e.g. not published, dynamic sourcing)
+                    return ""
+                raise
 
     # ── Report endpoints ──────────────────────────────────────────────────────
 
     def get_report(self, report_id: str, project_id: str) -> Dict[str, Any]:
-        original = self._set_project_header(project_id)
-        try:
+        with self._project_context(project_id):
             return self._request("GET", f"/api/v2/reports/{report_id}")
-        finally:
-            self.session.headers = original
 
     def create_report_instance(self, report_id: str, project_id: str) -> Optional[str]:
         """
@@ -764,29 +784,29 @@ class MicroStrategyClient:
 
         Returns instanceId string, or None if creation fails.
         """
-        original = self._set_project_header(project_id)
-        try:
-            data = self._request(
-                "POST",
-                f"/api/v2/reports/{report_id}/instances",
-                params={"executionStage": "resolve_prompts"},
-                json={},
-            )
-            if isinstance(data, dict):
-                return data.get("instanceId")
-            return None
-        except MicroStrategyPermissionError:
-            logger.warning(
-                "Cannot create report instance for %s — missing DssXmlPrivilegesWebReportSQL "
-                "privilege. Grant 'Web Report SQL' in MSTR Security Roles.",
-                report_id,
-            )
-            return None
-        except Exception as e:
-            logger.debug("Failed to create report instance for %s: %s", report_id, e)
-            return None
-        finally:
-            self.session.headers = original
+        with self._project_context(project_id):
+            try:
+                data = self._request(
+                    "POST",
+                    f"/api/v2/reports/{report_id}/instances",
+                    params={"executionStage": "resolve_prompts"},
+                    json={},
+                )
+                if isinstance(data, dict):
+                    return data.get("instanceId")
+                return None
+            except MicroStrategyPermissionError:
+                logger.warning(
+                    "Cannot create report instance for %s — missing DssXmlPrivilegesWebReportSQL "
+                    "privilege. Grant 'Web Report SQL' in MSTR Security Roles.",
+                    report_id,
+                )
+                return None
+            except Exception as e:
+                logger.debug(
+                    "Failed to create report instance for %s: %s", report_id, e
+                )
+                return None
 
     def get_report_sql_view(
         self, report_id: str, instance_id: str, project_id: str
@@ -798,37 +818,41 @@ class MicroStrategyClient:
         Confirmed working: 8 source tables parsed from 'Spring OOS Date Receipt
         Cst by Week Div 5' on jcpenney-qa.cloud.strategy.com.
         """
-        original = self._set_project_header(project_id)
-        try:
-            data = self._request(
-                "GET",
-                f"/api/v2/reports/{report_id}/instances/{instance_id}/sqlView",
-            )
-            return data.get("sqlStatement", "") if isinstance(data, dict) else ""
-        except Exception as e:
-            logger.debug("Failed to get report SQL view for %s/%s: %s", report_id, instance_id, e)
-            return ""
-        finally:
-            self.session.headers = original
+        with self._project_context(project_id):
+            try:
+                data = self._request(
+                    "GET",
+                    f"/api/v2/reports/{report_id}/instances/{instance_id}/sqlView",
+                )
+                return data.get("sqlStatement", "") if isinstance(data, dict) else ""
+            except Exception as e:
+                logger.debug(
+                    "Failed to get report SQL view for %s/%s: %s",
+                    report_id,
+                    instance_id,
+                    e,
+                )
+                return ""
 
     def delete_report_instance(
         self, report_id: str, instance_id: str, project_id: str
     ) -> None:
         """Delete a report instance. Best-effort — errors are logged but not raised."""
-        original = self._set_project_header(project_id)
-        try:
-            self.session.delete(
-                f"{self.base_url}/api/v2/reports/{report_id}/instances/{instance_id}",
-                timeout=self.config.timeout_seconds,
-            )
-        except Exception as e:
-            logger.debug("Failed to delete report instance %s: %s", instance_id, e)
-        finally:
-            self.session.headers = original
+        with self._project_context(project_id):
+            try:
+                resp = self.session.delete(
+                    f"{self.base_url}/api/v2/reports/{report_id}/instances/{instance_id}",
+                    timeout=self.config.timeout_seconds,
+                )
+                resp.raise_for_status()
+            except Exception as e:
+                logger.debug("Failed to delete report instance %s: %s", instance_id, e)
 
     # ── Document/Dossier endpoints ────────────────────────────────────────────
 
-    def get_document_definition(self, document_id: str, project_id: str) -> Dict[str, Any]:
+    def get_document_definition(
+        self, document_id: str, project_id: str
+    ) -> Dict[str, Any]:
         """
         Get legacy document definition (subtype 14081).
 
@@ -838,17 +862,16 @@ class MicroStrategyClient:
         This is different from /api/v2/dossiers/{id}/definition which returns
         chapters/pages/visualizations and returns ClassCastException 500 for subtype 14081.
         """
-        original = self._set_project_header(project_id)
-        try:
+        with self._project_context(project_id):
             return self._request(
                 "GET",
                 f"/api/documents/{document_id}/definition",
                 legacy_classcast_500_returns_empty=True,
             )
-        finally:
-            self.session.headers = original
 
-    def get_dossier_definition(self, dossier_id: str, project_id: str) -> Dict[str, Any]:
+    def get_dossier_definition(
+        self, dossier_id: str, project_id: str
+    ) -> Dict[str, Any]:
         """
         Get modern dossier definition (subtype 14336).
 
@@ -857,15 +880,12 @@ class MicroStrategyClient:
 
         Note the pages layer — source.py traverses chapters → pages → visualizations.
         """
-        original = self._set_project_header(project_id)
-        try:
+        with self._project_context(project_id):
             return self._request(
                 "GET",
                 f"/api/v2/dossiers/{dossier_id}/definition",
                 legacy_classcast_500_returns_empty=True,
             )
-        finally:
-            self.session.headers = original
 
     def get_dashboard_definition(
         self, dashboard_id: str, project_id: str
@@ -895,31 +915,31 @@ class MicroStrategyClient:
 
         Returns mid (instance ID) string, or None on failure.
         """
-        original = self._set_project_header(project_id)
-        try:
-            data = self._request(
-                "POST",
-                f"/api/documents/{document_id}/instances",
-                json={},
-                timeout=90,  # legacy docs are slow — they execute all datasets on load
-            )
-            if isinstance(data, dict):
-                # Legacy documents return "mid", not "instanceId"
-                return data.get("mid") or data.get("instanceId")
-            return None
-        except requests.exceptions.Timeout:
-            logger.warning(
-                "Document instance creation timed out for %s after 90s. "
-                "The document may have too many datasets. "
-                "Consider targeting a modern dossier (subtype 14336) instead.",
-                document_id,
-            )
-            return None
-        except Exception as e:
-            logger.debug("Failed to create document instance for %s: %s", document_id, e)
-            return None
-        finally:
-            self.session.headers = original
+        with self._project_context(project_id):
+            try:
+                data = self._request(
+                    "POST",
+                    f"/api/documents/{document_id}/instances",
+                    json={},
+                    timeout=90,  # legacy docs are slow — they execute all datasets on load
+                )
+                if isinstance(data, dict):
+                    # Legacy documents return "mid", not "instanceId"
+                    return data.get("mid") or data.get("instanceId")
+                return None
+            except requests.exceptions.Timeout:
+                logger.warning(
+                    "Document instance creation timed out for %s after 90s. "
+                    "The document may have too many datasets. "
+                    "Consider targeting a modern dossier (subtype 14336) instead.",
+                    document_id,
+                )
+                return None
+            except Exception as e:
+                logger.debug(
+                    "Failed to create document instance for %s: %s", document_id, e
+                )
+                return None
 
     def create_dossier_instance(
         self, dossier_id: str, project_id: str
@@ -931,22 +951,22 @@ class MicroStrategyClient:
 
         Returns instance ID string, or None on failure.
         """
-        original = self._set_project_header(project_id)
-        try:
-            data = self._request(
-                "POST",
-                f"/api/dossiers/{dossier_id}/instances",
-                json={},
-                timeout=60,
-            )
-            if isinstance(data, dict):
-                return data.get("mid") or data.get("instanceId")
-            return None
-        except Exception as e:
-            logger.debug("Failed to create dossier instance for %s: %s", dossier_id, e)
-            return None
-        finally:
-            self.session.headers = original
+        with self._project_context(project_id):
+            try:
+                data = self._request(
+                    "POST",
+                    f"/api/dossiers/{dossier_id}/instances",
+                    json={},
+                    timeout=60,
+                )
+                if isinstance(data, dict):
+                    return data.get("mid") or data.get("instanceId")
+                return None
+            except Exception as e:
+                logger.debug(
+                    "Failed to create dossier instance for %s: %s", dossier_id, e
+                )
+                return None
 
     def get_dossier_datasets_sql(
         self, dossier_id: str, instance_id: str, project_id: str
@@ -967,25 +987,42 @@ class MicroStrategyClient:
 
         Timeout is 120s — legacy documents with 15+ datasets can be slow to generate SQL.
         """
-        original = self._set_project_header(project_id)
-        try:
-            data = self._request(
-                "GET",
-                f"/api/dossiers/{dossier_id}/instances/{instance_id}/datasets/sqlView",
-                timeout=120,
-            )
+        with self._project_context(project_id):
+            try:
+                data = self._request(
+                    "GET",
+                    f"/api/dossiers/{dossier_id}/instances/{instance_id}/datasets/sqlView",
+                    timeout=120,
+                )
+            except MicroStrategyPermissionError:
+                logger.warning(
+                    "Cannot fetch dataset SQL for %s — missing DssXmlPrivilegesWebReportSQL "
+                    "privilege. Grant 'Web Report SQL' in MSTR Security Roles.",
+                    dossier_id,
+                )
+                return []
+            except Exception as e:
+                logger.debug(
+                    "Failed to get dataset SQL for dossier %s/%s: %s",
+                    dossier_id,
+                    instance_id,
+                    e,
+                )
+                return []
             # Log raw response shape at INFO so we can diagnose partial-return issues
             if isinstance(data, list):
                 logger.info(
                     "datasets/sqlView returned list of %s items for dossier %s",
-                    len(data), dossier_id,
+                    len(data),
+                    dossier_id,
                 )
                 return data
             if isinstance(data, dict):
                 top_keys = sorted(data.keys())
                 logger.info(
                     "datasets/sqlView returned dict with keys %s for dossier %s",
-                    top_keys, dossier_id,
+                    top_keys,
+                    dossier_id,
                 )
                 # Try all known wrapper shapes in priority order
                 result = (
@@ -996,32 +1033,23 @@ class MicroStrategyClient:
                 )
                 if result:
                     logger.info(
-                        "datasets/sqlView resolved to %s dataset SQL entries", len(result)
+                        "datasets/sqlView resolved to %s dataset SQL entries",
+                        len(result),
                     )
                 else:
                     logger.warning(
                         "datasets/sqlView dict had no recognisable SQL list key — "
-                        "keys were %s — full response logged at DEBUG", top_keys
+                        "keys were %s — full response logged at DEBUG",
+                        top_keys,
                     )
                     logger.debug("datasets/sqlView full response: %s", data)
                 return result
             logger.warning(
                 "datasets/sqlView returned unexpected type %s for dossier %s",
-                type(data).__name__, dossier_id,
-            )
-            return []
-        except MicroStrategyPermissionError:
-            logger.warning(
-                "Cannot fetch dataset SQL for %s — missing DssXmlPrivilegesWebReportSQL "
-                "privilege. Grant 'Web Report SQL' in MSTR Security Roles.",
+                type(data).__name__,
                 dossier_id,
             )
             return []
-        except Exception as e:
-            logger.debug("Failed to get dataset SQL for dossier %s/%s: %s", dossier_id, instance_id, e)
-            return []
-        finally:
-            self.session.headers = original
 
     def delete_dossier_instance(
         self, dossier_id: str, instance_id: str, project_id: str
@@ -1033,34 +1061,29 @@ class MicroStrategyClient:
         document) and 14336 (modern dossier) — the asymmetric cleanup endpoint.
         Best-effort — errors are logged but not raised.
         """
-        original = self._set_project_header(project_id)
-        try:
-            self.session.delete(
-                f"{self.base_url}/api/dossiers/{dossier_id}/instances/{instance_id}",
-                timeout=self.config.timeout_seconds,
-            )
-        except Exception as e:
-            logger.debug("Failed to delete dossier instance %s: %s", instance_id, e)
-        finally:
-            self.session.headers = original
+        with self._project_context(project_id):
+            try:
+                resp = self.session.delete(
+                    f"{self.base_url}/api/dossiers/{dossier_id}/instances/{instance_id}",
+                    timeout=self.config.timeout_seconds,
+                )
+                resp.raise_for_status()
+            except Exception as e:
+                logger.debug("Failed to delete dossier instance %s: %s", instance_id, e)
 
     # ── Dataset endpoints ─────────────────────────────────────────────────────
 
     def get_datasets(self, project_id: str) -> List[Dict[str, Any]]:
-        original = self._set_project_header(project_id)
-        try:
-            datasets = list(self._paginated_request(f"/api/v2/projects/{project_id}/datasets"))
+        with self._project_context(project_id):
+            datasets = list(
+                self._paginated_request(f"/api/v2/projects/{project_id}/datasets")
+            )
             logger.info("Found %s datasets in project %s", len(datasets), project_id)
             return datasets
-        finally:
-            self.session.headers = original
 
     def get_dataset(self, dataset_id: str, project_id: str) -> Dict[str, Any]:
-        original = self._set_project_header(project_id)
-        try:
+        with self._project_context(project_id):
             return self._request("GET", f"/api/v2/datasets/{dataset_id}")
-        finally:
-            self.session.headers = original
 
     # ── Model / lineage endpoints (require Architect Editors privilege) ────────
 
@@ -1070,44 +1093,44 @@ class MicroStrategyClient:
         Returns 403 on most service accounts — use get_cube_sql_view() instead.
         Kept for environments where the privilege is available.
         """
-        original = self._set_project_header(project_id)
-        try:
+        with self._project_context(project_id):
             data = self._request("GET", f"/api/model/cubes/{cube_id}")
             return data if isinstance(data, dict) else {}
-        finally:
-            self.session.headers = original
 
-    def get_model_tables(self, cube_id: str, project_id: str, *, limit: int = 1000) -> List[Dict[str, Any]]:
+    def get_model_tables(
+        self, cube_id: str, project_id: str, *, limit: int = 1000
+    ) -> List[Dict[str, Any]]:
         """Requires 'Use Architect Editors' privilege."""
-        original = self._set_project_header(project_id)
-        try:
-            data = self._request("GET", "/api/model/tables", params={"cubeId": cube_id, "limit": limit})
+        with self._project_context(project_id):
+            data = self._request(
+                "GET", "/api/model/tables", params={"cubeId": cube_id, "limit": limit}
+            )
             if isinstance(data, list):
                 return data
             if isinstance(data, dict):
                 return list(data.get("tables", []))
             return []
-        finally:
-            self.session.headers = original
 
-    def get_model_facts(self, cube_id: str, project_id: str, *, limit: int = 1000) -> List[Dict[str, Any]]:
+    def get_model_facts(
+        self, cube_id: str, project_id: str, *, limit: int = 1000
+    ) -> List[Dict[str, Any]]:
         """Requires 'Use Architect Editors' privilege."""
-        original = self._set_project_header(project_id)
-        try:
-            data = self._request("GET", "/api/model/facts", params={"cubeId": cube_id, "limit": limit})
+        with self._project_context(project_id):
+            data = self._request(
+                "GET", "/api/model/facts", params={"cubeId": cube_id, "limit": limit}
+            )
             if isinstance(data, list):
                 return data
             if isinstance(data, dict):
                 return list(data.get("facts", []))
             return []
-        finally:
-            self.session.headers = original
 
-    def get_lineage_for_object(self, object_id: str, project_id: str, object_type: int) -> Dict[str, Any]:
+    def get_lineage_for_object(
+        self, object_id: str, project_id: str, object_type: int
+    ) -> Dict[str, Any]:
         """Get MSTR lineage API results. Returns {} if endpoint is 404 (not available on all versions)."""
-        original = self._set_project_header(project_id)
-        try:
-            data = self._request("GET", f"/api/lineage/objects/{object_id}", params={"type": object_type})
+        with self._project_context(project_id):
+            data = self._request(
+                "GET", f"/api/lineage/objects/{object_id}", params={"type": object_type}
+            )
             return data if isinstance(data, dict) else {}
-        finally:
-            self.session.headers = original

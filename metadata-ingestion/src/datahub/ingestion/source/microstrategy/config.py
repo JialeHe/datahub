@@ -1,3 +1,4 @@
+import logging
 from typing import Optional
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -14,6 +15,8 @@ from datahub.ingestion.source.state.stateful_ingestion_base import (
     StatefulIngestionConfigBase,
 )
 from datahub.utilities import config_clean
+
+logger = logging.getLogger(__name__)
 
 
 class MicroStrategyConnectionConfig(ConfigModel):
@@ -64,7 +67,7 @@ class MicroStrategyConnectionConfig(ConfigModel):
         description="Maximum number of retry attempts for failed API requests. Uses exponential backoff.",
     )
 
-    @field_validator("base_url", mode="after")  # type: ignore[misc]
+    @field_validator("base_url", mode="after")  # type: ignore[misc]  # pydantic v2 decorator stacking with ConfigModel metaclass
     @classmethod
     def validate_base_url(cls, v: str) -> str:
         """Validate and normalize base URL."""
@@ -72,12 +75,13 @@ class MicroStrategyConnectionConfig(ConfigModel):
             raise ValueError("base_url must start with http:// or https://")
         return config_clean.remove_trailing_slashes(v)
 
-    @model_validator(mode="after")  # type: ignore[misc]
+    @model_validator(mode="after")  # type: ignore[misc]  # pydantic v2 decorator stacking with ConfigModel metaclass
     def validate_auth_config(self) -> "MicroStrategyConnectionConfig":
         """Validate authentication configuration consistency."""
+        has_password = bool(self.password and self.password.get_secret_value())
         # Case 1: Anonymous mode - should not have credentials
         if self.use_anonymous:
-            if self.username or self.password:
+            if self.username or has_password:
                 raise ValueError(
                     "When use_anonymous=True, username and password should not be provided. "
                     "Choose either anonymous access OR credentials, not both."
@@ -85,7 +89,7 @@ class MicroStrategyConnectionConfig(ConfigModel):
 
         # Case 2: Credential mode - must have both username and password
         else:
-            if not self.username or not self.password:
+            if not self.username or not has_password:
                 raise ValueError(
                     "When use_anonymous=False, both username and password are required. "
                     "Either provide credentials or set use_anonymous=True."
@@ -186,15 +190,6 @@ class MicroStrategyConfig(
             "Extract lineage between dashboards/reports and cubes/datasets. "
             "Shows data flow from cubes to visualizations. "
             "Critical for impact analysis."
-        ),
-    )
-
-    include_usage: bool = Field(
-        default=True,
-        description=(
-            "Extract usage statistics (view counts, user access). "
-            "Requires access to audit logs API. "
-            "Increases ingestion time. Disabled by default."
         ),
     )
 
@@ -324,7 +319,7 @@ class MicroStrategyConfig(
         ),
     )
 
-    @model_validator(mode="after")  # type: ignore[misc]
+    @model_validator(mode="after")  # type: ignore[misc]  # pydantic v2 decorator stacking with ConfigModel metaclass
     def warn_if_column_lineage_without_schema(self) -> "MicroStrategyConfig":
         if (
             self.include_column_lineage
@@ -332,8 +327,7 @@ class MicroStrategyConfig(
             and not self.warehouse_lineage_database
             and not self.warehouse_lineage_schema
         ):
-            import logging
-            logging.getLogger(__name__).warning(
+            logger.warning(
                 "include_column_lineage is true but neither warehouse_lineage_database "
                 "nor warehouse_lineage_schema is set. Column lineage quality may be lower "
                 "for bare table names (no schema prefix in SQL)."

@@ -14,7 +14,6 @@ source:
     include_lineage: true
     include_ownership: true
     include_cube_schema: true
-    include_usage: false  # Usage requires special permissions
 
 sink:
   type: file
