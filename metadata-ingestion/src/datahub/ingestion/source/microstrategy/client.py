@@ -906,18 +906,6 @@ class MicroStrategyClient:
                 legacy_classcast_500_returns_empty=True,
             )
 
-    def get_dashboard_definition(
-        self, dashboard_id: str, project_id: str
-    ) -> Dict[str, Any]:
-        """
-        Legacy compatibility shim — prefer get_document_definition or get_dossier_definition.
-
-        Source.py now routes by subtype before calling the client, so this method
-        is kept only for backward compatibility with existing callers.
-        Defaults to the dossier (modern) endpoint.
-        """
-        return self.get_dossier_definition(dashboard_id, project_id)
-
     def create_document_instance(
         self, document_id: str, project_id: str
     ) -> Optional[str]:
@@ -1103,53 +1091,3 @@ class MicroStrategyClient:
     def get_dataset(self, dataset_id: str, project_id: str) -> Dict[str, Any]:
         with self._project_context(project_id):
             return self._request("GET", f"/api/v2/datasets/{dataset_id}")
-
-    # ── Model / lineage endpoints (require Architect Editors privilege) ────────
-
-    def get_model_cube(self, cube_id: str, project_id: str) -> Dict[str, Any]:
-        """
-        Get cube model (physical tables). Requires 'Use Architect Editors' privilege.
-        Returns 403 on most service accounts — use get_cube_sql_view() instead.
-        Kept for environments where the privilege is available.
-        """
-        with self._project_context(project_id):
-            data = self._request("GET", f"/api/model/cubes/{cube_id}")
-            return data if isinstance(data, dict) else {}
-
-    def get_model_tables(
-        self, cube_id: str, project_id: str, *, limit: int = 1000
-    ) -> List[Dict[str, Any]]:
-        """Requires 'Use Architect Editors' privilege."""
-        with self._project_context(project_id):
-            data = self._request(
-                "GET", "/api/model/tables", params={"cubeId": cube_id, "limit": limit}
-            )
-            if isinstance(data, list):
-                return data
-            if isinstance(data, dict):
-                return list(data.get("tables", []))
-            return []
-
-    def get_model_facts(
-        self, cube_id: str, project_id: str, *, limit: int = 1000
-    ) -> List[Dict[str, Any]]:
-        """Requires 'Use Architect Editors' privilege."""
-        with self._project_context(project_id):
-            data = self._request(
-                "GET", "/api/model/facts", params={"cubeId": cube_id, "limit": limit}
-            )
-            if isinstance(data, list):
-                return data
-            if isinstance(data, dict):
-                return list(data.get("facts", []))
-            return []
-
-    def get_lineage_for_object(
-        self, object_id: str, project_id: str, object_type: int
-    ) -> Dict[str, Any]:
-        """Get MSTR lineage API results. Returns {} if endpoint is 404 (not available on all versions)."""
-        with self._project_context(project_id):
-            data = self._request(
-                "GET", f"/api/lineage/objects/{object_id}", params={"type": object_type}
-            )
-            return data if isinstance(data, dict) else {}

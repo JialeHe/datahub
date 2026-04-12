@@ -55,6 +55,13 @@ from datahub.ingestion.source.microstrategy.client import (
     MicroStrategyProjectUnavailableError,
 )
 from datahub.ingestion.source.microstrategy.config import MicroStrategyConfig
+from datahub.ingestion.source.microstrategy.constants import (
+    ISERVER_CUBE_NOT_PUBLISHED,
+    ISERVER_DYNAMIC_SOURCING_CUBE,
+    SUBTYPE_LEGACY_DOCUMENT,
+    SUBTYPE_MODERN_DOSSIER,
+    SUBTYPE_SKIP,
+)
 from datahub.ingestion.source.state.stale_entity_removal_handler import (
     StaleEntityRemovalHandler,
     StaleEntityRemovalSourceReport,
@@ -228,19 +235,6 @@ def _mstr_dbtype_to_platform(db_type: str, dbms_name: str = "") -> Optional[str]
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-# ── Dossier/Document subtype constants ───────────────────────────────────────
-# Confirmed via live API testing (jcpenney-qa.cloud.strategy.com)
-SUBTYPE_LEGACY_DOCUMENT = 14081  # → GET /api/documents/{id}/definition
-SUBTYPE_MODERN_DOSSIER = 14336  # → GET /api/v2/dossiers/{id}/definition
-SUBTYPE_SKIP = {14082, 14087, 14088}  # themes, agent templates — no content
-
-# iServerCode error constants confirmed via live testing
-ISERVER_PROJECT_UNAVAILABLE = -2147209151  # project not loaded  → fail fast
-ISERVER_CUBE_NOT_PUBLISHED = -2147072488  # cube not in memory  → definition only
-ISERVER_DYNAMIC_SOURCING_CUBE = -2147212800  # attr form cache cube → definition only
-# ─────────────────────────────────────────────────────────────────────────────
-
-
 class _CubeRegistryEntry(TypedDict):
     """Entry in the per-cube registry populated by _build_registries."""
 
@@ -288,6 +282,19 @@ class CubeLineageResult(NamedTuple):
 
     upstream_lineage: Optional[UpstreamLineageClass]
     sql: Optional[str]
+
+
+class _AttrFormInfo(NamedTuple):
+    """Parsed data for one attribute form (or one form-less attribute).
+
+    Yielded by `_iter_attr_forms` and consumed by both `_build_input_fields`
+    (reports/charts) and `_build_cube_schema_metadata` (cube schema).
+    """
+
+    field_path: str  # DataHub field path, e.g. "Customer.ID" or "Customer"
+    data_type: str  # MSTR form dataType string, e.g. "varChar"
+    native_data_type: str  # DataHub nativeDataType, e.g. "attribute:ID"
+    form_cat: str  # baseFormCategory — empty string when not set
 
 
 class _CubePrefetch(NamedTuple):
@@ -1854,6 +1861,38 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
         )
         return SchemaFieldDataTypeClass(type=StringTypeClass())
 
+    @staticmethod
+    def _iter_attr_forms(attr: Dict[str, Any]) -> Iterable["_AttrFormInfo"]:
+        """Yield one _AttrFormInfo per attribute form (or one entry for attrs with no forms).
+
+        Shared between `_build_input_fields` (reports) and `_build_cube_schema_metadata`
+        (cube schema) to avoid duplicating the form-iteration and field-path logic.
+        """
+        attr_name = attr.get("name") or attr.get("id", "")
+        forms = attr.get("forms", [])
+        multi = len(forms) > 1
+
+        if not forms:
+            yield _AttrFormInfo(
+                field_path=attr_name,
+                data_type="varChar",
+                native_data_type="attribute",
+                form_cat="",
+            )
+            return
+
+        for form in forms:
+            form_name = form.get("name", "")
+            data_type = form.get("dataType", "varChar")
+            form_cat = form.get("baseFormCategory", "")
+            field_path = f"{attr_name}.{form_name}" if multi else attr_name
+            yield _AttrFormInfo(
+                field_path=field_path,
+                data_type=data_type,
+                native_data_type=f"attribute:{form_cat}" if form_cat else "attribute",
+                form_cat=form_cat,
+            )
+
     def _build_input_fields(
         self,
         avail: Dict[str, Any],
@@ -1880,11 +1919,7 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
         metrics = avail.get("metrics", [])
 
         for attr in attrs:
-            attr_name = attr.get("name") or attr.get("id", "")
             attr_id = attr.get("id", "")
-            forms = attr.get("forms", [])
-            multi = len(forms) > 1
-
             description: Optional[str] = None
             if fetch_formulas and attr_id:
                 if project_id is None:
@@ -1898,46 +1933,21 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                     )
                 description = self._expr_cache[cache_key] or None
 
-            if not forms:
-                field_path = attr_name
-                fields.append(
-                    InputFieldClass(
-                        schemaFieldUrn=make_schema_field_urn(
-                            parent_dataset_urn, field_path
-                        ),
-                        schemaField=SchemaFieldClass(
-                            fieldPath=field_path,
-                            type=SchemaFieldDataTypeClass(type=StringTypeClass()),
-                            nativeDataType="attribute",
-                            description=description,
-                            globalTags=GlobalTagsClass(
-                                tags=[TagAssociationClass(tag="urn:li:tag:ATTRIBUTE")]
-                            ),
-                        ),
-                    )
-                )
-                continue
-
-            for form in forms:
-                form_name = form.get("name", "")
-                data_type = form.get("dataType", "varChar")
-                form_cat = form.get("baseFormCategory", "")
-                field_path = f"{attr_name}.{form_name}" if multi else attr_name
-                native = f"attribute:{form_cat}" if form_cat else "attribute"
+            for fi in self._iter_attr_forms(attr):
                 tags = [TagAssociationClass(tag="urn:li:tag:ATTRIBUTE")]
-                if form_cat:
+                if fi.form_cat:
                     tags.append(
-                        TagAssociationClass(tag=f"urn:li:tag:{form_cat.upper()}")
+                        TagAssociationClass(tag=f"urn:li:tag:{fi.form_cat.upper()}")
                     )
                 fields.append(
                     InputFieldClass(
                         schemaFieldUrn=make_schema_field_urn(
-                            parent_dataset_urn, field_path
+                            parent_dataset_urn, fi.field_path
                         ),
                         schemaField=SchemaFieldClass(
-                            fieldPath=field_path,
-                            type=self._mstr_type_to_datahub(data_type),
-                            nativeDataType=native,
+                            fieldPath=fi.field_path,
+                            type=self._mstr_type_to_datahub(fi.data_type),
+                            nativeDataType=fi.native_data_type,
                             description=description,
                             globalTags=GlobalTagsClass(tags=tags),
                         ),
@@ -2300,34 +2310,14 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
             fields: List[SchemaFieldClass] = []
 
             for attr in attrs:
-                attr_name = attr.get("name") or attr.get("id", "")
-                forms = attr.get("forms", [])
-                multi = len(forms) > 1
-
-                if not forms:
+                attr_description = attr.get("description")
+                for fi in self._iter_attr_forms(attr):
                     fields.append(
                         SchemaFieldClass(
-                            fieldPath=attr_name,
-                            type=SchemaFieldDataTypeClass(type=StringTypeClass()),
-                            nativeDataType="attribute",
-                            description=attr.get("description"),
-                        )
-                    )
-                    continue
-
-                for form in forms:
-                    form_name = form.get("name", "")
-                    data_type = form.get("dataType", "varChar")
-                    form_cat = form.get("baseFormCategory", "")
-                    field_path = f"{attr_name}.{form_name}" if multi else attr_name
-                    fields.append(
-                        SchemaFieldClass(
-                            fieldPath=field_path,
-                            type=self._mstr_type_to_datahub(data_type),
-                            nativeDataType=f"attribute:{form_cat}"
-                            if form_cat
-                            else "attribute",
-                            description=attr.get("description"),
+                            fieldPath=fi.field_path,
+                            type=self._mstr_type_to_datahub(fi.data_type),
+                            nativeDataType=fi.native_data_type,
+                            description=attr_description,
                         )
                     )
 

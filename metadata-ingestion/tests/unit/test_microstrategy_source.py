@@ -954,7 +954,7 @@ class TestMicroStrategyClientErrors:
         assert excinfo.value.i_server_code == ISERVER_PROJECT_UNAVAILABLE
         assert excinfo.value.ticket_id == "abc"
 
-    def test_get_dashboard_definition_empty_on_classcast_500(self):
+    def test_get_dossier_definition_empty_on_classcast_500(self):
         cfg = MicroStrategyConnectionConfig(
             base_url="https://mstr.example.com",
             use_anonymous=True,
@@ -969,7 +969,7 @@ class TestMicroStrategyClientErrors:
         mock_resp.json.return_value = {"message": "Cannot be cast to DossierBean"}
 
         with patch.object(client.session, "request", return_value=mock_resp):
-            assert client.get_dashboard_definition("d1", "p1") == {}
+            assert client.get_dossier_definition("d1", "p1") == {}
 
 
 class TestWarehouseLineageEmission:
