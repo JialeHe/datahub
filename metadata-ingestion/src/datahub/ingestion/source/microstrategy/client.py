@@ -184,6 +184,10 @@ class MicroStrategyClient:
             if exc_type is None:
                 raise
 
+    def close(self) -> None:
+        """Release the underlying HTTP connection pool."""
+        self.session.close()
+
     # ── Authentication ────────────────────────────────────────────────────────
 
     def login(self) -> None:

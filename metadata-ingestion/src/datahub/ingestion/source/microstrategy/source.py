@@ -99,7 +99,6 @@ from datahub.sql_parsing.sql_parsing_aggregator import (
     ObservedQuery,
     SqlParsingAggregator,
 )
-from datahub.utilities.registries.domain_registry import DomainRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -507,11 +506,6 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
         # warehouse lineage edges.
         self._document_embedded_ids: Set[str] = set()
 
-        self.domain_registry = DomainRegistry(
-            cached_domains=[],
-            graph=self.ctx.graph,
-        )
-
     @classmethod
     def create(cls, config_dict: dict, ctx: PipelineContext) -> "MicroStrategySource":
         config = MicroStrategyConfig.model_validate(config_dict)
@@ -522,6 +516,10 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
             *super().get_workunit_processors(),
             self.stale_entity_removal_handler.workunit_processor,
         ]
+
+    def close(self) -> None:
+        self.client.close()
+        super().close()
 
     # ── Main extraction ───────────────────────────────────────────────────────
 
