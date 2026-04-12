@@ -19,7 +19,6 @@ from dateutil import parser as date_parser
 
 from datahub.configuration.common import AllowDenyPattern
 from datahub.emitter.mce_builder import (
-    Aspect,
     make_chart_urn,
     make_data_platform_urn,
     make_dataset_urn_with_platform_instance,
@@ -85,7 +84,10 @@ from datahub.sdk.chart import Chart as SdkChart
 from datahub.sdk.dashboard import Dashboard as SdkDashboard
 from datahub.sdk.dataset import Dataset as SdkDataset
 from datahub.sdk.entity import Entity
-from datahub.sql_parsing.sql_parsing_aggregator import SqlParsingAggregator
+from datahub.sql_parsing.sql_parsing_aggregator import (
+    ObservedQuery,
+    SqlParsingAggregator,
+)
 from datahub.utilities.registries.domain_registry import DomainRegistry
 
 logger = logging.getLogger(__name__)
@@ -1201,7 +1203,7 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
         )
 
         cert = dashboard.get("certifiedInfo", {})
-        extra_aspects: List[Aspect] = [StatusClass(removed=False)]
+        extra_aspects: List[Any] = [StatusClass(removed=False)]
         if cert.get("certified"):
             extra_aspects.append(self._make_certified_tag())
 
@@ -1359,7 +1361,7 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
           - status, dataPlatformInstance, container (required for browse)
           - inputFields (attributes + metrics) if include_report_definitions is enabled
         """
-        extra_aspects: List[Aspect] = [StatusClass(removed=False)]
+        extra_aspects: List[Any] = [StatusClass(removed=False)]
 
         # InputFields — fetch the dataset definition to get attributes and metrics.
         if self.config.include_report_definitions:
@@ -1503,7 +1505,7 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                     custom_props["metric_count"] = str(len(metrics))
 
         cert = report.get("certifiedInfo", {})
-        extra_aspects: List[Aspect] = [StatusClass(removed=False)]
+        extra_aspects: List[Any] = [StatusClass(removed=False)]
         if cert.get("certified"):
             extra_aspects.append(self._make_certified_tag())
 
@@ -1662,7 +1664,7 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 prefetched_sql = ""
 
         cert = cube.get("certifiedInfo", {})
-        extra_aspects: List[Aspect] = [StatusClass(removed=False)]
+        extra_aspects: List[Any] = [StatusClass(removed=False)]
         if cert.get("certified"):
             extra_aspects.append(self._make_certified_tag())
         if prefetched_sql and self.config.include_cube_view_sql:
@@ -1768,7 +1770,7 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
 
     # MSTR dataType string → DataHub SchemaFieldDataType
     # Covers all types observed in JCP live testing plus common MSTR variants.
-    _MSTR_TYPE_MAP = {
+    _MSTR_TYPE_MAP: Dict[str, Any] = {
         "varchar": lambda: StringTypeClass(),
         "char": lambda: StringTypeClass(),
         "decimal": lambda: NumberTypeClass(),
@@ -2119,9 +2121,11 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                     continue
                 try:
                     aggregator.add_observed_query(
-                        query=stmt,
-                        default_db=self.config.warehouse_lineage_database,
-                        default_schema=self.config.warehouse_lineage_schema,
+                        ObservedQuery(
+                            query=stmt,
+                            default_db=self.config.warehouse_lineage_database,
+                            default_schema=self.config.warehouse_lineage_schema,
+                        )
                     )
                 except Exception as _col_err:
                     logger.debug(
@@ -2131,7 +2135,7 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                     )
 
             for wu in aggregator.gen_metadata():
-                yield wu
+                yield wu.as_workunit()
 
         except Exception as e:
             logger.debug(

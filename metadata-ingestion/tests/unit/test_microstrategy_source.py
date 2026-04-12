@@ -467,8 +467,9 @@ class TestDashboardVisualizationExtraction:
             # Verify 3 chart URNs were created
             # SDK V2 Dashboard stores charts as chartEdges (deprecated charts field is empty)
             chart_urns = [
-                edge.destinationUrn for edge in (dashboard_info.chartEdges or [])
-            ]  # type: ignore
+                edge.destinationUrn
+                for edge in (dashboard_info.chartEdges or [])  # type: ignore[union-attr]
+            ]
             assert len(chart_urns) == 3
             assert all("viz_" in chart_urn for chart_urn in chart_urns)
 
@@ -1212,7 +1213,7 @@ class TestSQLTableExtraction:
 class TestWarehousePlatformDetection:
     """Tests for _detect_warehouse_platform() tier logic."""
 
-    def _make_source(self, **extra_config) -> MicroStrategySource:
+    def _make_source(self, **extra_config: Any) -> MicroStrategySource:
         config_dict = {
             "connection": {
                 "base_url": "https://demo.microstrategy.com",
@@ -1233,12 +1234,12 @@ class TestWarehousePlatformDetection:
             source.ctx = ctx
             source.client = mock_client
             source._warehouse_platform = None
-            source.report = MagicMock()
+            source.report = MagicMock()  # type: ignore[method-assign]
         return source
 
     def test_tier1_project_datasources_single_platform(self) -> None:
         source = self._make_source()
-        source.client.get_project_datasources = MagicMock(
+        source.client.get_project_datasources = MagicMock(  # type: ignore[method-assign]
             return_value=[
                 {
                     "datasourceType": "normal",
@@ -1253,7 +1254,7 @@ class TestWarehousePlatformDetection:
 
     def test_tier1_multiple_platforms_falls_through(self) -> None:
         source = self._make_source()
-        source.client.get_project_datasources = MagicMock(
+        source.client.get_project_datasources = MagicMock(  # type: ignore[method-assign]
             return_value=[
                 {
                     "datasourceType": "normal",
@@ -1270,15 +1271,15 @@ class TestWarehousePlatformDetection:
             ]
         )
         # Tier 1 is ambiguous; Tier 2 is empty → platform stays None
-        source.client.get_datasources = MagicMock(return_value=[])
-        source.client.search_warehouse_tables = MagicMock(return_value=[])
+        source.client.get_datasources = MagicMock(return_value=[])  # type: ignore[method-assign]
+        source.client.search_warehouse_tables = MagicMock(return_value=[])  # type: ignore[method-assign]
         source._detect_warehouse_platform(project_id="proj_1")
         assert source._warehouse_platform is None
 
     def test_tier2_env_datasources_used_when_tier1_empty(self) -> None:
         source = self._make_source()
-        source.client.get_project_datasources = MagicMock(return_value=[])
-        source.client.get_datasources = MagicMock(
+        source.client.get_project_datasources = MagicMock(return_value=[])  # type: ignore[method-assign]
+        source.client.get_datasources = MagicMock(  # type: ignore[method-assign]
             return_value=[
                 {
                     "datasourceType": "normal",
@@ -1294,7 +1295,7 @@ class TestWarehousePlatformDetection:
     def test_already_resolved_skips_detection(self) -> None:
         source = self._make_source()
         source._warehouse_platform = "bigquery"
-        source.client.get_project_datasources = MagicMock()
+        source.client.get_project_datasources = MagicMock()  # type: ignore[method-assign]
         source._detect_warehouse_platform(project_id="proj_1")
         # Should NOT call any client methods since platform is already known
         source.client.get_project_datasources.assert_not_called()
@@ -1302,10 +1303,10 @@ class TestWarehousePlatformDetection:
     def test_tier2_env_datasources_when_project_datasources_fails(self) -> None:
         """Tier 1 raises an exception; Tier 2 env-level datasources resolves Snowflake."""
         source = self._make_source()
-        source.client.get_project_datasources = MagicMock(
+        source.client.get_project_datasources = MagicMock(  # type: ignore[method-assign]
             side_effect=Exception("HTTP 500")
         )
-        source.client.get_datasources = MagicMock(
+        source.client.get_datasources = MagicMock(  # type: ignore[method-assign]
             return_value=[
                 {
                     "datasourceType": "normal",
@@ -1322,18 +1323,18 @@ class TestWarehousePlatformDetection:
     def test_tier3_tables_api_detection(self) -> None:
         """Tiers 1–2 return empty; Tier 3a (v2/tables) resolves BigQuery."""
         source = self._make_source()
-        source.client.get_project_datasources = MagicMock(return_value=[])
-        source.client.get_datasources = MagicMock(return_value=[])
+        source.client.get_project_datasources = MagicMock(return_value=[])  # type: ignore[method-assign]
+        source.client.get_datasources = MagicMock(return_value=[])  # type: ignore[method-assign]
         # Tier 3: search_warehouse_tables returns one table
-        source.client.search_warehouse_tables = MagicMock(
+        source.client.search_warehouse_tables = MagicMock(  # type: ignore[method-assign]
             return_value=[{"id": "TBL001", "name": "fact_orders"}]
         )
         # get_table_definition returns a primaryDataSource reference
-        source.client.get_table_definition = MagicMock(
+        source.client.get_table_definition = MagicMock(  # type: ignore[method-assign]
             return_value={"primaryDataSource": {"objectId": "DS001", "name": "BQ Prod"}}
         )
         # get_datasource_by_id returns a BigQuery datasource
-        source.client.get_datasource_by_id = MagicMock(
+        source.client.get_datasource_by_id = MagicMock(  # type: ignore[method-assign]
             return_value={
                 "datasourceType": "normal",
                 "database": {"type": "big_query"},
@@ -1347,16 +1348,16 @@ class TestWarehousePlatformDetection:
     def test_tier3b_model_tables_fallback(self) -> None:
         """Tier 3a (v2/tables) returns no ds_id; Tier 3b (model/tables) resolves Redshift."""
         source = self._make_source()
-        source.client.get_project_datasources = MagicMock(return_value=[])
-        source.client.get_datasources = MagicMock(return_value=[])
+        source.client.get_project_datasources = MagicMock(return_value=[])  # type: ignore[method-assign]
+        source.client.get_datasources = MagicMock(return_value=[])  # type: ignore[method-assign]
         # Tier 3 setup: one warehouse table
-        source.client.search_warehouse_tables = MagicMock(
+        source.client.search_warehouse_tables = MagicMock(  # type: ignore[method-assign]
             return_value=[{"id": "TBL001", "name": "fact_revenue"}]
         )
         # get_table_definition returns no primaryDataSource → triggers 3b
-        source.client.get_table_definition = MagicMock(return_value={})
+        source.client.get_table_definition = MagicMock(return_value={})  # type: ignore[method-assign]
         # Tier 3b: list_model_tables finds the table by name
-        source.client.list_model_tables = MagicMock(
+        source.client.list_model_tables = MagicMock(  # type: ignore[method-assign]
             return_value={
                 "tables": [
                     {"information": {"name": "fact_revenue", "objectId": "MTBL001"}}
@@ -1365,11 +1366,11 @@ class TestWarehousePlatformDetection:
             }
         )
         # get_model_table_definition returns the datasource reference
-        source.client.get_model_table_definition = MagicMock(
+        source.client.get_model_table_definition = MagicMock(  # type: ignore[method-assign]
             return_value={"primaryDataSource": {"objectId": "DS002", "name": "RS Prod"}}
         )
         # get_datasource_by_id returns a Redshift datasource
-        source.client.get_datasource_by_id = MagicMock(
+        source.client.get_datasource_by_id = MagicMock(  # type: ignore[method-assign]
             return_value={
                 "datasourceType": "normal",
                 "database": {"type": "redshift"},
@@ -1420,7 +1421,7 @@ class TestIServerErrorHandling:
         )
         client = MicroStrategyClient.__new__(MicroStrategyClient)
         client.config = config
-        client._base_url = "https://demo.microstrategy.com"
+        client.base_url = "https://demo.microstrategy.com"
 
         mock_response = MagicMock()
         mock_response.content = b'{"iServerCode": -2147209151, "message": "Not loaded"}'
@@ -1586,7 +1587,7 @@ class TestCubeIServerErrorCodes:
         cube = {"id": "C001", "name": "Unpublished Cube"}
         project_id = "P001"
 
-        source.client = MagicMock()
+        source.client = MagicMock()  # type: ignore[method-assign]
         source.client.get_cube.return_value = {
             "iServerCode": ISERVER_CUBE_NOT_PUBLISHED,
             "message": "Cube not in memory",
@@ -1601,7 +1602,7 @@ class TestCubeIServerErrorCodes:
         cube = {"id": "C002", "name": "Dynamic Cube"}
         project_id = "P001"
 
-        source.client = MagicMock()
+        source.client = MagicMock()  # type: ignore[method-assign]
         source.client.get_cube.return_value = {
             "iServerCode": ISERVER_DYNAMIC_SOURCING_CUBE,
             "message": "Attribute form cache cube",
@@ -1647,8 +1648,8 @@ class TestLibraryDatasetIngestion:
         assert len(entities) == 1
         entity = entities[0]
         # URN encodes project.id + dataset.id
-        assert "PROJ001" in str(entity.urn)
-        assert "DS001" in str(entity.urn)
+        assert "PROJ001" in str(entity.urn)  # type: ignore[union-attr]
+        assert "DS001" in str(entity.urn)  # type: ignore[union-attr]
 
     def test_library_dataset_includes_ownership_when_enabled(self) -> None:
         """_process_dataset emits an ownership aspect when include_ownership=True."""
@@ -1666,8 +1667,8 @@ class TestLibraryDatasetIngestion:
 
         entities = list(source._process_dataset(dataset, project))
         # Expand SDK V2 entity into individual aspect work units to check ownership
-        wus = [wu for entity in entities for wu in entity.as_workunits()]
-        aspect_names = [wu.metadata.aspectName for wu in wus]
+        wus = [wu for entity in entities for wu in entity.as_workunits()]  # type: ignore[union-attr]
+        aspect_names = [wu.metadata.aspectName for wu in wus]  # type: ignore[union-attr]
         assert "ownership" in aspect_names
 
 

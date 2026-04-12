@@ -289,7 +289,7 @@ class MicroStrategyClient:
         extra_headers: Optional[Dict[str, str]] = None,
         timeout: Optional[int] = None,
         legacy_classcast_500_returns_empty: bool = False,
-    ) -> Union[Dict[str, Any], List[Any]]:
+    ) -> Any:
         """
         Make authenticated API request with automatic token refresh.
 
