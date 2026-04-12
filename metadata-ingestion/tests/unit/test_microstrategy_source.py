@@ -701,8 +701,8 @@ class TestCubeSchemaExtraction:
                 }
             )
 
-            # Mock schema extraction to fail
-            mock_client.get_cube_schema.side_effect = Exception(
+            # Mock schema extraction to fail — production code calls get_cube(), not get_cube_schema()
+            mock_client.get_cube.side_effect = Exception(
                 "Permission denied to cube schema"
             )
             mock_client.get_cube_sql_view.return_value = ""
