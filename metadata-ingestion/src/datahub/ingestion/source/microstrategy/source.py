@@ -1,10 +1,12 @@
 import concurrent.futures
+import dataclasses
 import logging
 import re
 from collections import defaultdict
 from datetime import datetime
 from typing import (
     Any,
+    Callable,
     Dict,
     Iterable,
     List,
@@ -34,8 +36,10 @@ from datahub.ingestion.api.decorators import (
     platform_name,
     support_status,
 )
+from datahub.ingestion.api.report import LossyList
 from datahub.ingestion.api.source import (
     CapabilityReport,
+    MetadataWorkUnitProcessor,
     SourceCapability,
     SourceReport,
     TestableSource,
@@ -396,6 +400,16 @@ class FolderKey(ContainerKey):
     folder: str
 
 
+@dataclasses.dataclass
+class MicroStrategySourceReport(StaleEntityRemovalSourceReport):
+    """Source report with entity drop tracking."""
+
+    dropped_entities: LossyList[str] = dataclasses.field(default_factory=LossyList)
+
+    def report_dropped(self, name: str) -> None:
+        self.dropped_entities.append(name)
+
+
 @platform_name("MicroStrategy", id="microstrategy")
 @config_class(MicroStrategyConfig)
 @support_status(SupportStatus.INCUBATING)
@@ -450,7 +464,7 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
     def __init__(self, config: MicroStrategyConfig, ctx: PipelineContext):
         super().__init__(config, ctx)
         self.config = config
-        self.report = StaleEntityRemovalSourceReport()
+        self.report: MicroStrategySourceReport = MicroStrategySourceReport()
 
         self.client = MicroStrategyClient(self.config.connection)
         self.stale_entity_removal_handler = StaleEntityRemovalHandler.create(
@@ -495,6 +509,12 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
     def create(cls, config_dict: dict, ctx: PipelineContext) -> "MicroStrategySource":
         config = MicroStrategyConfig.model_validate(config_dict)
         return cls(config, ctx)
+
+    def get_workunit_processors(self) -> List[Optional[MetadataWorkUnitProcessor]]:
+        return [
+            *super().get_workunit_processors(),
+            self.stale_entity_removal_handler.workunit_processor,
+        ]
 
     # ── Main extraction ───────────────────────────────────────────────────────
 
@@ -837,6 +857,11 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 logger.warning(
                     "Failed cube registry for %s: %s", project.get("name"), e
                 )
+                self.report.report_warning(
+                    "cube-registry-failed",
+                    context=project.get("name", project_id),
+                    exc=e,
+                )
                 self._cubes_by_project[project_id] = []
         else:
             self._cubes_by_project[project_id] = []
@@ -852,6 +877,11 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
             except Exception as e:
                 logger.warning(
                     "Failed dataset registry for %s: %s", project.get("name"), e
+                )
+                self.report.report_warning(
+                    "dataset-registry-failed",
+                    context=project.get("name", project_id),
+                    exc=e,
                 )
                 self._datasets_by_project[project_id] = []
         else:
@@ -913,8 +943,11 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
         try:
             folders = self.client.get_folders(project_id)
             for folder in folders:
-                if self.config.folder_pattern.allowed(folder.get("name", "")):
+                folder_name = folder.get("name", "")
+                if self.config.folder_pattern.allowed(folder_name):
                     yield from self._emit_folder_container(folder, project)
+                else:
+                    self.report.report_dropped(folder_name)
         except Exception as e:
             logger.warning("Failed to get folders for %s: %s", project_name, e)
             self.report.report_warning(
@@ -940,8 +973,11 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 len(all_type55) - len(dashboards),
             )
             for dashboard in dashboards:
-                if self.config.dashboard_pattern.allowed(dashboard.get("name", "")):
+                dashboard_name = dashboard.get("name", "")
+                if self.config.dashboard_pattern.allowed(dashboard_name):
                     yield from self._process_dashboard(dashboard, project)
+                else:
+                    self.report.report_dropped(dashboard_name)
         except Exception as e:
             logger.warning("Failed to get dashboards for %s: %s", project_name, e)
             self.report.report_warning(
@@ -970,6 +1006,7 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                     if report["id"] in self._document_embedded_ids:
                         continue
                 elif not self.config.report_pattern.allowed(report.get("name", "")):
+                    self.report.report_dropped(report.get("name", report["id"]))
                     continue
                 matched += 1
                 yield from self._process_report(report, project)
@@ -1041,17 +1078,18 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
             logger.info("Found %s cubes in %s", len(cubes), project_name)
             driven = self._dashboard_driven_mode()
 
-            matched_cubes = [
-                cube
-                for cube in cubes
+            matched_cubes = []
+            for cube in cubes:
+                cube_name = cube.get("name", cube["id"])
                 if (
-                    (driven and cube["id"] in self._dashboard_referenced_ids)
-                    or (
-                        not driven
-                        and self.config.cube_pattern.allowed(cube.get("name", ""))
-                    )
-                )
-            ]
+                    driven
+                    and cube["id"] in self._dashboard_referenced_ids
+                    or not driven
+                    and self.config.cube_pattern.allowed(cube_name)
+                ):
+                    matched_cubes.append(cube)
+                elif not driven:
+                    self.report.report_dropped(cube_name)
 
             if driven:
                 logger.info(
@@ -1155,10 +1193,12 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
         if self.config.preflight_dashboard_exists:
             existence = self.client.get_object(dashboard["id"], 55, project_id)
             if not existence.get("id"):
+                dashboard_name = dashboard.get("name", dashboard["id"])
                 logger.debug(
                     "Skipping dashboard %s: not found (preflight)",
-                    dashboard.get("name"),
+                    dashboard_name,
                 )
+                self.report.report_dropped(dashboard_name)
                 return
 
         chart_urns: List[str] = []
@@ -1438,10 +1478,15 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
             try:
                 report_defn = self.client.get_report(report["id"], project["id"])
             except Exception as e:
-                logger.debug(
+                logger.warning(
                     "Could not fetch definition for report %s: %s",
                     report.get("name"),
                     e,
+                )
+                self.report.report_warning(
+                    "report-definition-fetch-failed",
+                    context=report.get("name", report["id"]),
+                    exc=e,
                 )
 
         # Merge: full definition fields override shallow search-result fields where available
@@ -1577,10 +1622,15 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                     )
                 )
         except Exception as e:
-            logger.debug(
+            logger.warning(
                 "Failed to extract registry inputs for report %s: %s",
                 report.get("id"),
                 e,
+            )
+            self.report.report_warning(
+                "report-registry-lookup-failed",
+                context=str(report.get("id", "")),
+                exc=e,
             )
         return inputs
 
@@ -1770,7 +1820,7 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
 
     # MSTR dataType string → DataHub SchemaFieldDataType
     # Covers all types observed in JCP live testing plus common MSTR variants.
-    _MSTR_TYPE_MAP: Dict[str, Any] = {
+    _MSTR_TYPE_MAP: Dict[str, Callable[[], Any]] = {
         "varchar": lambda: StringTypeClass(),
         "char": lambda: StringTypeClass(),
         "decimal": lambda: NumberTypeClass(),
@@ -1837,9 +1887,10 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
 
             description: Optional[str] = None
             if fetch_formulas and attr_id:
-                assert (
-                    project_id is not None
-                )  # guaranteed by fetch_formulas check above
+                if project_id is None:
+                    raise ValueError(
+                        "project_id required when include_field_formulas is enabled"
+                    )
                 cache_key = f"attr:{project_id}:{attr_id}"
                 if cache_key not in self._expr_cache:
                     self._expr_cache[cache_key] = (
@@ -1899,9 +1950,10 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
 
             description = None
             if fetch_formulas and metric_id:
-                assert (
-                    project_id is not None
-                )  # guaranteed by fetch_formulas check above
+                if project_id is None:
+                    raise ValueError(
+                        "project_id required when include_field_formulas is enabled"
+                    )
                 cache_key = f"metric:{project_id}:{metric_id}"
                 if cache_key not in self._expr_cache:
                     self._expr_cache[cache_key] = (
@@ -2110,36 +2162,43 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 env=self.config.env,
                 graph=self.ctx.graph,
             )
-
-            for stmt in statements:
-                # Skip DDL statements (CREATE VOLATILE TABLE, DROP TABLE)
-                upper = stmt.upper().lstrip()
-                if upper.startswith("CREATE") or upper.startswith("DROP"):
-                    continue
-                # Skip the analytical engine comment block
-                if upper.startswith("[ANALYTICAL"):
-                    continue
-                try:
-                    aggregator.add_observed_query(
-                        ObservedQuery(
-                            query=stmt,
-                            default_db=self.config.warehouse_lineage_database,
-                            default_schema=self.config.warehouse_lineage_schema,
+            try:
+                for stmt in statements:
+                    # Skip DDL statements (CREATE VOLATILE TABLE, DROP TABLE)
+                    upper = stmt.upper().lstrip()
+                    if upper.startswith("CREATE") or upper.startswith("DROP"):
+                        continue
+                    # Skip the analytical engine comment block
+                    if upper.startswith("[ANALYTICAL"):
+                        continue
+                    try:
+                        aggregator.add_observed_query(
+                            ObservedQuery(
+                                query=stmt,
+                                default_db=self.config.warehouse_lineage_database,
+                                default_schema=self.config.warehouse_lineage_schema,
+                            )
                         )
-                    )
-                except Exception as _col_err:
-                    logger.debug(
-                        "Column lineage parse failed for a SQL statement in %s: %s",
-                        downstream_urn,
-                        _col_err,
-                    )
+                    except Exception as _col_err:
+                        logger.debug(
+                            "Column lineage parse failed for a SQL statement in %s: %s",
+                            downstream_urn,
+                            _col_err,
+                        )
 
-            for wu in aggregator.gen_metadata():
-                yield wu.as_workunit()
+                for wu in aggregator.gen_metadata():
+                    yield wu.as_workunit()
+            finally:
+                aggregator.close()
 
         except Exception as e:
-            logger.debug(
+            logger.warning(
                 "Column lineage generation failed for %s: %s", downstream_urn, e
+            )
+            self.report.report_warning(
+                "column-lineage-failed",
+                context=downstream_urn,
+                exc=e,
             )
 
     # ── SDK V2 helpers ────────────────────────────────────────────────────────

@@ -123,7 +123,7 @@ class MicroStrategyClient:
                 return None
             data = response.json()
             return data if isinstance(data, dict) else None
-        except Exception as e:
+        except (ValueError, requests.exceptions.JSONDecodeError) as e:
             logger.warning("Failed to parse response JSON from %s: %s", response.url, e)
             return None
 
@@ -290,6 +290,10 @@ class MicroStrategyClient:
         timeout: Optional[int] = None,
         legacy_classcast_500_returns_empty: bool = False,
     ) -> Any:
+        # Return type is Any because callers have heterogeneous return contracts:
+        # some methods declare -> Dict[str, Any], others -> List[Any], others -> str.
+        # Narrowing here would require 13+ overloads or generic plumbing — the
+        # individual method annotations provide the effective contracts.
         """
         Make authenticated API request with automatic token refresh.
 
@@ -602,7 +606,7 @@ class MicroStrategyClient:
             try:
                 return self._request("GET", f"/api/v2/tables/{table_id}")
             except Exception as e:
-                logger.debug("get_table_definition failed for %s: %s", table_id, e)
+                logger.info("get_table_definition failed for %s: %s", table_id, e)
                 return {}
 
     def list_model_tables(
@@ -631,12 +635,14 @@ class MicroStrategyClient:
                 )
                 return data if isinstance(data, dict) else {}
             except MicroStrategyPermissionError:
-                logger.debug(
-                    "GET /api/model/tables returned 403 for project %s", project_id
+                logger.info(
+                    "GET /api/model/tables returned 403 for project %s — "
+                    "falling back to next detection tier",
+                    project_id,
                 )
                 return {}
             except Exception as e:
-                logger.debug(
+                logger.info(
                     "list_model_tables failed for project %s: %s", project_id, e
                 )
                 return {}
@@ -660,7 +666,7 @@ class MicroStrategyClient:
             try:
                 return self._request("GET", f"/api/model/tables/{model_table_id}")
             except Exception as e:
-                logger.debug(
+                logger.info(
                     "get_model_table_definition failed for %s: %s", model_table_id, e
                 )
                 return {}
