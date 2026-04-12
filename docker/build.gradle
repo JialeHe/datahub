@@ -265,19 +265,45 @@ ext {
         ':datahub-actions': 'datahub-actions',
     ]
 
-    // Helper function to read the captured profile name from file
+    // Helper function to read the captured profile name from file, with a
+    // Docker container inspection fallback for cross-worktree scenarios.
     readCapturedProfile = {
         def composeFileName = new File(compose_base).getName()
         def profileStatusFileName = composeFileName.replace('.yml', '-profile.txt')
         def profileFile = new File(rootProject.buildDir, profileStatusFileName)
 
-        if (!profileFile.exists()) {
-          return null
+        // Fast path: local build-dir file written by ComposeUp in this worktree
+        if (profileFile.exists()) {
+            def activeProfile = profileFile.text.trim()
+            logger.lifecycle("Using captured profile: ${activeProfile}")
+            return activeProfile
         }
 
-        def activeProfile = profileFile.text.trim()
-        logger.lifecycle("Using captured profile: ${activeProfile}")
-        return activeProfile
+        // Fallback: the stack may have been started from a different git worktree,
+        // so the profile file lives in that worktree's build/ directory, not ours.
+        // Detect the active profile by inspecting running container labels instead.
+        logger.lifecycle("Profile file not found at ${profileFile.absolutePath}; " +
+                         "detecting active profile from running Docker containers...")
+        def detectProcess = ['docker', 'ps',
+                             '--filter', "label=com.docker.compose.project=${project_name}",
+                             '--format', '{{index .Labels "com.docker.compose.profiles"}}'].execute()
+        detectProcess.waitFor()
+
+        if (detectProcess.exitValue() == 0) {
+            def detectedProfile = detectProcess.text.trim()
+                                      .split('\n')
+                                      .collect { it.trim() }
+                                      .find { it }   // first non-empty line (skip base services)
+            if (detectedProfile) {
+                logger.lifecycle("Detected active profile '${detectedProfile}' from running containers")
+                // Cache locally so subsequent Gradle calls in this worktree are fast
+                profileFile.getParentFile().mkdirs()
+                profileFile.text = detectedProfile
+                return detectedProfile
+            }
+        }
+
+        return null
     }
 
     // Helper function to find the taskName and config that uses a given profile (only searches debug tasks)

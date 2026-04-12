@@ -151,12 +151,19 @@ def _default_config() -> DevToolingConfig:
                 "datahub-mae-consumer",
             ),
             "metadata-io/": (":metadata-service:war:bootJar", "datahub-gms"),
+            # Hot-reload container: Python source changes are picked up automatically.
+            # Listed here so _detect_changed_modules() can log the change.
+            "datahub-actions/": (":datahub-actions:dockerPrepare", "datahub-actions"),
+            # One-shot migration container: changes require _restart_datahub_upgrade().
+            "datahub-upgrade/": (":datahub-upgrade:dockerPrepare", "datahub-upgrade"),
         },
         rebuild_module_aliases={
             "gms": "datahub-gms",
             "frontend": "datahub-frontend-react",
             "mce": "datahub-mce-consumer",
             "mae": "datahub-mae-consumer",
+            "actions": "datahub-actions",
+            "upgrade": "datahub-upgrade",
         },
         services=[
             ServiceConfig(
@@ -485,6 +492,107 @@ def cmd_wait(args: argparse.Namespace) -> int:
 # Command: rebuild
 # ---------------------------------------------------------------------------
 
+_BOOTSTRAP_CONFIG_PREFIX = "metadata-service/configuration/"
+_DATAHUB_UPGRADE_PREFIX = "datahub-upgrade/"
+
+
+def _get_changed_files() -> set:
+    """Return the set of files that are staged, unstaged, or untracked relative to the index."""
+    staged = _run(["git", "diff", "--name-only", "--cached"])
+    unstaged = _run(["git", "diff", "--name-only"])
+    untracked = _run(["git", "ls-files", "--others", "--exclude-standard"])
+    changed: set = set()
+    for r in (staged, unstaged, untracked):
+        if r.stdout:
+            changed.update(r.stdout.strip().splitlines())
+    return changed
+
+
+def _bootstrap_config_changed() -> bool:
+    """Return True if any bootstrap MCP config files are modified (staged, unstaged, or untracked)."""
+    return any(f.startswith(_BOOTSTRAP_CONFIG_PREFIX) for f in _get_changed_files())
+
+
+def _datahub_upgrade_changed() -> bool:
+    """Return True if any datahub-upgrade source files are modified."""
+    return any(f.startswith(_DATAHUB_UPGRADE_PREFIX) for f in _get_changed_files())
+
+
+def _restart_system_update() -> bool:
+    """Restart the system-update init container and wait for it to finish.
+
+    system-update is a one-shot container that applies bootstrap MCPs on startup.
+    After a GMS rebuild that includes bootstrap config changes, it must be re-run
+    so the new MCPs are actually written to the store.
+    """
+    containers = _run_docker_compose_ps()
+    su_name = next(
+        (c["Name"] for c in containers if "system-update" in c.get("Name", "")),
+        None,
+    )
+    if not su_name:
+        _log(
+            "WARNING: could not find system-update container — bootstrap MCPs may not be applied."
+        )
+        return False
+
+    _log(f"Bootstrap config changed — restarting {su_name} to apply new MCPs...")
+    if _run(["docker", "start", su_name]).returncode != 0:
+        _log(f"ERROR: failed to start {su_name}")
+        return False
+    _run(["docker", "wait", su_name], timeout=120)
+    exit_code = int(
+        _run(
+            ["docker", "inspect", "--format", "{{.State.ExitCode}}", su_name]
+        ).stdout.strip()
+        or "1"
+    )
+    if exit_code == 0:
+        _log(f"{su_name} completed — bootstrap MCPs applied.")
+        return True
+    _log(f"WARNING: {su_name} exited {exit_code} — run: docker logs {su_name}")
+    return False
+
+
+def _restart_datahub_upgrade() -> bool:
+    """Restart the datahub-upgrade init container and wait for it to finish.
+
+    datahub-upgrade is a one-shot container that runs schema migrations on startup.
+    After a rebuild that includes upgrade module changes, it must be re-run so the
+    new migration code is applied. Migrations are designed to be idempotent.
+    """
+    containers = _run_docker_compose_ps()
+    upgrade_name = next(
+        (c["Name"] for c in containers if "datahub-upgrade" in c.get("Name", "")),
+        None,
+    )
+    if not upgrade_name:
+        _log(
+            "WARNING: could not find datahub-upgrade container — schema migrations may not be applied."
+        )
+        return False
+
+    _log(
+        f"datahub-upgrade source changed — restarting {upgrade_name} to apply migrations..."
+    )
+    if _run(["docker", "start", upgrade_name]).returncode != 0:
+        _log(f"ERROR: failed to start {upgrade_name}")
+        return False
+    _run(["docker", "wait", upgrade_name], timeout=120)
+    exit_code = int(
+        _run(
+            ["docker", "inspect", "--format", "{{.State.ExitCode}}", upgrade_name]
+        ).stdout.strip()
+        or "1"
+    )
+    if exit_code == 0:
+        _log(f"{upgrade_name} completed — schema migrations applied.")
+        return True
+    _log(
+        f"WARNING: {upgrade_name} exited {exit_code} — run: docker logs {upgrade_name}"
+    )
+    return False
+
 
 def _detect_changed_modules() -> List[Tuple[str, str, str]]:
     """Use git diff to detect which modules changed, return list of (module_path, gradle_task, container)."""
@@ -581,6 +689,17 @@ def cmd_rebuild(args: argparse.Namespace) -> int:
         return 1
 
     _log(f"Rebuild+reload succeeded in {build_time:.0f}s")
+
+    # Bootstrap config changes are compiled into the new GMS JAR but are applied
+    # by the system-update init container, not by GMS itself. The reload task only
+    # restarts GMS, so re-run system-update when those files are modified.
+    if _bootstrap_config_changed():
+        _restart_system_update()
+
+    # Schema migration changes are compiled into the datahub-upgrade JAR but applied
+    # by the datahub-upgrade init container. Reload never touches it, so restart it.
+    if _datahub_upgrade_changed():
+        _restart_datahub_upgrade()
 
     # Step 3: Optionally wait for readiness
     if args.wait:
