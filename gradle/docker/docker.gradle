@@ -289,7 +289,7 @@ project.afterEvaluate {
         }
 
         if (extension.variants.get()) {
-          bake_spec_target.name = "${project.name}-\${variants.tagSuffix}"
+          bake_spec_target.name = "${project.name}\${variants.tagSuffix}"
           bake_spec_target.matrix = [variants: []]
 
           extension.variants.get().each { variant, variantSpec ->
