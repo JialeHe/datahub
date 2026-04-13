@@ -105,6 +105,74 @@ class CustomAthenaRestDialect(AthenaRestDialect):
     # regex to identify complex types in DDL strings which are embedded in `<>`.
     _complex_type_pattern = re.compile(r"(<.+>)")
 
+    # Table types exposed by Athena. S3 Tables (accessed via s3tablescatalog/<bucket>)
+    # are Iceberg-native and are returned with TableType "ICEBERG"; PyAthena's base
+    # implementation omits this value, so they would be silently excluded.
+    _ALLOWED_TABLE_TYPES = frozenset(
+        ["EXTERNAL_TABLE", "MANAGED_TABLE", "EXTERNAL", "ICEBERG"]
+    )
+
+    @typing.no_type_check
+    def get_table_names(self, connection, schema=None, **kw):
+        tables = self._get_tables(connection, schema, **kw)
+        table_names = [
+            t.name for t in tables if t.table_type in self._ALLOWED_TABLE_TYPES
+        ]
+
+        # For S3 Tables catalogs, the Athena ListTableMetadata API may return an
+        # empty result set when invoked through PyAthena due to the known limitation
+        # where s3tablescatalog entries are invisible to ListDataCatalogs.  As a
+        # safety net we call the boto3 Athena client directly, bypassing PyAthena's
+        # internal caching and filtering.
+        if not table_names:
+            raw_connection = self._raw_connection(connection)
+            catalog = raw_connection.catalog_name
+            if catalog and catalog.startswith("s3tablescatalog/"):
+                schema_name = schema if schema else raw_connection.schema_name
+                table_names = self._list_tables_via_boto3(
+                    raw_connection=raw_connection,
+                    catalog=catalog,
+                    schema_name=schema_name,
+                )
+
+        return table_names
+
+    @typing.no_type_check
+    def _list_tables_via_boto3(
+        self,
+        raw_connection: Any,
+        catalog: str,
+        schema_name: str,
+    ) -> List[str]:
+        try:
+            with raw_connection.connection.cursor() as cursor:
+                boto3_client = cursor.connection.client
+                table_names: List[str] = []
+                next_token: Optional[str] = None
+                while True:
+                    kwargs: Dict[str, Any] = {
+                        "CatalogName": catalog,
+                        "DatabaseName": schema_name,
+                        "MaxResults": 50,
+                    }
+                    if next_token:
+                        kwargs["NextToken"] = next_token
+                    response = boto3_client.list_table_metadata(**kwargs)
+                    table_names.extend(
+                        t["Name"]
+                        for t in response.get("TableMetadataList", [])
+                        if t.get("TableType") != "VIRTUAL_VIEW"
+                    )
+                    next_token = response.get("NextToken")
+                    if not next_token:
+                        break
+                return table_names
+        except Exception as e:
+            logger.warning(
+                f"boto3 fallback for S3 Tables catalog {catalog}/{schema_name} failed: {e}"
+            )
+            return []
+
     @typing.no_type_check
     @reflection.cache
     def get_view_definition(self, connection, view_name, schema=None, **kw):

@@ -1150,3 +1150,77 @@ def test_sanitize_identifier_error_handling_in_generate_partition_profiler_query
     )
     assert "contains unsafe characters" in log_record.message
     assert "Partition profiling disabled for this table" in log_record.message
+
+
+def _mock_table(name: str, table_type: str) -> mock.MagicMock:
+    t = mock.MagicMock()
+    t.name = name
+    t.table_type = table_type
+    return t
+
+
+def test_get_table_names_s3_tables():
+    """ICEBERG table type is included; VIRTUAL_VIEW is excluded."""
+    dialect = CustomAthenaRestDialect()
+    tables = [
+        _mock_table("regular", "EXTERNAL_TABLE"),
+        _mock_table("s3_table", "ICEBERG"),
+        _mock_table("my_view", "VIRTUAL_VIEW"),
+    ]
+    with mock.patch.object(dialect, "_get_tables", return_value=tables):
+        result = dialect.get_table_names(mock.MagicMock(), schema="scraped")
+
+    assert set(result) == {"regular", "s3_table"}
+
+
+def test_get_table_names_boto3_fallback_for_s3tables_catalog():
+    """boto3 fallback fires when PyAthena returns empty for an s3tablescatalog."""
+    dialect = CustomAthenaRestDialect()
+    raw_conn = mock.MagicMock()
+    raw_conn.catalog_name = "s3tablescatalog/my-bucket"
+    raw_conn.schema_name = "scraped"
+    boto3_response = {
+        "TableMetadataList": [
+            {"Name": "orders", "TableType": "ICEBERG"},
+            {"Name": "v_orders", "TableType": "VIRTUAL_VIEW"},
+        ]
+    }
+    raw_conn.connection.cursor.return_value.__enter__.return_value.connection.client.list_table_metadata.return_value = boto3_response
+
+    with (
+        mock.patch.object(dialect, "_get_tables", return_value=[]),
+        mock.patch.object(dialect, "_raw_connection", return_value=raw_conn),
+    ):
+        result = dialect.get_table_names(mock.MagicMock(), schema="scraped")
+
+    assert result == ["orders"]
+
+
+def test_get_table_names_boto3_fallback_not_triggered_for_regular_catalog():
+    """boto3 fallback is not used for non-s3tablescatalog catalogs."""
+    dialect = CustomAthenaRestDialect()
+    raw_conn = mock.MagicMock()
+    raw_conn.catalog_name = "awsdatacatalog"
+
+    with (
+        mock.patch.object(dialect, "_get_tables", return_value=[]),
+        mock.patch.object(dialect, "_raw_connection", return_value=raw_conn),
+        mock.patch.object(dialect, "_list_tables_via_boto3") as fallback,
+    ):
+        dialect.get_table_names(mock.MagicMock(), schema="mydb")
+
+    fallback.assert_not_called()
+
+
+def test_get_table_names_boto3_fallback_error_is_silent():
+    """Errors in the boto3 fallback return an empty list, not an exception."""
+    dialect = CustomAthenaRestDialect()
+    raw_conn = mock.MagicMock()
+    raw_conn.catalog_name = "s3tablescatalog/my-bucket"
+    raw_conn.connection.cursor.side_effect = Exception("boom")
+
+    with (
+        mock.patch.object(dialect, "_get_tables", return_value=[]),
+        mock.patch.object(dialect, "_raw_connection", return_value=raw_conn),
+    ):
+        assert dialect.get_table_names(mock.MagicMock(), schema="scraped") == []
