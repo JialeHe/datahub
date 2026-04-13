@@ -1,7 +1,6 @@
 import contextvars
 import dataclasses
 import re
-import unittest.mock
 from abc import ABC, abstractmethod
 from enum import auto
 from functools import cached_property as functools_cached_property
@@ -277,22 +276,23 @@ class ConfigModel(BaseModel):
 
     @classmethod
     def parse_obj_allow_extras(cls, obj: Any) -> Self:
-        """Parse an object while allowing extra fields.
+        """Parse an object, silently ignoring any fields not defined on the model.
 
-        This method temporarily modifies the model's configuration to allow extra fields.
-
-        TODO: Do we really need to support this behaviour? Consider removing this method in future.
+        This is useful when parsing a config dict that may contain fields for a
+        broader config class (e.g. a full ingestion recipe) into a narrower one.
         """
-        try:
-            with unittest.mock.patch.dict(
-                cls.model_config,  # type: ignore
-                {"extra": "allow"},
-                clear=False,
-            ):
-                cls.model_rebuild(force=True)  # type: ignore
-                return cls.model_validate(obj)
-        finally:
-            cls.model_rebuild(force=True)  # type: ignore
+        if isinstance(obj, dict):
+            known_keys: set = set()
+            for field_name, field_info in cls.model_fields.items():
+                known_keys.add(field_name)
+                if field_info.alias and isinstance(field_info.alias, str):
+                    known_keys.add(field_info.alias)
+                if field_info.validation_alias and isinstance(
+                    field_info.validation_alias, str
+                ):
+                    known_keys.add(field_info.validation_alias)
+            obj = {k: v for k, v in obj.items() if k in known_keys}
+        return cls.model_validate(obj)
 
 
 class PermissiveConfigModel(ConfigModel):
