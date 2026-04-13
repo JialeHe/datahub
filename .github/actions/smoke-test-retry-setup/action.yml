@@ -1,0 +1,148 @@
+name: Smoke Test Retry Setup
+description: >
+  Detects workflow retries, downloads previous test results, and parses failures
+  to enable targeted re-runs. Consolidated from the identical ~140-line retry
+  block that appeared in both docker-unified.yml and docker-unified-nightly.yml.
+
+  Requires: the calling job must have already checked out the repository (for
+  the parse scripts at .github/scripts/).
+
+inputs:
+  test-strategy:
+    description: "Test strategy: 'pytests' or 'cypress'"
+    required: true
+  artifact-name:
+    description: >
+      Full artifact name from the previous attempt to download. Callers
+      construct this to match their matrix dimensions:
+        docker-smoke-tests:         "Test Results (smoke tests) <strategy> <batch>"
+        docker-smoke-test-nightly:  "Test Results (nightly smoke tests) <profile> <strategy> <architecture>"
+    required: true
+  github-token:
+    description: "GitHub token for API access"
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  should-skip:
+    description: "'true' if all tests passed in the previous attempt — caller should skip expensive steps"
+    value: ${{ steps.resolve.outputs.should_skip }}
+  filtered-tests:
+    description: "Path to file containing failed test names/modules to re-run; empty string means run all"
+    value: ${{ steps.resolve.outputs.filtered_tests }}
+
+runs:
+  using: composite
+  steps:
+    - name: Download previous test results
+      id: download-artifacts
+      continue-on-error: false
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set +e
+
+        echo "Downloading artifacts from run ${{ github.run_id }}, attempt ${{ steps.retry-detection.outputs.previous_attempt }}"
+
+        mkdir -p "${{ github.workspace }}/previous-test-results"
+
+        ARTIFACT_NAME="${{ inputs.artifact-name }}"
+        echo "Looking for artifact: ${ARTIFACT_NAME}"
+
+        ARTIFACT_ID=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" \
+          --jq ".artifacts[] | select(.name == \"${ARTIFACT_NAME}\") | .id" | head -1)
+
+        if [[ -z "$ARTIFACT_ID" ]]; then
+          echo "No artifact found for: ${ARTIFACT_NAME}"
+          echo "download_success=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        echo "Found artifact ID: ${ARTIFACT_ID}"
+
+        cd "${{ github.workspace }}/previous-test-results"
+        gh api "repos/${{ github.repository }}/actions/artifacts/${ARTIFACT_ID}/zip" > artifact.zip
+        unzip -q artifact.zip
+
+        if [[ "${{ inputs.test-strategy }}" == "cypress" ]]; then
+          if find . -path "*/smoke-test-results/cypress-test-*.xml" -print -quit | grep -q .; then
+            echo "Successfully downloaded cypress test results"
+            echo "download_success=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No cypress test XML files found in artifact"
+            echo "download_success=false" >> "$GITHUB_OUTPUT"
+          fi
+        else
+          if find . -path "*/junit*.xml" -print -quit | grep -q .; then
+            echo "Successfully downloaded pytest test results"
+            echo "download_success=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No pytest XML files found in artifact"
+            echo "download_success=false" >> "$GITHUB_OUTPUT"
+          fi
+        fi
+
+    - name: Parse failed tests ${{ inputs.test-strategy }}
+      if: >-
+        steps.download-artifacts.outputs.download_success == 'true'
+      id: parse-test-failures
+      shell: bash
+      env:
+        TEST_TYPE: ${{ inputs.test-strategy }}
+      run: |
+        set +e
+
+        OUTPUT_FILE="${{ github.workspace }}/retry-filtered-tests.txt"
+
+        python3 .github/scripts/parse_failed_tests.py \
+          --test-type "${{ inputs.test-strategy }}" \
+          --input-dir "${{ github.workspace }}/previous-test-results" \
+          --output "${OUTPUT_FILE}"
+
+        EXIT_CODE=$?
+
+        case $EXIT_CODE in
+          0)
+            echo "parse_result=has_failures" >> "$GITHUB_OUTPUT"
+            echo "filtered_tests_file=${OUTPUT_FILE}" >> "$GITHUB_OUTPUT"
+            echo "Will retry $(wc -l < ${OUTPUT_FILE}) failed test(s)"
+            ;;
+          2)
+            echo "parse_result=all_passed" >> "$GITHUB_OUTPUT"
+            echo "All tests passed in previous attempt - will skip"
+            ;;
+          3)
+            echo "parse_result=no_artifacts" >> "$GITHUB_OUTPUT"
+            echo "No test results found - will run all tests"
+            ;;
+          *)
+            echo "parse_result=error" >> "$GITHUB_OUTPUT"
+            echo "Error parsing test results (exit $EXIT_CODE) - will run all tests"
+            ;;
+        esac
+
+    - name: Clean up downloaded artifacts
+      if: >-
+        steps.download-artifacts.outputs.download_success == 'true'
+      shell: bash
+      run: |
+        # Prevent contamination of the current run's test result collection
+        rm -rf "${{ github.workspace }}/previous-test-results"
+
+    - name: Resolve outputs
+      id: resolve
+      shell: bash
+      run: |
+        TEST_RESULTS="${{ steps.parse-test-failures.outputs.parse_result }}"
+        FILTERED_TEST_FILE="${{ steps.parse-test-failures.outputs.filtered_tests_file }}"
+
+        if [[ "$TEST_RESULTS" == "all_passed" ]]; then
+          echo "should_skip=true" >> "$GITHUB_OUTPUT"
+          echo "filtered_tests=" >> "$GITHUB_OUTPUT"
+        else
+          echo "should_skip=false" >> "$GITHUB_OUTPUT"
+          # Only one of these will be non-empty (based on test-strategy)
+          FILTERED="${FILTERED_TEST_FILE}"
+          echo "filtered_tests=${FILTERED}" >> "$GITHUB_OUTPUT"
+        fi

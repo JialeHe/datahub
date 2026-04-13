@@ -1,0 +1,85 @@
+name: Run Smoke Tests
+description: >
+  Installs Python dependencies, builds the datahub CLI, and runs smoke.sh.
+
+  This action wraps the test-execution steps that are near-identical in both
+  docker-smoke-tests.yml and docker-smoke-test-nightly.yml. Quickstart startup
+  (run-quickstart.sh) and the ES disk-threshold curl are intentionally kept as
+  named job steps in the calling workflow — they are common failure points that
+  should remain visible and attributable in the Actions UI.
+
+  Assumes: the repository is already checked out in the calling job.
+
+inputs:
+  test-strategy:
+    description: "Test strategy: 'pytests' or 'cypress'"
+    required: true
+  batch-number:
+    description: "0-based batch index (passed as BATCH_NUMBER to smoke.sh)"
+    required: false
+    default: "0"
+  batch-count:
+    description: "Total number of batches (passed as BATCH_COUNT to smoke.sh)"
+    required: false
+    default: "1"
+  datahub-version:
+    description: "Docker image tag used as DATAHUB_VERSION (e.g. 'head', 'nightly', 'pr1234')"
+    required: true
+  profile-name:
+    description: "Quickstart compose profile (passed as PROFILE_NAME to smoke.sh)"
+    required: false
+    default: "quickstart-consumers"
+  filtered-tests:
+    description: "Path to file listing failed tests/modules to re-run; empty string runs all"
+    required: false
+    default: ""
+  cypress-record-key:
+    description: "Cypress Cloud record key (optional)"
+    required: false
+    default: ""
+  executor-id:
+    description: "Unique executor ID for smoke test deduplication (optional)"
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Install dependencies
+      shell: bash
+      run: ./metadata-ingestion/scripts/install_deps.sh
+
+    - name: Build datahub CLI
+      shell: bash
+      run: ./gradlew :metadata-ingestion:install
+
+    - name: Run smoke tests
+      shell: bash
+      env:
+        RUN_QUICKSTART: "false"
+        DATAHUB_VERSION: ${{ inputs.datahub-version }}
+        CYPRESS_RECORD_KEY: ${{ inputs.cypress-record-key }}
+        CLEANUP_DATA: "false"
+        TEST_STRATEGY: ${{ inputs.test-strategy }}
+        BATCH_COUNT: ${{ inputs.batch-count }}
+        BATCH_NUMBER: ${{ inputs.batch-number }}
+        PROFILE_NAME: ${{ inputs.profile-name }}
+        FILTERED_TESTS: ${{ inputs.filtered-tests }}
+        DATAHUB_SMOKETEST_EXECUTOR_ID: ${{ inputs.executor-id }}
+      run: |
+        if [[ -n "$FILTERED_TESTS" && -f "$FILTERED_TESTS" ]]; then
+          echo "=========================================="
+          if [[ "$TEST_STRATEGY" == "cypress" ]]; then
+            echo "RETRY MODE: Running only failed Cypress tests"
+          else
+            echo "RETRY MODE: Running only failed pytest modules"
+          fi
+          echo "=========================================="
+          echo "Failed items to retry:"
+          cat "$FILTERED_TESTS"
+          echo "=========================================="
+        fi
+
+        echo "DATAHUB_VERSION=$DATAHUB_VERSION"
+        ./gradlew --stop
+        ./smoke-test/smoke.sh

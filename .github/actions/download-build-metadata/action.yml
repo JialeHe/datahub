@@ -1,0 +1,92 @@
+name: Download Build Metadata
+description: >
+  Downloads the build-metadata artifact from a previous successful workflow run
+  and extracts the list of published Docker image references.
+
+  Used by docker-smoke-test-nightly.yml to fetch the head images built by
+  docker-unified.yml on master, replacing three copy-pasted download blocks
+  (setup, smoke_test, tag_and_push_images) with a single call in setup whose
+  output is shared downstream via needs.<job>.outputs.
+
+  Note: GitHub job outputs are capped at 1 MB. With ~20-30 fully-qualified
+  image refs this is well within the limit, but worth monitoring if the image
+  set grows significantly.
+
+inputs:
+  artifact-name:
+    description: "Name of the artifact to download (e.g. 'build-metadata-head')"
+    required: false
+    default: "build-metadata-head"
+  workflow-file:
+    description: "Workflow file name to look up the latest run from"
+    required: false
+    default: "docker-unified.yml"
+  branch:
+    description: "Branch to filter the workflow run lookup"
+    required: false
+    default: "master"
+  filter-tag:
+    description: "Tag string to grep for when collecting image references"
+    required: false
+    default: "head"
+  github-token:
+    description: "GitHub token for API access"
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  images:
+    description: "Space-separated list of fully-qualified image:tag references matching filter-tag"
+    value: ${{ steps.collect-images.outputs.images }}
+  metadata-dir:
+    description: "Path to the directory containing the extracted build metadata files"
+    value: ${{ steps.download.outputs.metadata_dir }}
+
+runs:
+  using: composite
+  steps:
+    - name: Download build metadata artifact
+      id: download
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        METADATA_DIR="${{ github.workspace }}/build"
+        mkdir -p "${METADATA_DIR}"
+
+        run_id=$(gh run list \
+          --workflow="${{ inputs.workflow-file }}" \
+          --branch "${{ inputs.branch }}" \
+          --event push \
+          --status success \
+          --limit 1 \
+          --json=databaseId \
+          | jq '.[].databaseId')
+
+        echo "Latest successful run ID: ${run_id}"
+
+        gh api "repos/${{ github.repository }}/actions/runs/${run_id}/artifacts" \
+          --jq ".artifacts[] | select(.name == \"${{ inputs.artifact-name }}\") | .id" \
+          | xargs -I {} gh api "repos/${{ github.repository }}/actions/artifacts/{}/zip" \
+          > "${METADATA_DIR}/build-metadata.zip"
+
+        unzip "${METADATA_DIR}/build-metadata.zip" -d "${METADATA_DIR}/"
+        ls -l "${METADATA_DIR}/"
+
+        echo "metadata_dir=${METADATA_DIR}" >> "$GITHUB_OUTPUT"
+
+    - name: Collect image references from bake spec
+      id: collect-images
+      shell: bash
+      run: |
+        BAKE_SPEC="${{ steps.download.outputs.metadata_dir }}/bake-spec-allImages.json"
+
+        # Extract all image:tag references from the bake spec and filter by the target tag.
+        # Plain jq is used here instead of 'depot bake --print' since the spec is already
+        # resolved JSON — no depot CLI dependency needed in this action.
+        images="$(jq -cr '.target[].tags[]' "${BAKE_SPEC}" \
+          | grep '${{ inputs.filter-tag }}' \
+          | tr '\n' ' ')"
+
+        echo "Collected images: ${images}"
+        echo "images=${images}" >> "$GITHUB_OUTPUT"

@@ -1,0 +1,98 @@
+name: Pull and Retag Docker Images
+description: >
+  Pulls a list of Docker images, retags each with one or more target tags,
+  and optionally pushes the retagged images to the registry.
+
+  Used by docker-smoke-test-nightly.yml to consolidate the identical pull+tag
+  logic that previously appeared in both the smoke_test and tag_and_push_images
+  jobs.
+
+inputs:
+  images:
+    description: "Space-separated list of fully-qualified source image references (e.g. 'docker.io/acryldata/datahub-gms:head ...')"
+    required: true
+  source-tag:
+    description: "The tag suffix to replace in each image reference (e.g. 'head')"
+    required: true
+  target-tags:
+    description: "Comma-separated list of replacement tag suffixes (e.g. 'nightly,nightly-2024-01-01')"
+    required: true
+  push:
+    description: "Set to 'true' to push retagged images to the registry after tagging"
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Pull images
+      shell: bash
+      run: |
+        failed_pulls=0
+        eval "set -- ${{ inputs.images }}"
+        for image do
+          if [[ -n "$image" ]]; then
+            echo "Pulling $image"
+            if ! docker pull "$image"; then
+              echo "Failed to pull $image"
+              failed_pulls=$((failed_pulls + 1))
+            fi
+          fi
+        done
+
+        if [[ $failed_pulls -gt 0 ]]; then
+          echo "Warning: $failed_pulls image(s) failed to pull"
+        fi
+
+    - name: Retag images
+      shell: bash
+      run: |
+        SOURCE_TAG="${{ inputs.source-tag }}"
+        failed_tags=0
+
+        IFS=',' read -ra TARGET_TAGS <<< "${{ inputs.target-tags }}"
+
+        eval "set -- ${{ inputs.images }}"
+        for image do
+          if [[ -n "$image" ]]; then
+            for target_tag in "${TARGET_TAGS[@]}"; do
+              new_image="${image/:${SOURCE_TAG}/:${target_tag}}"
+              echo "Tagging $image as $new_image"
+              if ! docker tag "$image" "$new_image"; then
+                echo "Failed to tag $new_image"
+                failed_tags=$((failed_tags + 1))
+              fi
+            done
+          fi
+        done
+
+        if [[ $failed_tags -gt 0 ]]; then
+          echo "Warning: $failed_tags tag(s) failed to create"
+        fi
+
+    - name: Push retagged images
+      if: inputs.push == 'true'
+      shell: bash
+      run: |
+        SOURCE_TAG="${{ inputs.source-tag }}"
+        failed_pushes=0
+
+        IFS=',' read -ra TARGET_TAGS <<< "${{ inputs.target-tags }}"
+
+        eval "set -- ${{ inputs.images }}"
+        for image do
+          if [[ -n "$image" ]]; then
+            for target_tag in "${TARGET_TAGS[@]}"; do
+              new_image="${image/:${SOURCE_TAG}/:${target_tag}}"
+              echo "Pushing $new_image"
+              if ! docker push "$new_image"; then
+                echo "Failed to push $new_image"
+                failed_pushes=$((failed_pushes + 1))
+              fi
+            done
+          fi
+        done
+
+        if [[ $failed_pushes -gt 0 ]]; then
+          echo "Warning: $failed_pushes image(s) failed to push"
+        fi
