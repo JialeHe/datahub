@@ -1,5 +1,7 @@
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from datahub_actions.event.event_envelope import EventEnvelope
 from datahub_actions.pipeline.pipeline_context import PipelineContext
 from datahub_actions.plugin.source.kafka.kafka_event_source import (
@@ -32,8 +34,16 @@ def _make_source(async_commit_enabled: bool) -> KafkaEventSource:
             return KafkaEventSource(config, ctx)
 
 
+class TestAsyncCommitDefault:
+    """async_commit_enabled defaults to True."""
+
+    def test_default_is_async(self) -> None:
+        config = KafkaEventSourceConfig()
+        assert config.async_commit_enabled is True
+
+
 class TestAckSyncMode:
-    """When async_commit_enabled=False (default), ack always does sync commits."""
+    """When async_commit_enabled=False, ack always does sync commits."""
 
     def test_sync_mode_commits_on_processed_true(self) -> None:
         source = _make_source(async_commit_enabled=False)
@@ -63,8 +73,8 @@ class TestAckSyncMode:
 
 
 class TestAckAsyncMode:
-    """When async_commit_enabled=True, ack should always store offsets for
-    periodic autocommit — never do synchronous commits."""
+    """When async_commit_enabled=True (default), ack stores offsets for
+    periodic autocommit — never does synchronous commits."""
 
     def test_async_mode_stores_offset_on_processed_true(self) -> None:
         source = _make_source(async_commit_enabled=True)
@@ -79,15 +89,10 @@ class TestAckAsyncMode:
             mock_store.assert_called_once_with(event)
             mock_commit.assert_not_called()
 
-    def test_async_mode_does_not_store_offset_on_processed_false(self) -> None:
+    def test_async_mode_raises_on_processed_false(self) -> None:
+        """Batch-processing (processed=False) is incompatible with async commits."""
         source = _make_source(async_commit_enabled=True)
         event = _make_event_envelope()
 
-        with (
-            patch.object(source, "_commit_offsets") as mock_commit,
-            patch.object(source, "_store_offsets") as mock_store,
-        ):
+        with pytest.raises(ValueError, match="Batch-processing actions"):
             source.ack(event, processed=False)
-
-            mock_store.assert_not_called()
-            mock_commit.assert_not_called()

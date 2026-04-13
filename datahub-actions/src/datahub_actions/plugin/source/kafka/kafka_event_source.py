@@ -98,7 +98,7 @@ def build_entity_change_event(payload: GenericPayloadClass) -> EntityChangeEvent
 class KafkaEventSourceConfig(ConfigModel):
     connection: KafkaConsumerConnectionConfig = KafkaConsumerConnectionConfig()
     topic_routes: Optional[Dict[str, str]] = Field(default=None)
-    async_commit_enabled: bool = False
+    async_commit_enabled: bool = True
     async_commit_interval: int = 10000
     commit_retry_count: int = 5
     commit_retry_backoff: float = 10.0
@@ -318,7 +318,18 @@ class KafkaEventSource(EventSource):
         )
 
     def ack(self, event: EventEnvelope, processed: bool = True) -> None:
-        if not processed:  # No action if event not processed successfully
+        if not processed:
+            # Batch-processing actions return processed=False to defer acknowledgment.
+            # This is incompatible with async commits — batch actions need synchronous
+            # commits so that manually calling ack() later produces an immediate,
+            # deterministic offset commit rather than a deferred background one.
+            if self.source_config.async_commit_enabled:
+                raise ValueError(
+                    "Batch-processing actions (act() returned False) are incompatible "
+                    "with async_commit_enabled=True. Batch actions require synchronous "
+                    "commits for precise offset control. Set async_commit_enabled: false "
+                    "in your Kafka source config."
+                )
             return
 
         # See for details: https://github.com/confluentinc/librdkafka/blob/master/INTRODUCTION.md#auto-offset-commit
