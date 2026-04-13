@@ -6,7 +6,7 @@ import pathlib
 import tempfile
 import zipfile
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional, Union
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 from pandas import DataFrame
 from pydeequ.analyzers import (
@@ -600,10 +600,15 @@ class SparkProfiler:
 
         return SparkSession.builder.config(conf=conf).getOrCreate()
 
-    def _extract_zip_to_tmp(self, full_path: str, inner_ext: str) -> Optional[str]:
-        """Extract the first ``inner_ext`` entry from a zip archive to a temp file.
+    _SPARK_SUPPORTED_EXTS = frozenset(
+        {".parquet", ".csv", ".tsv", ".json", ".jsonl", ".avro"}
+    )
 
-        Returns the temp file path (caller must delete it), or None on error.
+    def _extract_zip_to_tmp(self, full_path: str) -> Optional[Tuple[str, str]]:
+        """Extract the first supported entry from a zip to a temp file.
+
+        Inner extension is detected from the entry name, not the outer filename.
+        Returns (temp_path, inner_ext) or None on error; caller must delete the file.
         """
         try:
             if "s3://" in full_path and self.aws_config is not None:
@@ -622,19 +627,31 @@ class SparkProfiler:
             with zipfile.ZipFile(zip_source) as zf:
                 members = zf.namelist()
                 entry = next(
-                    (m for m in members if pathlib.Path(m).suffix == inner_ext), None
+                    (
+                        m
+                        for m in members
+                        if pathlib.Path(m).suffix in self._SPARK_SUPPORTED_EXTS
+                    ),
+                    None,
                 )
                 if entry is None:
                     self.report.report_warning(
                         full_path,
-                        f"zip archive contains no {inner_ext} entry; found: {members}",
+                        f"zip archive contains no entry with a supported extension "
+                        f"({sorted(self._SPARK_SUPPORTED_EXTS)}); found: {members}",
                     )
                     return None
+                if len(members) > 1:
+                    logger.warning(
+                        f"zip archive {full_path} contains {len(members)} entries; "
+                        f"profiling only the first supported entry: {entry}"
+                    )
+                inner_ext = pathlib.Path(entry).suffix
                 data = zf.read(entry)
 
             with tempfile.NamedTemporaryFile(suffix=inner_ext, delete=False) as tmp:
                 tmp.write(data)
-                return tmp.name
+                return tmp.name, inner_ext
         except Exception as e:
             self.report.report_warning(
                 full_path, f"failed to extract zip entry for profiling: {e}"
@@ -642,7 +659,6 @@ class SparkProfiler:
             return None
 
     def read_file_spark(self, file: str, ext: str) -> Optional["SparkDataFrame"]:
-        """Read a file using Spark and return a DataFrame."""
         from pyspark.sql.utils import AnalysisException
 
         logger.debug(f"Opening file {file} for profiling in spark")
@@ -707,18 +723,11 @@ class SparkProfiler:
         tmp_path: Optional[str] = None
         try:
             if raw_ext == ".zip":
-                inner_ext = pathlib.Path(table_data.full_path).with_suffix("").suffix
-                if inner_ext in (".parquet", ".avro"):
-                    # Spark's Parquet/Avro readers bypass Hadoop's codec factory and
-                    # cannot read zipped streams directly; extract to a local temp file.
-                    tmp_path = self._extract_zip_to_tmp(table_data.full_path, inner_ext)
-                    if tmp_path is None:
-                        return
-                    spark_path = tmp_path
-                else:
-                    # Hadoop's ZipCodec decompresses text formats transparently.
-                    spark_path = table_data.full_path
-                ext = inner_ext
+                result = self._extract_zip_to_tmp(table_data.full_path)
+                if result is None:
+                    return
+                tmp_path, ext = result
+                spark_path = tmp_path
             else:
                 spark_path = table_data.full_path
                 ext = raw_ext
