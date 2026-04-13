@@ -1,5 +1,5 @@
 import { Button, Tooltip } from '@components';
-import { PencilSimple } from '@phosphor-icons/react/dist/ssr';
+import { PencilSimple } from '@phosphor-icons/react/dist/csr/PencilSimple';
 import React from 'react';
 
 type Props = {
