@@ -1,8 +1,12 @@
 import dataclasses
+import io
 import logging
 import os
+import pathlib
+import tempfile
+import zipfile
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Union
 
 from pandas import DataFrame
 from pydeequ.analyzers import (
@@ -596,6 +600,47 @@ class SparkProfiler:
 
         return SparkSession.builder.config(conf=conf).getOrCreate()
 
+    def _extract_zip_to_tmp(self, full_path: str, inner_ext: str) -> Optional[str]:
+        """Extract the first ``inner_ext`` entry from a zip archive to a temp file.
+
+        Returns the temp file path (caller must delete it), or None on error.
+        """
+        try:
+            if "s3://" in full_path and self.aws_config is not None:
+                s3 = self.aws_config.get_s3_client()
+                buf = io.BytesIO()
+                s3.download_fileobj(
+                    get_bucket_name(full_path),
+                    get_bucket_relative_path(full_path),
+                    buf,
+                )
+                buf.seek(0)
+                zip_source: Union[io.BytesIO, str] = buf
+            else:
+                zip_source = full_path
+
+            with zipfile.ZipFile(zip_source) as zf:
+                members = zf.namelist()
+                entry = next(
+                    (m for m in members if pathlib.Path(m).suffix == inner_ext), None
+                )
+                if entry is None:
+                    self.report.report_warning(
+                        full_path,
+                        f"zip archive contains no {inner_ext} entry; found: {members}",
+                    )
+                    return None
+                data = zf.read(entry)
+
+            with tempfile.NamedTemporaryFile(suffix=inner_ext, delete=False) as tmp:
+                tmp.write(data)
+                return tmp.name
+        except Exception as e:
+            self.report.report_warning(
+                full_path, f"failed to extract zip entry for profiling: {e}"
+            )
+            return None
+
     def read_file_spark(self, file: str, ext: str) -> Optional["SparkDataFrame"]:
         """Read a file using Spark and return a DataFrame."""
         from pyspark.sql.utils import AnalysisException
@@ -655,85 +700,88 @@ class SparkProfiler:
     def get_table_profile(
         self, table_data: Any, dataset_urn: str
     ) -> Iterable[MetadataWorkUnit]:
-        """
-        Generate profiling metadata for a table.
-
-        Args:
-            table_data: TableData object containing information about the table
-            dataset_urn: URN for the dataset
-
-        Yields:
-            MetadataWorkUnit containing profile information
-        """
         # Importing here to avoid Deequ dependency for non profiling use cases
         from pydeequ.analyzers import AnalyzerContext
 
-        # read in the whole table with Spark for profiling
-        table = None
+        raw_ext = pathlib.Path(table_data.full_path).suffix
+        tmp_path: Optional[str] = None
         try:
-            if table_data.partitions:
-                table = self.read_file_spark(
-                    table_data.table_path, os.path.splitext(table_data.full_path)[1]
-                )
+            if raw_ext == ".zip":
+                inner_ext = pathlib.Path(table_data.full_path).with_suffix("").suffix
+                if inner_ext in (".parquet", ".avro"):
+                    # Spark's Parquet/Avro readers bypass Hadoop's codec factory and
+                    # cannot read zipped streams directly; extract to a local temp file.
+                    tmp_path = self._extract_zip_to_tmp(table_data.full_path, inner_ext)
+                    if tmp_path is None:
+                        return
+                    spark_path = tmp_path
+                else:
+                    # Hadoop's ZipCodec decompresses text formats transparently.
+                    spark_path = table_data.full_path
+                ext = inner_ext
             else:
-                table = self.read_file_spark(
-                    table_data.full_path, os.path.splitext(table_data.full_path)[1]
+                spark_path = table_data.full_path
+                ext = raw_ext
+
+            table = None
+            try:
+                if table_data.partitions:
+                    table = self.read_file_spark(table_data.table_path, ext)
+                else:
+                    table = self.read_file_spark(spark_path, ext)
+            except Exception as e:
+                logger.error(e)
+
+            if table is None:
+                self.report.report_warning(
+                    table_data.display_name,
+                    f"unable to read table {table_data.display_name} from file {table_data.full_path}",
                 )
-        except Exception as e:
-            logger.error(e)
+                return
 
-        # if table is not readable, skip
-        if table is None:
-            self.report.report_warning(
-                table_data.display_name,
-                f"unable to read table {table_data.display_name} from file {table_data.full_path}",
-            )
-            return
+            with PerfTimer() as timer:
+                logger.debug(
+                    f"Profiling {table_data.full_path}: reading file and computing nulls+uniqueness {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"
+                )
+                table_profiler = _SingleTableProfiler(
+                    table,
+                    self.spark,
+                    self.profiling_config,
+                    self.report,
+                    table_data.full_path,
+                )
 
-        with PerfTimer() as timer:
-            # init PySpark analysis object
-            logger.debug(
-                f"Profiling {table_data.full_path}: reading file and computing nulls+uniqueness {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"
-            )
-            table_profiler = _SingleTableProfiler(
-                table,
-                self.spark,
-                self.profiling_config,
-                self.report,
-                table_data.full_path,
-            )
+                logger.debug(
+                    f"Profiling {table_data.full_path}: preparing profilers to run {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"
+                )
+                # instead of computing each profile individually, we run them all in a single analyzer.run() call
+                # we use a single call because the analyzer optimizes the number of calls to the underlying profiler
+                # since multiple profiles reuse computations, this saves a lot of time
+                table_profiler.prepare_table_profiles()
 
-            logger.debug(
-                f"Profiling {table_data.full_path}: preparing profilers to run {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"
-            )
-            # instead of computing each profile individually, we run them all in a single analyzer.run() call
-            # we use a single call because the analyzer optimizes the number of calls to the underlying profiler
-            # since multiple profiles reuse computations, this saves a lot of time
-            table_profiler.prepare_table_profiles()
+                logger.debug(
+                    f"Profiling {table_data.full_path}: computing profiles {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"
+                )
+                analysis_result = table_profiler.analyzer.run()
+                analysis_metrics = AnalyzerContext.successMetricsAsDataFrame(
+                    self.spark, analysis_result
+                )
 
-            # compute the profiles
-            logger.debug(
-                f"Profiling {table_data.full_path}: computing profiles {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"
-            )
-            analysis_result = table_profiler.analyzer.run()
-            analysis_metrics = AnalyzerContext.successMetricsAsDataFrame(
-                self.spark, analysis_result
-            )
+                logger.debug(
+                    f"Profiling {table_data.full_path}: extracting profiles {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"
+                )
+                table_profiler.extract_table_profiles(analysis_metrics)
 
-            logger.debug(
-                f"Profiling {table_data.full_path}: extracting profiles {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"
-            )
-            table_profiler.extract_table_profiles(analysis_metrics)
+                time_taken = timer.elapsed_seconds()
+                logger.info(
+                    f"Finished profiling {table_data.full_path}; took {time_taken:.3f} seconds"
+                )
+                self.profiling_times_taken.append(time_taken)
 
-            time_taken = timer.elapsed_seconds()
-
-            logger.info(
-                f"Finished profiling {table_data.full_path}; took {time_taken:.3f} seconds"
-            )
-
-            self.profiling_times_taken.append(time_taken)
-
-        yield MetadataChangeProposalWrapper(
-            entityUrn=dataset_urn,
-            aspect=table_profiler.profile,
-        ).as_workunit()
+            yield MetadataChangeProposalWrapper(
+                entityUrn=dataset_urn,
+                aspect=table_profiler.profile,
+            ).as_workunit()
+        finally:
+            if tmp_path is not None:
+                os.unlink(tmp_path)
