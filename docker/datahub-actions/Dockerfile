@@ -348,6 +348,7 @@ RUN chmod a+x /start_datahub_actions.sh && \
 
 # Install a cacheable layer that installs external dependencies
 COPY --chown=datahub:datahub ./metadata-ingestion/setup.py /metadata-ingestion/
+COPY --chown=datahub:datahub ./metadata-ingestion/pyproject.toml /metadata-ingestion/
 COPY --chown=datahub:datahub ./metadata-ingestion/src/datahub/_version.py /metadata-ingestion/src/datahub/
 COPY --chown=datahub:datahub ./datahub-actions/setup.py /datahub-actions/
 COPY --chown=datahub:datahub ./datahub-actions/src/datahub_actions/_version.py /datahub-actions/src/datahub_actions/

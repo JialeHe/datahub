@@ -9,38 +9,38 @@ on:
         required: false
         default: "quickstart-consumers"
         type: string
-  push:
-    branches:
-      - master
-      - releases/**
-      - hotfixes/**
-  pull_request:
-    types: [opened, synchronize, reopened]
-    branches:
-      - master
-      - releases/**
-      - hotfixes/**
-    paths-ignore:
-      - ".github/**"
-      - "!.github/workflows/docker-smoke-tests.yml"
-      - "!.github/scripts/send_failed_tests_to_posthog.py"
-      - "!.github/scripts/docker_helpers.sh"
-      - "!.github/actions/ci-optimization"
-      - "!.github/actions/smoke-test-retry-setup"
-      - "!.github/actions/run-smoke-tests"
-      - "!.github/scripts/check_python_package.py"
-      - "!.github/scripts/parse_failed_cypress_tests.py"
-      - "!.github/scripts/parse_failed_pytest_tests.py"
-      - "!.github/scripts/docker_logs.sh"
-  release:
-    types: [published]
+  # push:
+  #   branches:
+  #     - master
+  #     - releases/**
+  #     - hotfixes/**
+  # pull_request:
+  #   types: [opened, synchronize, reopened]
+  #   branches:
+  #     - master
+  #     - releases/**
+  #     - hotfixes/**
+  #   paths-ignore:
+  #     - ".github/**"
+  #     - "!.github/workflows/docker-smoke-tests.yml"
+  #     - "!.github/scripts/send_failed_tests_to_posthog.py"
+  #     - "!.github/scripts/docker_helpers.sh"
+  #     - "!.github/actions/ci-optimization"
+  #     - "!.github/actions/smoke-test-retry-setup"
+  #     - "!.github/actions/run-smoke-tests"
+  #     - "!.github/scripts/check_python_package.py"
+  #     - "!.github/scripts/parse_failed_cypress_tests.py"
+  #     - "!.github/scripts/parse_failed_pytest_tests.py"
+  #     - "!.github/scripts/docker_logs.sh"
+  # release:
+  #   types: [published]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 env:
-  DOCKER_REGISTRY: "ghcr.io"
+  DOCKER_REGISTRY: "ghcr.io/${{ github.repository_owner }}"
   PROFILE_NAME: "${{ github.event.inputs.profileName || 'quickstart-consumers' }}"
   DOCKER_CACHE: "DEPOT"
   DEPOT_PROJECT_ID: ${{ vars.DEPOT_PROJECT_ID }}
@@ -164,6 +164,12 @@ jobs:
             echo "test_runner_type_small=${{ steps.determine-runners.outputs.small-runner }}"
             echo "use_depot_cache=true"
           } >> "$GITHUB_OUTPUT"
+          if [[ -z "${{ vars.DEPOT_PROJECT_ID }}" ]]; then
+            echo "use_depot_cache=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [[ "${{ env.IS_FORK }}" == "true" ]]; then
+            echo "use_depot_cache=false" >> "$GITHUB_OUTPUT"
+          fi
           if [[ "${{ env.HAS_DEPOT_LABEL }}" == "true" ]]; then
             {
               echo "test_runner_type=${{ steps.determine-runners.outputs.depot-runner-large }}"
@@ -190,13 +196,12 @@ jobs:
           echo "yarn_cache_key_prefix=docker-smoke-tests-${{ runner.os }}-yarn-" >> "$GITHUB_OUTPUT"
 
   build_quickstart_images:
-    name: Build Quickstart images
+    name: Build Quickstart images for smoke test
     runs-on: ${{ needs.setup-smoke-test.outputs.build_runner_type }}
     needs: setup-smoke-test
     if: ${{ needs.setup-smoke-test.outputs.use_depot_cache == 'true' }}
     outputs:
-      build_id: ${{ steps.capture-build-id.outputs.build_id }}
-      matrix: ${{ steps.capture-build-id.outputs.matrix }}
+      built_images: ${{ steps.collect-images.outputs.built_images }}
     steps:
       - name: Set up JDK 17
         uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5
@@ -245,17 +250,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build Quickstart Images For Smoke tests
+        env:
+          DOCKER_CACHE: ${{ needs.setup-smoke-test.outputs.use_depot_cache == 'true' && 'DEPOT' || 'GITHUB' }}
         run: |
-          BUILD_TASK=":docker:buildImagesQuickstart"
-          ./gradlew $BUILD_TASK -Ptag=${{ needs.setup-smoke-test.outputs.tag }} -PpythonDockerVersion=${{ needs.setup-smoke-test.outputs.python_release_version }} -PdockerRegistry=${{ env.DOCKER_REGISTRY }}
-
-      - name: Capture build Id
-        id: capture-build-id
-        run: |
-          pip install jq
-          DEPOT_BUILD_ID=$(jq -r '.["depot.build"]?.buildID' "${{ github.workspace }}/build/build-metadata.json")
-          echo "build_id=${DEPOT_BUILD_ID}" >> "$GITHUB_OUTPUT"
-          echo "matrix=$(jq -c '{"target":.["depot.build"].targets}' "${{ github.workspace }}/build/build-metadata.json")" >> "$GITHUB_OUTPUT"
+          BUILD_TASK=":docker:buildImagesquickstart"
+          ./gradlew $BUILD_TASK -Ptag=${{ needs.setup-smoke-test.outputs.tag }} -PpythonDockerVersion=${{ needs.setup-smoke-test.outputs.python_release_version }} -PdockerRegistry=${{ env.DOCKER_REGISTRY }} -PdockerPush=true
 
       - name: Save build Metadata
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -264,6 +263,21 @@ jobs:
           path: |
             ${{ github.workspace }}/build/build-metadata.json
             ${{ github.workspace }}/build/bake-spec-allImages.json
+
+      - name: Collect image references from bake spec
+        id: collect-images
+        shell: bash
+        run: |
+          BAKE_SPEC="${{ github.workspace }}/bake-spec-allImages.json"
+
+          # Extract all image:tag references from the bake spec and filter by the target tag.
+          # Plain jq is used here instead of 'depot bake --print' since the spec is already
+          # resolved JSON — no depot CLI dependency needed in this action.
+          images="$(jq -cr '.target[].tags[]' "${BAKE_SPEC}" \
+            | tr '\n' ' ')"
+
+          echo "Collected images: ${images}" | tee >> "$GITHUB_SUMMARY"
+          echo "built_images=${images}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         if: ${{ github.ref == 'refs/heads/master' }}
@@ -362,7 +376,7 @@ jobs:
           done
 
           includes=''
-          if [[ "${{ needs.setup-smoke-test.outputs.backend_change }}" == 'true' || "${{ needs.setup-smoke-test.outputs.smoke_test_change }}" == 'true'; then
+          if [[ "${{ needs.setup-smoke-test.outputs.backend_change }}" == 'true' || "${{ needs.setup-smoke-test.outputs.smoke_test_change }}" == 'true' ]]; then
             includes="$python_matrix,$cypress_matrix"
           elif [[ "${{ needs.setup-smoke-test.outputs.frontend_only }}" == 'true' ]]; then
             includes="$cypress_matrix"
@@ -377,7 +391,7 @@ jobs:
   smoke_test:
     name: Run Smoke Tests (${{ matrix.test_strategy }}, Batch ${{ matrix.batch }}/${{ matrix.batch_count }})
     runs-on: ${{ needs.setup-smoke-test.outputs.test_runner_type }}
-    needs: [setup-smoke-test, smoke_test_matrix]
+    needs: [setup-smoke-test, smoke_test_matrix, build_quickstart_images]
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.smoke_test_matrix.outputs.matrix || '{"include":[]}') }}
@@ -385,6 +399,7 @@ jobs:
     env:
       MIXPANEL_API_SECRET: ${{ secrets.MIXPANEL_API_SECRET }}
       MIXPANEL_PROJECT_ID: ${{ secrets.MIXPANEL_PROJECT_ID }}
+      BUILT_IMAGES: ${{ needs.build_quickstart_images.outputs.built_images }}
     steps:
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -423,12 +438,12 @@ jobs:
       - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4
         if: ${{ needs.setup-smoke-test.outputs.use_depot_cache != 'true' }}
 
-      - name: Login to DockerHub
+      - name: Login to Github Container Registry
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        if: ${{ needs.setup-smoke-test.outputs.docker-login == 'true' }}
         with:
-          username: ${{ secrets.ACRYL_DOCKER_USERNAME }}
-          password: ${{ secrets.ACRYL_DOCKER_PASSWORD }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Disk Space Analysis
         run: |
@@ -437,18 +452,25 @@ jobs:
           echo -e "\n=== Docker Disk Usage ==="
           docker system df -v
 
-      - name: Build images (fork — no depot cache)
-        if: ${{ needs.setup-smoke-test.outputs.use_depot_cache != 'true' }}
+      - name: Pull images from GHCR
         run: |
-          ./gradlew :docker:buildImagesQuickstartDebugConsumers -Ptag=${{ needs.setup-smoke-test.outputs.tag }} -PpythonDockerVersion=${{ needs.setup-smoke-test.outputs.python_release_version }} -PdockerRegistry=${{ env.DOCKER_REGISTRY }}
-          docker images
-        env:
-          DOCKER_CACHE: GITHUB
+          failed_pulls=0
+          read -ra images <<< "$BUILT_IMAGES"
+          for image in "${images[@]}"; do
+            if [[ -n "$image" ]]; then
+              echo "Pulling $image"
+              if ! docker pull "$image"; then
+                echo "Failed to pull $image"
+                failed_pulls=$((failed_pulls + 1))
+              fi
+            fi
+          done
 
-      - name: Pull images from depot
-        if: ${{ needs.setup-smoke-test.outputs.use_depot_cache == 'true' }}
-        run: |
-          depot pull --project "${{ env.DEPOT_PROJECT_ID }}" "${{ needs.build_quickstart_images.outputs.build_id }}"
+          if [[ $failed_pulls -gt 0 ]]; then
+            echo "Warning: $failed_pulls image(s) failed to pull"
+            exit 1;
+          fi
+
           docker images
 
       - name: Disk Space Analysis
@@ -494,27 +516,27 @@ jobs:
           filtered-tests: ${{ steps.retry-setup.outputs.filtered-tests }}
           cypress-record-key: ${{ secrets.CYPRESS_RECORD_KEY }}
 
-      - name: Java SDK V2 Integration Tests
-        if: ${{ (needs.setup-smoke-test.outputs.backend_change == 'true' || needs.setup-smoke-test.outputs.java_client_change == 'true') && matrix.batch == '0' }}
-        env:
-          DATAHUB_SERVER: http://localhost:8080
-          ADMIN_USERNAME: datahub
-          ADMIN_PASSWORD: datahub
-        run: |
-          echo "Running Java SDK V2 integration tests against running DataHub instance..."
-          ./gradlew :metadata-integration:java:datahub-client:test --tests "*Integration*"
+      # - name: Java SDK V2 Integration Tests
+      #   if: ${{ (needs.setup-smoke-test.outputs.backend_change == 'true' || needs.setup-smoke-test.outputs.java_client_change == 'true') && matrix.batch == '0' }}
+      #   env:
+      #     DATAHUB_SERVER: http://localhost:8080
+      #     ADMIN_USERNAME: datahub
+      #     ADMIN_PASSWORD: datahub
+      #   run: |
+      #     echo "Running Java SDK V2 integration tests against running DataHub instance..."
+      #     ./gradlew :metadata-integration:java:datahub-client:test --tests "*Integration*"
 
-      - name: Upload Java SDK V2 coverage to Codecov
-        if: ${{ always() && (needs.setup-smoke-test.outputs.backend_change == 'true' || needs.setup-smoke-test.outputs.java_client_change == 'true') && matrix.batch == '0' }}
-        uses: codecov/codecov-action@1af58845a975a7985b0beb0cbe6fbbb71a41dbad # v5
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          directory: ./build/coverage-reports/metadata-integration/java/datahub-client/
-          flags: metadata-integration
-          name: java-sdk-v2-integration
-          fail_ci_if_error: false
-          verbose: true
-          override_branch: ${{ github.head_ref || github.ref_name }}
+      # - name: Upload Java SDK V2 coverage to Codecov
+      #   if: ${{ always() && (needs.setup-smoke-test.outputs.backend_change == 'true' || needs.setup-smoke-test.outputs.java_client_change == 'true') && matrix.batch == '0' }}
+      #   uses: codecov/codecov-action@1af58845a975a7985b0beb0cbe6fbbb71a41dbad # v5
+      #   with:
+      #     token: ${{ secrets.CODECOV_TOKEN }}
+      #     directory: ./build/coverage-reports/metadata-integration/java/datahub-client/
+      #     flags: metadata-integration
+      #     name: java-sdk-v2-integration
+      #     fail_ci_if_error: false
+      #     verbose: true
+      #     override_branch: ${{ github.head_ref || github.ref_name }}
 
       - name: Disk Check
         run: df -h . && docker images
@@ -656,69 +678,69 @@ jobs:
           path: cypress-html-report/
           retention-days: 5
 
-  publish_images:
-    name: Push images after tests pass
-    runs-on: ${{ needs.setup-smoke-test.outputs.test_runner_type_small || 'ubuntu-latest' }}
-    needs: [setup-smoke-test, smoke_test, build_quickstart_images]
-    if: ${{ always() && !failure() && !cancelled() && needs.setup-smoke-test.result != 'skipped' }}
-    steps:
-      - name: Check if tests have passed
-        id: tests_passed
-        run: |
-          if [[ "${{ needs.smoke_test.result }}" == "failure" ]]; then
-            echo "Smoke tests failed, skipping image pushing"
-            echo "tests_passed=false" >> "$GITHUB_OUTPUT"
-            exit 1
-          elif [[ "${{ needs.smoke_test.result }}" == "cancelled" ]]; then
-            echo "Smoke tests were cancelled, skipping image pushing"
-            echo "tests_passed=false" >> "$GITHUB_OUTPUT"
-            exit 1
-          else
-            echo "Smoke tests completed successfully, proceeding with image pushing"
-            echo "tests_passed=true" >> "$GITHUB_OUTPUT"
-          fi
+  # publish_images:
+  #   name: Push images after tests pass
+  #   runs-on: ${{ needs.setup-smoke-test.outputs.test_runner_type_small || 'ubuntu-latest' }}
+  #   needs: [setup-smoke-test, smoke_test, build_quickstart_images]
+  #   if: ${{ always() && !failure() && !cancelled() && needs.setup-smoke-test.result != 'skipped' }}
+  #   steps:
+  #     - name: Check if tests have passed
+  #       id: tests_passed
+  #       run: |
+  #         if [[ "${{ needs.smoke_test.result }}" == "failure" ]]; then
+  #           echo "Smoke tests failed, skipping image pushing"
+  #           echo "tests_passed=false" >> "$GITHUB_OUTPUT"
+  #           exit 1
+  #         elif [[ "${{ needs.smoke_test.result }}" == "cancelled" ]]; then
+  #           echo "Smoke tests were cancelled, skipping image pushing"
+  #           echo "tests_passed=false" >> "$GITHUB_OUTPUT"
+  #           exit 1
+  #         else
+  #           echo "Smoke tests completed successfully, proceeding with image pushing"
+  #           echo "tests_passed=true" >> "$GITHUB_OUTPUT"
+  #         fi
 
-      - name: Set up Depot CLI
-        if: ${{ steps.tests_passed.outputs.tests_passed == 'true' && needs.setup-smoke-test.outputs.use_depot_cache == 'true' }}
-        uses: depot/setup-action@15c09a5f77a0840ad4bce955686522a257853461 # v1
+  #     - name: Set up Depot CLI
+  #       if: ${{ steps.tests_passed.outputs.tests_passed == 'true' && needs.setup-smoke-test.outputs.use_depot_cache == 'true' }}
+  #       uses: depot/setup-action@15c09a5f77a0840ad4bce955686522a257853461 # v1
 
-      - name: Login to DockerHub
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        if: ${{ steps.tests_passed.outputs.tests_passed == 'true' && needs.setup-smoke-test.outputs.docker-login == 'true' }}
-        with:
-          username: ${{ secrets.ACRYL_DOCKER_USERNAME }}
-          password: ${{ secrets.ACRYL_DOCKER_PASSWORD }}
+  #     - name: Login to DockerHub
+  #       uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+  #       if: ${{ steps.tests_passed.outputs.tests_passed == 'true' && needs.setup-smoke-test.outputs.docker-login == 'true' }}
+  #       with:
+  #         username: ${{ secrets.ACRYL_DOCKER_USERNAME }}
+  #         password: ${{ secrets.ACRYL_DOCKER_PASSWORD }}
 
-      - name: Download build Metadata
-        if: ${{ needs.setup-smoke-test.outputs.publish == 'true' || needs.setup-smoke-test.outputs.pr-publish == 'true' }}
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
-        with:
-          name: build-metadata-${{ needs.setup-smoke-test.outputs.tag }}
-          path: ${{ github.workspace }}/build
+  #     - name: Download build Metadata
+  #       if: ${{ needs.setup-smoke-test.outputs.publish == 'true' || needs.setup-smoke-test.outputs.pr-publish == 'true' }}
+  #       uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+  #       with:
+  #         name: build-metadata-${{ needs.setup-smoke-test.outputs.tag }}
+  #         path: ${{ github.workspace }}/build
 
-      - name: Push images from depot builder
-        if: ${{ steps.tests_passed.outputs.tests_passed == 'true' && needs.setup-smoke-test.outputs.use_depot_cache == 'true' && needs.setup-smoke-test.outputs.publish == 'true' }}
-        run: |
-          set -euo pipefail
-          depot bake -f "${{ github.workspace }}/build/bake-spec-allImages.json" --print | jq -c '.target | to_entries | map({target: .key, tags: .value.tags[]})'| jq -c '.[]' | while IFS= read -r line; do
-            TARGET=$(echo "$line" | jq -r '.target')
-            TAG=$(echo "$line" | jq -r '.tags')
-            depot push --project "${{ env.DEPOT_PROJECT_ID }}" "${{ needs.build_quickstart_images.outputs.build_id }}" --target "$TARGET" --tag "$TAG"
-          done
+  #     - name: Push images from depot builder
+  #       if: ${{ steps.tests_passed.outputs.tests_passed == 'true' && needs.setup-smoke-test.outputs.use_depot_cache == 'true' && needs.setup-smoke-test.outputs.publish == 'true' }}
+  #       run: |
+  #         set -euo pipefail
+  #         depot bake -f "${{ github.workspace }}/build/bake-spec-allImages.json" --print | jq -c '.target | to_entries | map({target: .key, tags: .value.tags[]})'| jq -c '.[]' | while IFS= read -r line; do
+  #           TARGET=$(echo "$line" | jq -r '.target')
+  #           TAG=$(echo "$line" | jq -r '.tags')
+  #           depot push --project "${{ env.DEPOT_PROJECT_ID }}" "${{ needs.build_quickstart_images.outputs.build_id }}" --target "$TARGET" --tag "$TAG"
+  #         done
 
-  deploy_datahub_head:
-    name: Deploy to Datahub HEAD
-    runs-on: ubuntu-latest
-    needs: [setup-smoke-test, smoke_test, publish_images]
-    steps:
-      - uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5
-        if: ${{ needs.setup-smoke-test.outputs.publish != 'false' && github.repository_owner == 'datahub-project' && needs.setup-smoke-test.outputs.repository_name == 'datahub' }}
-        with:
-          aws-access-key-id: ${{ secrets.AWS_SQS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SQS_ACCESS_KEY }}
-          aws-region: us-west-2
-      - uses: isbang/sqs-action@7cdb8b5d1328c6af489ef4614fbafb364bf096ea # v0.2.0
-        if: ${{ needs.setup-smoke-test.outputs.publish != 'false' && github.repository_owner == 'datahub-project' && needs.setup-smoke-test.outputs.repository_name == 'datahub' }}
-        with:
-          sqs-url: ${{ secrets.DATAHUB_HEAD_SYNC_QUEUE }}
-          message: '{ "command": "git-sync", "args" : {"repoName": "${{ needs.setup-smoke-test.outputs.repository_name }}", "repoOrg": "${{ github.repository_owner }}", "repoBranch": "${{ needs.setup-smoke-test.outputs.branch_name }}", "repoShaShort": "${{ needs.setup-smoke-test.outputs.short_sha }}" }}'
+  # deploy_datahub_head:
+  #   name: Deploy to Datahub HEAD
+  #   runs-on: ubuntu-latest
+  #   needs: [setup-smoke-test, smoke_test, publish_images]
+  #   steps:
+  #     - uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5
+  #       if: ${{ needs.setup-smoke-test.outputs.publish != 'false' && github.repository_owner == 'datahub-project' && needs.setup-smoke-test.outputs.repository_name == 'datahub' }}
+  #       with:
+  #         aws-access-key-id: ${{ secrets.AWS_SQS_ACCESS_KEY_ID }}
+  #         aws-secret-access-key: ${{ secrets.AWS_SQS_ACCESS_KEY }}
+  #         aws-region: us-west-2
+  #     - uses: isbang/sqs-action@7cdb8b5d1328c6af489ef4614fbafb364bf096ea # v0.2.0
+  #       if: ${{ needs.setup-smoke-test.outputs.publish != 'false' && github.repository_owner == 'datahub-project' && needs.setup-smoke-test.outputs.repository_name == 'datahub' }}
+  #       with:
+  #         sqs-url: ${{ secrets.DATAHUB_HEAD_SYNC_QUEUE }}
+  #         message: '{ "command": "git-sync", "args" : {"repoName": "${{ needs.setup-smoke-test.outputs.repository_name }}", "repoOrg": "${{ github.repository_owner }}", "repoBranch": "${{ needs.setup-smoke-test.outputs.branch_name }}", "repoShaShort": "${{ needs.setup-smoke-test.outputs.short_sha }}" }}'

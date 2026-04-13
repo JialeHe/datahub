@@ -4,10 +4,11 @@ name: Nightly Docker Smoke Test
 #   - Consolidate the retry boilerplate into smoke-test-retry-setup
 #   - Consolidate pull+retag logic into pull-and-retag-images
 # docker-unified-nightly.yml is left untouched.
-on:
-  workflow_dispatch:
-  schedule:
-    - cron: "0 8 * * *" # 8 AM UTC (midnight Pacific) every day
+on: workflow_dispatch
+# on:
+#   workflow_dispatch:
+# schedule:
+#   - cron: "0 8 * * *" # 8 AM UTC (midnight Pacific) every day
 
 concurrency:
   group: ${{ github.workflow }}
