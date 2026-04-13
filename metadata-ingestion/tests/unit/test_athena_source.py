@@ -234,6 +234,20 @@ def test_get_column_type_list():
     assert isinstance(result.item_type, types.String)
 
 
+def test_get_column_type_pandas_nullable_dtypes():
+    # Pandas nullable integer/float dtypes leak through the profiling pipeline
+    dialect = CustomAthenaRestDialect()
+    assert isinstance(dialect._get_column_type("Int64Dtype"), types.BIGINT)
+    assert isinstance(dialect._get_column_type("UInt64Dtype"), types.BIGINT)
+    assert isinstance(dialect._get_column_type("Int32Dtype"), types.INTEGER)
+    assert isinstance(dialect._get_column_type("UInt32Dtype"), types.INTEGER)
+    assert isinstance(dialect._get_column_type("Int16Dtype"), types.INTEGER)
+    assert isinstance(dialect._get_column_type("Int8Dtype"), types.INTEGER)
+    assert isinstance(dialect._get_column_type("Float64Dtype"), types.FLOAT)
+    assert isinstance(dialect._get_column_type("Float32Dtype"), types.FLOAT)
+    assert isinstance(dialect._get_column_type("BooleanDtype"), types.BOOLEAN)
+
+
 def test_get_column_type_map():
     result = CustomAthenaRestDialect()._get_column_type(type_="map<string,int>")
 

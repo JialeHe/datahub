@@ -310,6 +310,22 @@ class CustomAthenaRestDialect(AthenaRestDialect):
             detected_col_type = types.DECIMAL
             precision, scale = type_meta_information.split(",")
             args = [int(precision), int(scale)]
+        elif type_name.endswith("dtype"):
+            # Pandas nullable dtypes (e.g. Int64Dtype, UInt32Dtype) leak through the profiling
+            # pipeline when great_expectations reflects column types from Athena result sets.
+            base = type_name[:-5]  # strip "dtype" suffix
+            if base in ("int8", "int16", "int32", "uint8", "uint16", "uint32"):
+                detected_col_type = types.INTEGER
+            elif base in ("int64", "uint64"):
+                detected_col_type = types.BIGINT
+            elif base in ("float32", "float64"):
+                detected_col_type = types.FLOAT
+            elif base == "boolean":
+                detected_col_type = types.BOOLEAN
+            elif base in ("string", "object"):
+                detected_col_type = types.String
+            else:
+                return super()._get_column_type(type_name)
         else:
             return super()._get_column_type(type_name)
         return detected_col_type(*args)
