@@ -1,7 +1,5 @@
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from datahub_actions.event.event_envelope import EventEnvelope
 from datahub_actions.pipeline.pipeline_context import PipelineContext
 from datahub_actions.plugin.source.kafka.kafka_event_source import (
@@ -89,10 +87,15 @@ class TestAckAsyncMode:
             mock_store.assert_called_once_with(event)
             mock_commit.assert_not_called()
 
-    def test_async_mode_raises_on_processed_false(self) -> None:
-        """Batch-processing (processed=False) is incompatible with async commits."""
+    def test_async_mode_does_not_store_offset_on_processed_false(self) -> None:
         source = _make_source(async_commit_enabled=True)
         event = _make_event_envelope()
 
-        with pytest.raises(ValueError, match="Batch-processing actions"):
+        with (
+            patch.object(source, "_commit_offsets") as mock_commit,
+            patch.object(source, "_store_offsets") as mock_store,
+        ):
             source.ack(event, processed=False)
+
+            mock_store.assert_not_called()
+            mock_commit.assert_not_called()

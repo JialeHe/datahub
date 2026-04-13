@@ -279,6 +279,28 @@ def _build_throwing_action_pipeline_config(
     }
 
 
+def test_batch_action_with_async_commit_raises():
+    """Batch-processing actions are incompatible with async commits."""
+    config = {
+        "name": "batch-async-pipeline",
+        "source": {"type": "async_commit_event_source", "config": {}},
+        "action": {"type": "batch_test_action", "config": {}},
+    }
+    with pytest.raises(ValueError, match="uses_batch_processing=True"):
+        Pipeline.create(config)
+
+
+def test_batch_action_with_sync_source_ok():
+    """Batch-processing actions work fine with a source that has no async config."""
+    config = {
+        "name": "batch-sync-pipeline",
+        "source": {"type": "test_source", "config": {}},
+        "action": {"type": "batch_test_action", "config": {}},
+    }
+    pipeline = Pipeline.create(config)
+    assert pipeline.action.uses_batch_processing is True
+
+
 def _build_invalid_pipeline_config() -> dict:
     # No name field
     return {

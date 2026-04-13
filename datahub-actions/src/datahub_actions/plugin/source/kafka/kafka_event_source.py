@@ -318,18 +318,7 @@ class KafkaEventSource(EventSource):
         )
 
     def ack(self, event: EventEnvelope, processed: bool = True) -> None:
-        if not processed:
-            # Batch-processing actions return processed=False to defer acknowledgment.
-            # This is incompatible with async commits — batch actions need synchronous
-            # commits so that manually calling ack() later produces an immediate,
-            # deterministic offset commit rather than a deferred background one.
-            if self.source_config.async_commit_enabled:
-                raise ValueError(
-                    "Batch-processing actions (act() returned False) are incompatible "
-                    "with async_commit_enabled=True. Batch actions require synchronous "
-                    "commits for precise offset control. Set async_commit_enabled: false "
-                    "in your Kafka source config."
-                )
+        if not processed:  # No action if event not processed successfully
             return
 
         # See for details: https://github.com/confluentinc/librdkafka/blob/master/INTRODUCTION.md#auto-offset-commit
