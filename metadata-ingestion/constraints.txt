@@ -1251,7 +1251,7 @@ pyspark==3.5.8
     # via acryl-datahub
 pyspnego==0.12.1
     # via requests-ntlm
-pytest==9.0.2
+pytest==9.0.3
     # via
     #   acryl-datahub
     #   pytest-asyncio
