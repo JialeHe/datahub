@@ -53,10 +53,7 @@ def test_list_type_treated_as_array():
 
 
 def test_list_of_structs_inside_struct():
-    # Iceberg: a struct field whose type is list<struct<...>>.  Before the fix,
-    # _parse_datatype_string would misroute list<struct<...>> into the ":" branch
-    # (because nested struct fields contain ":"), throwing a ValueError and
-    # causing the whole column to fall back to NullType.
+    # Iceberg: struct field whose type is list<struct<...>>.
     schema_fields = get_schema_fields_for_hive_column(
         "col", "struct<items:list<struct<name:string,value:int>>>"
     )

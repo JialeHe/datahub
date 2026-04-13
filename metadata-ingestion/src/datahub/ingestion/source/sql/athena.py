@@ -142,28 +142,16 @@ class CustomAthenaRestDialect(AthenaRestDialect):
         schema_name: str,
     ) -> List[str]:
         try:
-            with raw_connection.connection.cursor() as cursor:
-                boto3_client = cursor.connection.client
-                table_names: List[str] = []
-                next_token: Optional[str] = None
-                while True:
-                    kwargs: Dict[str, Any] = {
-                        "CatalogName": catalog,
-                        "DatabaseName": schema_name,
-                        "MaxResults": 50,
-                    }
-                    if next_token:
-                        kwargs["NextToken"] = next_token
-                    response = boto3_client.list_table_metadata(**kwargs)
-                    table_names.extend(
-                        t["Name"]
-                        for t in response.get("TableMetadataList", [])
-                        if t.get("TableType") != "VIRTUAL_VIEW"
-                    )
-                    next_token = response.get("NextToken")
-                    if not next_token:
-                        break
-                return table_names
+            boto3_client = raw_connection.connection.cursor().connection.client
+            paginator = boto3_client.get_paginator("list_table_metadata")
+            return [
+                t["Name"]
+                for page in paginator.paginate(
+                    CatalogName=catalog, DatabaseName=schema_name
+                )
+                for t in page.get("TableMetadataList", [])
+                if t.get("TableType") in self._ALLOWED_TABLE_TYPES
+            ]
         except Exception as e:
             logger.warning(
                 f"boto3 fallback for S3 Tables catalog {catalog}/{schema_name} failed: {e}"
@@ -314,7 +302,7 @@ class CustomAthenaRestDialect(AthenaRestDialect):
         elif type_name.endswith("dtype"):
             # Pandas nullable dtypes (e.g. Int64Dtype, UInt32Dtype) leak through the profiling
             # pipeline when great_expectations reflects column types from Athena result sets.
-            base = type_name[:-5]  # strip "dtype" suffix
+            base = type_name[:-5]
             if base in ("int8", "int16", "int32", "uint8", "uint16", "uint32"):
                 detected_col_type = types.INTEGER
             elif base in ("int64", "uint64"):
@@ -373,11 +361,9 @@ class AthenaConfig(SQLCommonConfig):
     )
     platform_instance_map: Optional[Dict[str, str]] = pydantic.Field(
         default=None,
-        description="Platform instance map for upstream platforms referenced in lineage. "
-        "When ingesting an S3 Tables catalog (``catalog_name`` starting with ``s3tablescatalog/``) "
-        'alongside ``include_table_location_lineage``, set ``{"iceberg": "<instance>"}`` to match '
-        "the platform instance used by the DataHub Iceberg connector for the same tables. "
-        "Leave unset if the Iceberg connector was run without a platform instance.",
+        description="Maps platform names to platform instances for upstream lineage. "
+        'Set ``{"iceberg": "<instance>"}`` when the DataHub Iceberg connector for the same '
+        "S3 Tables catalog was configured with a platform instance.",
     )
 
     @model_validator(mode="after")
@@ -543,9 +529,8 @@ class AthenaSource(SQLAlchemySource):
         location: Optional[str] = custom_properties.get("location")
         if location is not None:
             if metadata.table_type == "ICEBERG":
-                # The S3 path for an Iceberg table is internal table storage, not an upstream
-                # data source. If the same tables were ingested by the DataHub Iceberg connector,
-                # emit lineage to those Iceberg entities instead of the raw S3 location.
+                # For Iceberg tables the S3 location is internal storage, not an upstream source.
+                # For S3 Tables catalogs, emit lineage to the corresponding Iceberg platform dataset.
                 if self.config.catalog_name.startswith("s3tablescatalog/"):
                     location = make_dataset_urn_with_platform_instance(
                         platform="iceberg",

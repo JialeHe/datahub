@@ -61,11 +61,10 @@ class HiveColumnToAvroConverter:
         if s.startswith("array<") or s.startswith("list<"):
             if s[-1] != ">":
                 raise ValueError("'>' should be the last char, but got: %s" % s)
-            prefix_len = 6 if s.startswith("array<") else 5
             return {
                 "type": "array",
                 "items": HiveColumnToAvroConverter._parse_datatype_string(
-                    s[prefix_len:-1]
+                    s[s.index("<") + 1 : -1]
                 ),
                 "native_data_type": s,
             }

@@ -1283,13 +1283,16 @@ def test_get_table_names_boto3_fallback_for_s3tables_catalog():
     raw_conn = mock.MagicMock()
     raw_conn.catalog_name = "s3tablescatalog/my-bucket"
     raw_conn.schema_name = "scraped"
-    boto3_response = {
-        "TableMetadataList": [
-            {"Name": "orders", "TableType": "ICEBERG"},
-            {"Name": "v_orders", "TableType": "VIRTUAL_VIEW"},
-        ]
-    }
-    raw_conn.connection.cursor.return_value.__enter__.return_value.connection.client.list_table_metadata.return_value = boto3_response
+    pages = [
+        {
+            "TableMetadataList": [
+                {"Name": "orders", "TableType": "ICEBERG"},
+                {"Name": "v_orders", "TableType": "VIRTUAL_VIEW"},
+            ]
+        }
+    ]
+    boto3_client = raw_conn.connection.cursor.return_value.connection.client
+    boto3_client.get_paginator.return_value.paginate.return_value = pages
 
     with (
         mock.patch.object(dialect, "_get_tables", return_value=[]),
@@ -1330,17 +1333,12 @@ def test_get_table_names_boto3_fallback_error_is_silent():
         assert dialect.get_table_names(mock.MagicMock(), schema="scraped") == []
 
 
-# ---------------------------------------------------------------------------
-# AthenaConfig — platform_instance auto-derivation for S3 Tables
-# ---------------------------------------------------------------------------
-
-
 def _base_athena_kwargs() -> dict:
-    return dict(
-        aws_region="us-east-1",
-        work_group="primary",
-        query_result_location="s3://bucket/results/",
-    )
+    return {
+        "aws_region": "us-east-1",
+        "work_group": "primary",
+        "query_result_location": "s3://bucket/results/",
+    }
 
 
 def test_athena_config_s3_catalog_sets_platform_instance():
