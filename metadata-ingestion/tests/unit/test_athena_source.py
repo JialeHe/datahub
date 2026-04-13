@@ -1264,7 +1264,7 @@ def _mock_table(name: str, table_type: str) -> mock.MagicMock:
 
 
 def test_get_table_names_s3_tables():
-    """ICEBERG table type is included; VIRTUAL_VIEW is excluded."""
+    """ICEBERG table type is included in get_table_names; VIRTUAL_VIEW is excluded."""
     dialect = CustomAthenaRestDialect()
     tables = [
         _mock_table("regular", "EXTERNAL_TABLE"),
@@ -1287,7 +1287,7 @@ def test_get_table_names_boto3_fallback_for_s3tables_catalog():
         {
             "TableMetadataList": [
                 {"Name": "orders", "TableType": "ICEBERG"},
-                {"Name": "v_orders", "TableType": "VIRTUAL_VIEW"},
+                {"Name": "shipments", "TableType": "ICEBERG"},
             ]
         }
     ]
@@ -1300,7 +1300,7 @@ def test_get_table_names_boto3_fallback_for_s3tables_catalog():
     ):
         result = dialect.get_table_names(mock.MagicMock(), schema="scraped")
 
-    assert result == ["orders"]
+    assert result == ["orders", "shipments"]
 
 
 def test_get_table_names_boto3_fallback_not_triggered_for_regular_catalog():

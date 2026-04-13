@@ -150,7 +150,6 @@ class CustomAthenaRestDialect(AthenaRestDialect):
                     CatalogName=catalog, DatabaseName=schema_name
                 )
                 for t in page.get("TableMetadataList", [])
-                if t.get("TableType") in self._ALLOWED_TABLE_TYPES
             ]
         except Exception as e:
             logger.warning(
