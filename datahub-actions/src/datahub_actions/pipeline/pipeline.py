@@ -108,22 +108,6 @@ class Pipeline:
         if failed_events_dir is not None:
             self._failed_events_dir = failed_events_dir
         self._init_failed_events_dir()
-        self._validate_batch_commit_compat()
-
-    def _validate_batch_commit_compat(self) -> None:
-        """Fail fast if a batch-processing action is paired with async commits."""
-        if not self.action.uses_batch_processing:
-            return
-        source_config = getattr(self.source, "source_config", None)
-        if source_config is not None and getattr(
-            source_config, "async_commit_enabled", False
-        ):
-            raise ValueError(
-                f"Pipeline '{self.name}': action declares uses_batch_processing=True "
-                "but async_commit_enabled=True. Batch-processing actions require "
-                "synchronous commits for precise offset control. Set "
-                "async_commit_enabled: false in your Kafka source config."
-            )
 
     @classmethod
     def create(cls, config_dict: dict) -> "Pipeline":

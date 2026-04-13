@@ -250,48 +250,12 @@ class ThrowingTestAction(Action):
         pass
 
 
-class AsyncCommitSourceConfig:
-    async_commit_enabled: bool = True
-
-
-class TestEventSourceWithAsyncCommit(TestEventSource):
-    """Event source that simulates async_commit_enabled=True for testing."""
-
-    source_config = AsyncCommitSourceConfig()
-
-    @classmethod
-    def create(cls, config_dict: dict, ctx: PipelineContext) -> "EventSource":
-        return TestEventSourceWithAsyncCommit()
-
-
-class BatchTestAction(Action):
-    """Action that declares batch processing for testing the pipeline guard."""
-
-    @property
-    def uses_batch_processing(self) -> bool:
-        return True
-
-    @classmethod
-    def create(cls, config_dict: dict, ctx: PipelineContext) -> "Action":
-        return BatchTestAction()
-
-    def act(self, event_env: EventEnvelope) -> bool | None:
-        return False
-
-    def close(self) -> None:
-        pass
-
-
 # Register test components.
 event_source_registry.register("test_source", TestEventSource)
 event_source_registry.register("stoppable_event_source", StoppableEventSource)
-event_source_registry.register(
-    "async_commit_event_source", TestEventSourceWithAsyncCommit
-)
 
 transformer_registry.register("test_transformer", TestTransformer)
 transformer_registry.register("throwing_test_transformer", ThrowingTestTransformer)
 
 action_registry.register("test_action", TestAction)
 action_registry.register("throwing_test_action", ThrowingTestAction)
-action_registry.register("batch_test_action", BatchTestAction)

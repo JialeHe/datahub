@@ -161,26 +161,15 @@ with async).
 
 ### Batch-Processing Actions
 
-Actions that implement batch processing (where `act()` returns `False` to defer acknowledgment)
-**must** use synchronous commits. The framework enforces this — combining `async_commit_enabled: true`
-with a batch-processing action raises a `ValueError` at runtime.
+Batch-processing actions (where `act()` returns `False` to defer acknowledgment) work with both
+commit modes. When an action returns `False`, no offset is stored or committed for that event.
+The action later calls `ctx.event_source.ack(event, processed=True)` to commit the offset when
+the batch is ready.
 
-Batch actions defer offset commits and later call `ctx.event_source.ack(event, processed=True)`
-explicitly when a batch is ready. This requires synchronous commits so that each manual `ack()` call
-produces an immediate, deterministic offset commit.
-
-```yml
-# Required for batch-processing actions
-source:
-  type: "kafka"
-  config:
-    async_commit_enabled: false
-```
-
-| Mode                | Commit Timing               | Throughput            | Use Case                                        |
-| ------------------- | --------------------------- | --------------------- | ----------------------------------------------- |
-| **Async** (default) | Background thread, periodic | High (~8,200 evt/sec) | Standard event-by-event actions                 |
-| **Sync**            | Immediate, per-event        | Lower (~326 evt/sec)  | Batch-processing actions, strict offset control |
+| Mode                | Commit Timing               | Throughput            | Use Case                              |
+| ------------------- | --------------------------- | --------------------- | ------------------------------------- |
+| **Async** (default) | Background thread, periodic | High (~8,200 evt/sec) | All actions, including batch          |
+| **Sync**            | Immediate, per-event        | Lower (~326 evt/sec)  | When tighter offset control is needed |
 
 ## FAQ
 

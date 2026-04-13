@@ -35,18 +35,6 @@ class Action(Closeable, metaclass=ABCMeta):
         """Factory method to create an instance of an Action"""
         pass
 
-    @property
-    def uses_batch_processing(self) -> bool:
-        """Whether this action defers event acknowledgment for batch processing.
-
-        Batch actions return False from act() to suppress immediate offset commits,
-        then manually call ctx.event_source.ack() when a batch is ready. This requires
-        synchronous Kafka commits (async_commit_enabled=False).
-
-        Override to return True in batch-processing action subclasses.
-        """
-        return False
-
     def act(self, event: EventEnvelope) -> bool | None:
         """Take Action on DataHub events, provided an instance of a DataHub event.
 
