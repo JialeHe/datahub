@@ -527,20 +527,21 @@ class AthenaSource(SQLAlchemySource):
 
         location: Optional[str] = custom_properties.get("location")
         if location is not None:
-            if metadata.table_type == "ICEBERG":
-                # For Iceberg tables the S3 location is internal storage, not an upstream source.
-                # For S3 Tables catalogs, emit lineage to the corresponding Iceberg platform dataset.
-                if self.config.catalog_name.startswith("s3tablescatalog/"):
-                    location = make_dataset_urn_with_platform_instance(
-                        platform="iceberg",
-                        name=f"{schema}.{table}",
-                        platform_instance=(self.config.platform_instance_map or {}).get(
-                            "iceberg"
-                        ),
-                        env=self.config.env,
-                    )
-                else:
-                    location = None
+            if self.config.catalog_name.startswith("s3tablescatalog/"):
+                # Every table in an S3 Tables catalog is Iceberg. The S3 location is
+                # internal storage; emit lineage to the corresponding Iceberg dataset instead.
+                location = make_dataset_urn_with_platform_instance(
+                    platform="iceberg",
+                    name=f"{schema}.{table}",
+                    platform_instance=(self.config.platform_instance_map or {}).get(
+                        "iceberg"
+                    ),
+                    env=self.config.env,
+                )
+            elif metadata.parameters.get("format", "").upper() == "ICEBERG":
+                # Standard Glue-catalog Iceberg table: S3 location is internal storage,
+                # not an upstream source.
+                location = None
             elif location.startswith("s3://"):
                 location = make_s3_urn(location, self.config.env)
             else:

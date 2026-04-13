@@ -194,8 +194,8 @@ from "test_schema"."test_table$partitions")"""
 
 @pytest.mark.integration
 def test_athena_get_table_properties_iceberg_lineage_to_iceberg_platform():
-    """S3 Tables (s3tablescatalog) Iceberg tables should produce upstream lineage pointing to
-    the corresponding Iceberg platform dataset, not the raw S3 storage location."""
+    """S3 Tables (s3tablescatalog) tables emit upstream lineage to the Iceberg platform
+    dataset, not the raw S3 storage location."""
     config = AthenaConfig.model_validate(
         {
             "aws_region": "us-west-1",
@@ -208,7 +208,7 @@ def test_athena_get_table_properties_iceberg_lineage_to_iceberg_platform():
     table_metadata = {
         "TableMetadata": {
             "Name": "test_table",
-            "TableType": "ICEBERG",
+            "TableType": "customer",  # GetTableMetadata returns "customer" for S3 Tables
             "CreateTime": datetime.now(),
             "LastAccessTime": datetime.now(),
             "PartitionKeys": [],
@@ -232,7 +232,7 @@ def test_athena_get_table_properties_iceberg_lineage_to_iceberg_platform():
         inspector=mock_inspector, table="test_table", schema="my-namespace"
     )
 
-    assert custom_properties["table_type"] == "ICEBERG"
+    assert custom_properties["table_type"] == "customer"
     assert custom_properties["location"] == "s3://my-bucket/my-namespace/test_table/"
     # Upstream should be the Iceberg platform dataset, not the S3 path
     assert (
@@ -257,7 +257,7 @@ def test_athena_get_table_properties_iceberg_lineage_with_platform_instance():
     table_metadata = {
         "TableMetadata": {
             "Name": "test_table",
-            "TableType": "ICEBERG",
+            "TableType": "customer",
             "CreateTime": datetime.now(),
             "LastAccessTime": datetime.now(),
             "PartitionKeys": [],
@@ -285,6 +285,50 @@ def test_athena_get_table_properties_iceberg_lineage_with_platform_instance():
         location
         == "urn:li:dataset:(urn:li:dataPlatform:iceberg,my-warehouse.my-namespace.test_table,PROD)"
     )
+
+
+def test_athena_get_table_properties_glue_iceberg_location_suppressed():
+    """Glue-catalog Iceberg tables have their S3 location suppressed — it is internal
+    Iceberg storage, not an upstream source."""
+    config = AthenaConfig.model_validate(
+        {
+            "aws_region": "us-west-1",
+            "query_result_location": "s3://sample-staging-dir/",
+            "work_group": "test-workgroup",
+            "catalog_name": "AwsDataCatalog",
+        }
+    )
+
+    table_metadata = {
+        "TableMetadata": {
+            "Name": "test_table",
+            "TableType": "EXTERNAL_TABLE",
+            "CreateTime": datetime.now(),
+            "LastAccessTime": datetime.now(),
+            "PartitionKeys": [],
+            "Parameters": {
+                "location": "s3://my-bucket/glue-iceberg/test_table/",
+                "format": "ICEBERG",
+                "metadata_location": "s3://my-bucket/glue-iceberg/test_table/metadata/00001.metadata.json",
+            },
+        },
+    }
+
+    mock_cursor = mock.MagicMock()
+    mock_inspector = mock.MagicMock()
+    mock_cursor.get_table_metadata.return_value = AthenaTableMetadata(
+        response=table_metadata
+    )
+
+    ctx = PipelineContext(run_id="test")
+    source = AthenaSource(config=config, ctx=ctx)
+    source.cursor = mock_cursor
+
+    _, _, location = source.get_table_properties(
+        inspector=mock_inspector, table="test_table", schema="my_db"
+    )
+
+    assert location is None
 
 
 def test_get_column_type_simple_types():
