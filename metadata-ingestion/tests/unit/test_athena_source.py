@@ -6,6 +6,7 @@ import pytest
 import sqlglot
 from freezegun import freeze_time
 from pyathena import OperationalError
+from pyathena.model import AthenaTableMetadata
 from sqlalchemy import types
 from sqlalchemy_bigquery import STRUCT
 from sqlglot.dialects import Athena
@@ -30,8 +31,6 @@ FROZEN_TIME = "2020-04-14 07:00:00"
 
 
 def test_athena_config_query_location_old_plus_new_value_not_allowed():
-    from datahub.ingestion.source.sql.athena import AthenaConfig
-
     with pytest.raises(ValueError):
         AthenaConfig.model_validate(
             {
@@ -44,8 +43,6 @@ def test_athena_config_query_location_old_plus_new_value_not_allowed():
 
 
 def test_athena_config_staging_dir_is_set_as_query_result():
-    from datahub.ingestion.source.sql.athena import AthenaConfig
-
     config = AthenaConfig.model_validate(
         {
             "aws_region": "us-west-1",
@@ -66,8 +63,6 @@ def test_athena_config_staging_dir_is_set_as_query_result():
 
 
 def test_athena_uri():
-    from datahub.ingestion.source.sql.athena import AthenaConfig
-
     config = AthenaConfig.model_validate(
         {
             "aws_region": "us-west-1",
@@ -87,10 +82,6 @@ def test_athena_uri():
 @pytest.mark.integration
 @freeze_time(FROZEN_TIME)
 def test_athena_get_table_properties():
-    from pyathena.model import AthenaTableMetadata
-
-    from datahub.ingestion.source.sql.athena import AthenaConfig, AthenaSource
-
     config = AthenaConfig.model_validate(
         {
             "aws_region": "us-west-1",
@@ -201,6 +192,101 @@ from "test_schema"."test_table$partitions")"""
     }
 
 
+@pytest.mark.integration
+def test_athena_get_table_properties_iceberg_lineage_to_iceberg_platform():
+    """S3 Tables (s3tablescatalog) Iceberg tables should produce upstream lineage pointing to
+    the corresponding Iceberg platform dataset, not the raw S3 storage location."""
+    config = AthenaConfig.model_validate(
+        {
+            "aws_region": "us-west-1",
+            "query_result_location": "s3://sample-staging-dir/",
+            "work_group": "test-workgroup",
+            "catalog_name": "s3tablescatalog/my-bucket",
+        }
+    )
+
+    table_metadata = {
+        "TableMetadata": {
+            "Name": "test_table",
+            "TableType": "ICEBERG",
+            "CreateTime": datetime.now(),
+            "LastAccessTime": datetime.now(),
+            "PartitionKeys": [],
+            "Parameters": {
+                "location": "s3://my-bucket/my-namespace/test_table/",
+            },
+        },
+    }
+
+    mock_cursor = mock.MagicMock()
+    mock_inspector = mock.MagicMock()
+    mock_cursor.get_table_metadata.return_value = AthenaTableMetadata(
+        response=table_metadata
+    )
+
+    ctx = PipelineContext(run_id="test")
+    source = AthenaSource(config=config, ctx=ctx)
+    source.cursor = mock_cursor
+
+    description, custom_properties, location = source.get_table_properties(
+        inspector=mock_inspector, table="test_table", schema="my-namespace"
+    )
+
+    assert custom_properties["table_type"] == "ICEBERG"
+    assert custom_properties["location"] == "s3://my-bucket/my-namespace/test_table/"
+    # Upstream should be the Iceberg platform dataset, not the S3 path
+    assert (
+        location
+        == "urn:li:dataset:(urn:li:dataPlatform:iceberg,my-namespace.test_table,PROD)"
+    )
+
+
+@pytest.mark.integration
+def test_athena_get_table_properties_iceberg_lineage_with_platform_instance():
+    """When platform_instance_map includes iceberg, the upstream URN includes that platform instance."""
+    config = AthenaConfig.model_validate(
+        {
+            "aws_region": "us-west-1",
+            "query_result_location": "s3://sample-staging-dir/",
+            "work_group": "test-workgroup",
+            "catalog_name": "s3tablescatalog/my-bucket",
+            "platform_instance_map": {"iceberg": "my-warehouse"},
+        }
+    )
+
+    table_metadata = {
+        "TableMetadata": {
+            "Name": "test_table",
+            "TableType": "ICEBERG",
+            "CreateTime": datetime.now(),
+            "LastAccessTime": datetime.now(),
+            "PartitionKeys": [],
+            "Parameters": {
+                "location": "s3://my-bucket/my-namespace/test_table/",
+            },
+        },
+    }
+
+    mock_cursor = mock.MagicMock()
+    mock_inspector = mock.MagicMock()
+    mock_cursor.get_table_metadata.return_value = AthenaTableMetadata(
+        response=table_metadata
+    )
+
+    ctx = PipelineContext(run_id="test")
+    source = AthenaSource(config=config, ctx=ctx)
+    source.cursor = mock_cursor
+
+    description, custom_properties, location = source.get_table_properties(
+        inspector=mock_inspector, table="test_table", schema="my-namespace"
+    )
+
+    assert (
+        location
+        == "urn:li:dataset:(urn:li:dataPlatform:iceberg,my-warehouse.my-namespace.test_table,PROD)"
+    )
+
+
 def test_get_column_type_simple_types():
     assert isinstance(
         CustomAthenaRestDialect()._get_column_type(type_="int"), types.Integer
@@ -308,8 +394,6 @@ def test_column_type_complex_combination():
 
 
 def test_casted_partition_key():
-    from datahub.ingestion.source.sql.athena import AthenaSource
-
     assert AthenaSource._casted_partition_key("test_col") == "CAST(test_col as VARCHAR)"
 
 
@@ -516,8 +600,6 @@ def test_convert_simple_field_paths_to_v1_with_partition_keys():
 
 def test_convert_simple_field_paths_to_v1_default_behavior():
     """Test that emit_schema_fieldpaths_as_v1 defaults to False"""
-    from datahub.ingestion.source.sql.athena import AthenaConfig
-
     # Test config without specifying emit_schema_fieldpaths_as_v1
     config = AthenaConfig.model_validate(
         {

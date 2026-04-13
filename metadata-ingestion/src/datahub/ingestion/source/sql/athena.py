@@ -19,6 +19,7 @@ from sqlalchemy_bigquery import STRUCT
 
 from datahub.configuration.common import HiddenFromDocs
 from datahub.configuration.validate_field_rename import pydantic_renamed_field
+from datahub.emitter.mce_builder import make_dataset_urn_with_platform_instance
 from datahub.emitter.mcp_builder import ContainerKey, DatabaseKey
 from datahub.ingestion.api.decorators import (
     SourceCapability,
@@ -370,6 +371,14 @@ class AthenaConfig(SQLCommonConfig):
         "automatically used as ``platform_instance`` so that datasets and "
         "containers are namespaced under the catalog in DataHub.",
     )
+    platform_instance_map: Optional[Dict[str, str]] = pydantic.Field(
+        default=None,
+        description="Platform instance map for upstream platforms referenced in lineage. "
+        "When ingesting an S3 Tables catalog (``catalog_name`` starting with ``s3tablescatalog/``) "
+        'alongside ``include_table_location_lineage``, set ``{"iceberg": "<instance>"}`` to match '
+        "the platform instance used by the DataHub Iceberg connector for the same tables. "
+        "Leave unset if the Iceberg connector was run without a platform instance.",
+    )
 
     @model_validator(mode="after")
     def _derive_platform_instance_from_s3_catalog(self) -> "AthenaConfig":
@@ -533,7 +542,22 @@ class AthenaSource(SQLAlchemySource):
 
         location: Optional[str] = custom_properties.get("location")
         if location is not None:
-            if location.startswith("s3://"):
+            if metadata.table_type == "ICEBERG":
+                # The S3 path for an Iceberg table is internal table storage, not an upstream
+                # data source. If the same tables were ingested by the DataHub Iceberg connector,
+                # emit lineage to those Iceberg entities instead of the raw S3 location.
+                if self.config.catalog_name.startswith("s3tablescatalog/"):
+                    location = make_dataset_urn_with_platform_instance(
+                        platform="iceberg",
+                        name=f"{schema}.{table}",
+                        platform_instance=(self.config.platform_instance_map or {}).get(
+                            "iceberg"
+                        ),
+                        env=self.config.env,
+                    )
+                else:
+                    location = None
+            elif location.startswith("s3://"):
                 location = make_s3_urn(location, self.config.env)
             else:
                 logging.debug(
