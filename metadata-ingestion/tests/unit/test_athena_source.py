@@ -226,6 +226,14 @@ def test_get_column_type_array():
     assert isinstance(result.item_type, types.String)
 
 
+def test_get_column_type_list():
+    # Iceberg tables use `list` as a synonym for `array`
+    result = CustomAthenaRestDialect()._get_column_type(type_="list<string>")
+
+    assert isinstance(result, types.ARRAY)
+    assert isinstance(result.item_type, types.String)
+
+
 def test_get_column_type_map():
     result = CustomAthenaRestDialect()._get_column_type(type_="map<string,int>")
 
@@ -1224,3 +1232,43 @@ def test_get_table_names_boto3_fallback_error_is_silent():
         mock.patch.object(dialect, "_raw_connection", return_value=raw_conn),
     ):
         assert dialect.get_table_names(mock.MagicMock(), schema="scraped") == []
+
+
+# ---------------------------------------------------------------------------
+# AthenaConfig — platform_instance auto-derivation for S3 Tables
+# ---------------------------------------------------------------------------
+
+
+def _base_athena_kwargs() -> dict:
+    return dict(
+        aws_region="us-east-1",
+        work_group="primary",
+        query_result_location="s3://bucket/results/",
+    )
+
+
+def test_athena_config_s3_catalog_sets_platform_instance():
+    cfg = AthenaConfig(
+        **_base_athena_kwargs(),
+        catalog_name="s3tablescatalog/my-bucket",
+    )
+    assert cfg.platform_instance == "s3tablescatalog/my-bucket"
+
+
+def test_athena_config_default_catalog_no_platform_instance():
+    cfg = AthenaConfig(**_base_athena_kwargs())
+    assert cfg.platform_instance is None
+
+
+def test_athena_config_custom_non_s3_catalog_no_platform_instance():
+    cfg = AthenaConfig(**_base_athena_kwargs(), catalog_name="mycustomcatalog")
+    assert cfg.platform_instance is None
+
+
+def test_athena_config_explicit_platform_instance_not_overridden():
+    cfg = AthenaConfig(
+        **_base_athena_kwargs(),
+        catalog_name="s3tablescatalog/my-bucket",
+        platform_instance="explicit-instance",
+    )
+    assert cfg.platform_instance == "explicit-instance"

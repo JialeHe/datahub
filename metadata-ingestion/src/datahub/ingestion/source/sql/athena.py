@@ -10,6 +10,7 @@ import pydantic
 from pyathena.common import BaseCursor
 from pyathena.model import AthenaTableMetadata
 from pyathena.sqlalchemy_athena import AthenaRestDialect
+from pydantic import model_validator
 from sqlalchemy import create_engine, exc, inspect, text, types
 from sqlalchemy.engine import reflection
 from sqlalchemy.engine.reflection import Inspector
@@ -105,9 +106,7 @@ class CustomAthenaRestDialect(AthenaRestDialect):
     # regex to identify complex types in DDL strings which are embedded in `<>`.
     _complex_type_pattern = re.compile(r"(<.+>)")
 
-    # Table types exposed by Athena. S3 Tables (accessed via s3tablescatalog/<bucket>)
-    # are Iceberg-native and are returned with TableType "ICEBERG"; PyAthena's base
-    # implementation omits this value, so they would be silently excluded.
+    # PyAthena's base implementation omits "ICEBERG", which is the TableType for S3 Tables.
     _ALLOWED_TABLE_TYPES = frozenset(
         ["EXTERNAL_TABLE", "MANAGED_TABLE", "EXTERNAL", "ICEBERG"]
     )
@@ -119,11 +118,8 @@ class CustomAthenaRestDialect(AthenaRestDialect):
             t.name for t in tables if t.table_type in self._ALLOWED_TABLE_TYPES
         ]
 
-        # For S3 Tables catalogs, the Athena ListTableMetadata API may return an
-        # empty result set when invoked through PyAthena due to the known limitation
-        # where s3tablescatalog entries are invisible to ListDataCatalogs.  As a
-        # safety net we call the boto3 Athena client directly, bypassing PyAthena's
-        # internal caching and filtering.
+        # S3 Tables catalogs are invisible to ListDataCatalogs, so PyAthena's
+        # internal path can return nothing.  Fall back to the boto3 client directly.
         if not table_names:
             raw_connection = self._raw_connection(connection)
             catalog = raw_connection.catalog_name
@@ -220,7 +216,7 @@ class CustomAthenaRestDialect(AthenaRestDialect):
 
         args = []
 
-        if type_name in ["array"]:
+        if type_name in ["array", "list"]:
             detected_col_type = types.ARRAY
 
             # here we need to account again for two options how `type_` is passed to this method
@@ -353,8 +349,19 @@ class AthenaConfig(SQLCommonConfig):
     )
     catalog_name: str = pydantic.Field(
         default="awsdatacatalog",
-        description="Athena Catalog Name",
+        description="Athena Catalog Name. When set to an S3 Tables catalog "
+        "(i.e. a value starting with ``s3tablescatalog/``), the catalog name is "
+        "automatically used as ``platform_instance`` so that datasets and "
+        "containers are namespaced under the catalog in DataHub.",
     )
+
+    @model_validator(mode="after")
+    def _derive_platform_instance_from_s3_catalog(self) -> "AthenaConfig":
+        if self.platform_instance is None and self.catalog_name.startswith(
+            "s3tablescatalog/"
+        ):
+            self.platform_instance = self.catalog_name
+        return self
 
     query_result_location: str = pydantic.Field(
         description="S3 path to the [query result bucket](https://docs.aws.amazon.com/athena/latest/ug/querying.html#query-results-specify-location) which should be used by AWS Athena to store results of the"
