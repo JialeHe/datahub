@@ -446,7 +446,7 @@ def test_microstrategy_ingest_mock_warehouse_lineage(
                     "include_cube_schema": False,
                     "include_datasets": False,
                     "include_warehouse_lineage": True,
-                    "warehouse_lineage_database": "analytics",
+                    "warehouse_lineage_database": "prod_db",
                     "warehouse_lineage_schema": "analytics",
                     "include_report_definitions": False,
                     "preflight_dashboard_exists": False,

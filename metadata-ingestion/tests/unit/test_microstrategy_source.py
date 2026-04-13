@@ -25,6 +25,8 @@ from datahub.ingestion.source.microstrategy.source import (
     _extract_tables_from_sql,
     _is_classcast_error,
     _is_iserver_error,
+    _parse_database_from_connection_string,
+    _parse_schema_from_connection_string,
 )
 
 
@@ -1033,7 +1035,11 @@ class TestWarehouseLineageEmission:
             assert len(upstream_wus) == 1
             lineage = upstream_wus[0].metadata.aspect  # type: ignore[union-attr]
             assert len(lineage.upstreams) == 1  # type: ignore[union-attr]
-            assert "snowflake" in lineage.upstreams[0].dataset  # type: ignore[union-attr]
+            urn = lineage.upstreams[0].dataset  # type: ignore[union-attr]
+            assert "snowflake" in urn
+            # 2-part SQL name "analytics"."fact_sales" + warehouse_lineage_database="db"
+            # should produce 3-part: db.analytics.fact_sales
+            assert "db.analytics.fact_sales" in urn
 
     def test_tables_to_urns_emits_warning_when_platform_undetected(self) -> None:
         """_tables_to_urns returns [] and records a report warning when no platform is detected."""
@@ -1057,6 +1063,65 @@ class TestWarehouseLineageEmission:
         # title is the grouping key set via title="warehouse-lineage-skipped"
         warning_titles = [w.title for w in source.report.warnings]
         assert "warehouse-lineage-skipped" in warning_titles
+
+
+class TestQualifyTableName:
+    """Tests for _qualify_table_name — ensures MSTR SQL table names are
+    qualified to the depth expected by DataHub URNs (e.g. 3-part for Snowflake)."""
+
+    @staticmethod
+    def _make_source(**overrides: object) -> "MicroStrategySource":
+        base = {
+            "connection": {
+                "base_url": "https://demo.microstrategy.com",
+                "use_anonymous": True,
+            },
+        }
+        base.update(overrides)
+        config = MicroStrategyConfig.model_validate(base)
+        ctx = PipelineContext(run_id="qualify-test")
+        return MicroStrategySource(config, ctx)
+
+    def test_bare_table_with_db_and_schema(self) -> None:
+        source = self._make_source(
+            warehouse_lineage_database="MY_DB",
+            warehouse_lineage_schema="MY_SCHEMA",
+        )
+        assert source._qualify_table_name("FACT_SALES") == "MY_DB.MY_SCHEMA.FACT_SALES"
+
+    def test_bare_table_with_schema_only(self) -> None:
+        source = self._make_source(warehouse_lineage_schema="MY_SCHEMA")
+        assert source._qualify_table_name("FACT_SALES") == "MY_SCHEMA.FACT_SALES"
+
+    def test_bare_table_no_config(self) -> None:
+        source = self._make_source()
+        assert source._qualify_table_name("FACT_SALES") == "FACT_SALES"
+
+    def test_two_part_prepends_database(self) -> None:
+        """MSTR SQL typically produces SCHEMA.TABLE — database should be prepended."""
+        source = self._make_source(warehouse_lineage_database="ANALYTICS")
+        assert (
+            source._qualify_table_name("XRBIA_DM.FACT_SALES")
+            == "ANALYTICS.XRBIA_DM.FACT_SALES"
+        )
+
+    def test_two_part_no_database_unchanged(self) -> None:
+        """Without warehouse_lineage_database, 2-part names pass through."""
+        source = self._make_source(warehouse_lineage_schema="IGNORED")
+        assert (
+            source._qualify_table_name("XRBIA_DM.FACT_SALES") == "XRBIA_DM.FACT_SALES"
+        )
+
+    def test_three_part_unchanged(self) -> None:
+        """Already fully qualified — should not be modified."""
+        source = self._make_source(
+            warehouse_lineage_database="OTHER_DB",
+            warehouse_lineage_schema="OTHER_SCHEMA",
+        )
+        assert (
+            source._qualify_table_name("MY_DB.MY_SCHEMA.FACT_SALES")
+            == "MY_DB.MY_SCHEMA.FACT_SALES"
+        )
 
 
 class TestApiCallReduction:
@@ -1234,6 +1299,8 @@ class TestWarehousePlatformDetection:
             source.ctx = ctx
             source.client = mock_client
             source._warehouse_platform = None
+            source._detected_database = None
+            source._detected_schema = None
             source.report = MagicMock()  # type: ignore[method-assign]
         return source
 
@@ -1380,6 +1447,128 @@ class TestWarehousePlatformDetection:
         )
         source._detect_warehouse_platform(project_id="proj_1")
         assert source._warehouse_platform == "redshift"
+
+
+class TestConnectionStringAutoDetection:
+    """Tests for connection string parsing and auto-detection of database/schema."""
+
+    # ── Database parsing ─────────────────────────────────────────────────────
+
+    def test_snowflake_jdbc_url(self) -> None:
+        conn = (
+            "JDBC;DRIVER={net.snowflake.client.jdbc.SnowflakeDriver};"
+            "URL={jdbc:snowflake://acct.snowflakecomputing.com/"
+            "?warehouse=WH&db=P_MER_EDW_DB&schema=XRBIA_DM&role=MY_ROLE};"
+        )
+        assert _parse_database_from_connection_string(conn) == "P_MER_EDW_DB"
+
+    def test_odbc_database_param(self) -> None:
+        conn = "DRIVER={ODBC};DATABASE=MY_DB;HOSTNAME=host;PORT=5439;"
+        assert _parse_database_from_connection_string(conn) == "MY_DB"
+
+    def test_generic_catalog_param(self) -> None:
+        conn = "jdbc:sqlserver://host;catalog=AdventureWorks;integratedSecurity=true"
+        assert _parse_database_from_connection_string(conn) == "AdventureWorks"
+
+    def test_no_database_returns_none(self) -> None:
+        conn = "DRIVER={ODBC};SERVER=host;PORT=443;"
+        assert _parse_database_from_connection_string(conn) is None
+
+    def test_empty_string_returns_none(self) -> None:
+        assert _parse_database_from_connection_string("") is None
+
+    # ── Schema parsing ───────────────────────────────────────────────────────
+
+    def test_snowflake_schema_from_jdbc(self) -> None:
+        conn = "?db=MY_DB&schema=XRBIA_DM&role=MY_ROLE"
+        assert _parse_schema_from_connection_string(conn) == "XRBIA_DM"
+
+    def test_postgres_current_schema(self) -> None:
+        conn = "DATABASE=mydb;currentSchema=analytics;"
+        assert _parse_schema_from_connection_string(conn) == "analytics"
+
+    def test_no_schema_returns_none(self) -> None:
+        conn = "DATABASE=mydb;SERVER=host;"
+        assert _parse_schema_from_connection_string(conn) is None
+
+    # ── End-to-end auto-detection ────────────────────────────────────────────
+
+    @staticmethod
+    def _make_detection_source() -> "MicroStrategySource":
+        config = MicroStrategyConfig.model_validate(
+            {
+                "connection": {
+                    "base_url": "https://demo.microstrategy.com",
+                    "use_anonymous": True,
+                },
+                "include_warehouse_lineage": True,
+            }
+        )
+        ctx = PipelineContext(run_id="detect-db-test")
+        with patch(
+            "datahub.ingestion.source.microstrategy.source.MicroStrategyClient"
+        ) as mock_client_class:
+            mock_client = MagicMock()
+            mock_client_class.return_value = mock_client
+            source = MicroStrategySource.__new__(MicroStrategySource)
+            source.config = config
+            source.ctx = ctx
+            source.client = mock_client
+            source._warehouse_platform = None
+            source._detected_database = None
+            source._detected_schema = None
+            source.report = MagicMock()  # type: ignore[method-assign]
+        return source
+
+    def test_tier1_auto_detects_database_and_schema(self) -> None:
+        """Tier 1 platform detection extracts both database and schema."""
+        source = self._make_detection_source()
+        source.client.get_project_datasources = MagicMock(  # type: ignore[method-assign]
+            return_value=[
+                {
+                    "datasourceType": "normal",
+                    "database": {
+                        "type": "snow_flake",
+                        "connection": {"id": "conn123", "name": "SF_JDBC"},
+                    },
+                    "dbms": {"name": "Snowflake"},
+                    "name": "SF Prod",
+                }
+            ]
+        )
+        source.client.get_datasource_connection = MagicMock(  # type: ignore[method-assign]
+            return_value={
+                "connectionString": (
+                    "JDBC;URL={jdbc:snowflake://acct.snowflakecomputing.com/"
+                    "?db=ANALYTICS_DB&schema=PUBLIC};"
+                )
+            }
+        )
+
+        source._detect_warehouse_platform(project_id="proj_1")
+
+        assert source._warehouse_platform == "snowflake"
+        assert source._detected_database == "ANALYTICS_DB"
+        assert source._detected_schema == "PUBLIC"
+
+    def test_explicit_config_overrides_auto_detection(self) -> None:
+        """Config values take precedence over auto-detected values."""
+        source = TestQualifyTableName._make_source(
+            warehouse_lineage_database="MANUAL_DB",
+            warehouse_lineage_schema="MANUAL_SCHEMA",
+        )
+        source._detected_database = "AUTO_DB"
+        source._detected_schema = "AUTO_SCHEMA"
+        assert source._qualify_table_name("SCHEMA.TABLE") == "MANUAL_DB.SCHEMA.TABLE"
+        assert source._qualify_table_name("TABLE") == "MANUAL_DB.MANUAL_SCHEMA.TABLE"
+
+    def test_auto_detected_values_used_by_qualify(self) -> None:
+        """When config fields are unset, auto-detected values are used."""
+        source = TestQualifyTableName._make_source()
+        source._detected_database = "AUTO_DB"
+        source._detected_schema = "AUTO_SCHEMA"
+        assert source._qualify_table_name("SCHEMA.TABLE") == "AUTO_DB.SCHEMA.TABLE"
+        assert source._qualify_table_name("TABLE") == "AUTO_DB.AUTO_SCHEMA.TABLE"
 
 
 class TestIServerErrorHandling:

@@ -288,16 +288,19 @@ class MicroStrategyConfig(
     warehouse_lineage_database: Optional[str] = Field(
         default=None,
         description=(
-            "Default database/catalog name for building dataset URNs when the modeling API "
-            "does not provide a full namespace."
+            "Override for the database/catalog name prepended to upstream table URNs. "
+            "Normally auto-detected from the datasource JDBC/ODBC connection string "
+            "(e.g. ``db=P_MER_EDW_DB`` for Snowflake). Only set this if auto-detection "
+            "fails or you need to override to a different database."
         ),
     )
 
     warehouse_lineage_schema: Optional[str] = Field(
         default=None,
         description=(
-            "Default schema name for building dataset URNs when the modeling API "
-            "only returns a table name."
+            "Override for the schema name prepended to bare (unqualified) table names. "
+            "Normally auto-detected from the datasource connection string. "
+            "Only set this if auto-detection fails or you need to override."
         ),
     )
 
@@ -313,10 +316,10 @@ class MicroStrategyConfig(
         default=4,
         ge=1,
         description=(
-            "Maximum number of threads used to pre-fetch cube metadata in parallel. "
-            "Each cube requires up to two API calls (sqlView + schema); running these "
-            "concurrently reduces wall-clock ingestion time when many cubes are present. "
-            "Set to 1 to disable parallelism (serial fetch, easier to debug). "
+            "Maximum number of threads for parallel API calls. Used for: "
+            "cube metadata prefetch (sqlView + schema), dashboard/report definition "
+            "prefetch, field formula cache warming, and warehouse lineage SQL view "
+            "retrieval. Set to 1 to disable parallelism (serial fetch, easier to debug). "
             "Values above 10 risk hitting MicroStrategy REST API rate limits."
         ),
     )
@@ -330,18 +333,3 @@ class MicroStrategyConfig(
             "Recommended for production environments."
         ),
     )
-
-    @model_validator(mode="after")  # type: ignore[misc]  # pydantic v2 decorator stacking with ConfigModel metaclass
-    def warn_if_column_lineage_without_schema(self) -> "MicroStrategyConfig":
-        if (
-            self.include_column_lineage
-            and self.include_warehouse_lineage
-            and not self.warehouse_lineage_database
-            and not self.warehouse_lineage_schema
-        ):
-            logger.warning(
-                "include_column_lineage is true but neither warehouse_lineage_database "
-                "nor warehouse_lineage_schema is set. Column lineage quality may be lower "
-                "for bare table names (no schema prefix in SQL)."
-            )
-        return self

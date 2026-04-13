@@ -280,6 +280,22 @@
     "entityType": "dashboard",
     "entityUrn": "urn:li:dashboard:(microstrategy,DD001122334455667788990011223344)",
     "changeType": "UPSERT",
+    "aspectName": "container",
+    "aspect": {
+        "json": {
+            "container": "urn:li:container:cd80a14f68954b355e7511ec1d4ee7e0"
+        }
+    },
+    "systemMetadata": {
+        "lastObserved": 1710266400675,
+        "runId": "microstrategy-mock-test",
+        "lastRunId": "no-run-id-provided"
+    }
+},
+{
+    "entityType": "dashboard",
+    "entityUrn": "urn:li:dashboard:(microstrategy,DD001122334455667788990011223344)",
+    "changeType": "UPSERT",
     "aspectName": "ownership",
     "aspect": {
         "json": {
@@ -309,11 +325,16 @@
     "aspectName": "browsePathsV2",
     "aspect": {
         "json": {
-            "path": []
+            "path": [
+                {
+                    "id": "urn:li:container:cd80a14f68954b355e7511ec1d4ee7e0",
+                    "urn": "urn:li:container:cd80a14f68954b355e7511ec1d4ee7e0"
+                }
+            ]
         }
     },
     "systemMetadata": {
-        "lastObserved": 1710266400754,
+        "lastObserved": 1710266400676,
         "runId": "microstrategy-mock-test",
         "lastRunId": "no-run-id-provided"
     }
@@ -394,6 +415,22 @@
     "entityType": "chart",
     "entityUrn": "urn:li:chart:(microstrategy,RR001122334455667788990011223344)",
     "changeType": "UPSERT",
+    "aspectName": "container",
+    "aspect": {
+        "json": {
+            "container": "urn:li:container:cd80a14f68954b355e7511ec1d4ee7e0"
+        }
+    },
+    "systemMetadata": {
+        "lastObserved": 1710266400682,
+        "runId": "microstrategy-mock-test",
+        "lastRunId": "no-run-id-provided"
+    }
+},
+{
+    "entityType": "chart",
+    "entityUrn": "urn:li:chart:(microstrategy,RR001122334455667788990011223344)",
+    "changeType": "UPSERT",
     "aspectName": "dataPlatformInstance",
     "aspect": {
         "json": {
@@ -439,11 +476,16 @@
     "aspectName": "browsePathsV2",
     "aspect": {
         "json": {
-            "path": []
+            "path": [
+                {
+                    "id": "urn:li:container:cd80a14f68954b355e7511ec1d4ee7e0",
+                    "urn": "urn:li:container:cd80a14f68954b355e7511ec1d4ee7e0"
+                }
+            ]
         }
     },
     "systemMetadata": {
-        "lastObserved": 1710266400757,
+        "lastObserved": 1710266400683,
         "runId": "microstrategy-mock-test",
         "lastRunId": "no-run-id-provided"
     }
@@ -520,6 +562,22 @@
     },
     "systemMetadata": {
         "lastObserved": 1710266400918,
+        "runId": "microstrategy-mock-test",
+        "lastRunId": "no-run-id-provided"
+    }
+},
+{
+    "entityType": "dataset",
+    "entityUrn": "urn:li:dataset:(urn:li:dataPlatform:microstrategy,AABBCCDD1234567890AABBCCDD123456.CC001122334455667788990011223344,PROD)",
+    "changeType": "UPSERT",
+    "aspectName": "container",
+    "aspect": {
+        "json": {
+            "container": "urn:li:container:cd80a14f68954b355e7511ec1d4ee7e0"
+        }
+    },
+    "systemMetadata": {
+        "lastObserved": 1710266400686,
         "runId": "microstrategy-mock-test",
         "lastRunId": "no-run-id-provided"
     }
@@ -643,11 +701,16 @@
     "aspectName": "browsePathsV2",
     "aspect": {
         "json": {
-            "path": []
+            "path": [
+                {
+                    "id": "urn:li:container:cd80a14f68954b355e7511ec1d4ee7e0",
+                    "urn": "urn:li:container:cd80a14f68954b355e7511ec1d4ee7e0"
+                }
+            ]
         }
     },
     "systemMetadata": {
-        "lastObserved": 1710266400760,
+        "lastObserved": 1710266400687,
         "runId": "microstrategy-mock-test",
         "lastRunId": "no-run-id-provided"
     }
@@ -729,6 +792,22 @@
     "entityType": "dataset",
     "entityUrn": "urn:li:dataset:(urn:li:dataPlatform:microstrategy,AABBCCDD1234567890AABBCCDD123456.DATSET001122334455667788990011,PROD)",
     "changeType": "UPSERT",
+    "aspectName": "container",
+    "aspect": {
+        "json": {
+            "container": "urn:li:container:cd80a14f68954b355e7511ec1d4ee7e0"
+        }
+    },
+    "systemMetadata": {
+        "lastObserved": 1710266400691,
+        "runId": "microstrategy-mock-test",
+        "lastRunId": "no-run-id-provided"
+    }
+},
+{
+    "entityType": "dataset",
+    "entityUrn": "urn:li:dataset:(urn:li:dataPlatform:microstrategy,AABBCCDD1234567890AABBCCDD123456.DATSET001122334455667788990011,PROD)",
+    "changeType": "UPSERT",
     "aspectName": "ownership",
     "aspect": {
         "json": {
@@ -758,11 +837,16 @@
     "aspectName": "browsePathsV2",
     "aspect": {
         "json": {
-            "path": []
+            "path": [
+                {
+                    "id": "urn:li:container:cd80a14f68954b355e7511ec1d4ee7e0",
+                    "urn": "urn:li:container:cd80a14f68954b355e7511ec1d4ee7e0"
+                }
+            ]
         }
     },
     "systemMetadata": {
-        "lastObserved": 1710266400762,
+        "lastObserved": 1710266400692,
         "runId": "microstrategy-mock-test",
         "lastRunId": "no-run-id-provided"
     }

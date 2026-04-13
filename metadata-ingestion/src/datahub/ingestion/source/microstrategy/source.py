@@ -313,6 +313,31 @@ class _CubePrefetch(NamedTuple):
     cube_data: Optional[Dict[str, Any]]
 
 
+class _DashboardPrefetch(NamedTuple):
+    """Pre-fetched API results for a single dashboard (fetched in parallel).
+
+    definition: The dashboard/document definition dict. None on failure.
+    per_dataset_tables: Mapping of embedded dataset name → warehouse table URNs.
+        Only populated when include_warehouse_lineage is enabled.
+    """
+
+    definition: Optional[Dict[str, Any]]
+    per_dataset_tables: Optional[Dict[str, List[str]]]
+
+
+class _ReportPrefetch(NamedTuple):
+    """Pre-fetched API results for a single report (fetched in parallel).
+
+    definition: The full report definition dict (from GET /api/v2/reports/{id}).
+        None when include_report_definitions is disabled or on failure.
+    warehouse_lineage: Warehouse lineage result (upstream URNs + SQL).
+        None when include_warehouse_lineage is disabled or on failure.
+    """
+
+    definition: Optional[Dict[str, Any]]
+    warehouse_lineage: Optional["ReportLineageResult"]
+
+
 def _extract_tables_from_sql(sql: str) -> List[str]:
     """
     Parse source warehouse table names from MicroStrategy-generated SQL.
@@ -381,6 +406,43 @@ def _extract_tables_from_sql(sql: str) -> List[str]:
             ):
                 tables.add(bare)
     return sorted(tables)
+
+
+def _parse_connection_string_param(conn_str: str, *param_names: str) -> Optional[str]:
+    """
+    Extract a named parameter from a JDBC or ODBC connection string.
+
+    Handles key=value patterns separated by ``&``, ``;``, or ``,``:
+      - ODBC:  ``DATABASE=MY_DB;HOSTNAME=...``
+      - Snowflake JDBC:  ``?db=MY_DB&schema=XRBIA_DM&role=MY_ROLE``
+      - Generic:  ``catalog=MY_DB``
+
+    *param_names* are tried in order; the first match wins.
+    """
+    if not conn_str:
+        return None
+    # Build alternation from caller-supplied names, e.g. "DATABASE|databaseName|db|catalog"
+    alt = "|".join(re.escape(n) for n in param_names)
+    m = re.search(
+        rf"(?:{alt})\s*=\s*([^;&,\s}}]+)",
+        conn_str,
+        re.IGNORECASE,
+    )
+    return m.group(1) if m else None
+
+
+def _parse_database_from_connection_string(conn_str: str) -> Optional[str]:
+    """Extract the database/catalog name from a connection string."""
+    return _parse_connection_string_param(
+        conn_str, "DATABASE", "databaseName", "db", "catalog"
+    )
+
+
+def _parse_schema_from_connection_string(conn_str: str) -> Optional[str]:
+    """Extract the schema name from a connection string."""
+    return _parse_connection_string_param(
+        conn_str, "schema", "currentSchema", "CURRENT_SCHEMA", "searchpath"
+    )
 
 
 def _is_iserver_error(response_body: Dict[str, Any], code: int) -> bool:
@@ -493,6 +555,12 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
         # _detect_warehouse_platform().  Used instead of the removed
         # warehouse_lineage_platform config field.
         self._warehouse_platform: Optional[str] = None
+
+        # Auto-detected warehouse database/schema from connection strings.
+        # Populated alongside _warehouse_platform, used by _qualify_table_name
+        # when the corresponding config fields are not explicitly set.
+        self._detected_database: Optional[str] = None
+        self._detected_schema: Optional[str] = None
 
         # Dashboard-driven scoping: IDs of cubes/reports referenced by matched dashboards.
         # Populated during dashboard processing; consumed by cube/report yield methods.
@@ -640,6 +708,9 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 platform,
             )
             self._warehouse_platform = platform
+            # Auto-detect database from connection string if not manually configured
+            if not self.config.warehouse_lineage_database:
+                self._detect_database_from_datasources(proj_dss, platform)
             return True
         if real:
             logger.info(
@@ -741,6 +812,70 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 exc=e,
             )
         return False
+
+    def _detect_database_from_datasources(
+        self,
+        datasources: List[Dict[str, Any]],
+        target_platform: str,
+    ) -> None:
+        """
+        Extract database and schema from datasource connection strings.
+
+        Called after platform detection succeeds. Iterates datasources matching
+        the detected platform, fetches their JDBC/ODBC connection string via
+        GET /api/datasources/connections/{id}, and parses out the database
+        (``db=``, ``DATABASE=``) and schema (``schema=``, ``currentSchema=``).
+
+        Sets ``_detected_database`` and ``_detected_schema`` on success.
+        """
+        if self._detected_database and self._detected_schema:
+            return
+        for ds in datasources:
+            db_info = ds.get("database", {})
+            db_type = db_info.get("type", "")
+            dbms_name = ds.get("dbms", {}).get("name", "")
+            platform = _mstr_dbtype_to_platform(db_type, dbms_name)
+            if platform != target_platform:
+                continue
+            conn_ref = db_info.get("connection", {})
+            conn_id = conn_ref.get("id")
+            if not conn_id:
+                continue
+            conn_obj = self.client.get_datasource_connection(conn_id)
+            conn_str = conn_obj.get("connectionString", "")
+            if not conn_str:
+                continue
+            ds_name = ds.get("name", "?")
+            conn_name = conn_ref.get("name", conn_id)
+
+            if not self._detected_database:
+                db_name = _parse_database_from_connection_string(conn_str)
+                if db_name:
+                    self._detected_database = db_name
+                    logger.info(
+                        "Warehouse database auto-detected from connection string "
+                        "(datasource '%s', connection '%s'): %s",
+                        ds_name,
+                        conn_name,
+                        db_name,
+                    )
+            if not self._detected_schema:
+                schema = _parse_schema_from_connection_string(conn_str)
+                if schema:
+                    self._detected_schema = schema
+                    logger.info(
+                        "Warehouse schema auto-detected from connection string "
+                        "(datasource '%s', connection '%s'): %s",
+                        ds_name,
+                        conn_name,
+                        schema,
+                    )
+            if self._detected_database:
+                return
+        logger.debug(
+            "Could not auto-detect warehouse database from %d datasource connection(s).",
+            len(datasources),
+        )
 
     def _resolve_datasource_via_model_tables(
         self, table_name: str, project_id: str
@@ -909,6 +1044,10 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
         if self.config.include_warehouse_lineage:
             self._detect_warehouse_platform(project_id=project_id)
 
+        # Pre-warm expression cache for field formulas before processing entities.
+        # Uses thread pool to fetch all unique attr/metric expressions in parallel.
+        self._warm_expression_cache(project_id)
+
         if self._dashboard_driven_mode():
             logger.info(
                 "Dashboard-driven mode active for %s: cubes and reports will be scoped "
@@ -959,6 +1098,55 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 "folder-fetch-failed", context=project_name, exc=e
             )
 
+    def _prefetch_dashboard(
+        self, dashboard: Dict[str, Any], project: Dict[str, Any]
+    ) -> _DashboardPrefetch:
+        """Fetch definition + warehouse SQL for one dashboard (called from thread pool)."""
+        project_id = project["id"]
+        is_legacy = dashboard.get("subtype") == SUBTYPE_LEGACY_DOCUMENT
+
+        definition: Optional[Dict[str, Any]] = None
+        if self.config.include_lineage:
+            try:
+                if is_legacy:
+                    definition = self.client.get_document_definition(
+                        dashboard["id"], project_id
+                    )
+                else:
+                    definition = self.client.get_dossier_definition(
+                        dashboard["id"], project_id
+                    )
+            except Exception as e:
+                logger.warning(
+                    "Could not prefetch definition for dashboard %s: %s",
+                    dashboard.get("name"),
+                    e,
+                )
+
+        per_dataset_tables: Optional[Dict[str, List[str]]] = None
+        if (
+            definition
+            and self.config.include_lineage
+            and self.config.include_warehouse_lineage
+        ):
+            try:
+                per_dataset_tables = self._fetch_per_dataset_tables(
+                    dashboard["id"],
+                    project_id,
+                    dashboard.get("name", dashboard["id"]),
+                    is_legacy=is_legacy,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Could not prefetch warehouse tables for dashboard %s: %s",
+                    dashboard.get("name"),
+                    e,
+                )
+
+        return _DashboardPrefetch(
+            definition=definition, per_dataset_tables=per_dataset_tables
+        )
+
     def _yield_dashboard_workunits(
         self,
         project: Dict[str, Any],
@@ -977,17 +1165,64 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 project_name,
                 len(all_type55) - len(dashboards),
             )
+
+            matched_dashboards = []
             for dashboard in dashboards:
                 dashboard_name = dashboard.get("name", "")
                 if self.config.dashboard_pattern.allowed(dashboard_name):
-                    yield from self._process_dashboard(dashboard, project)
+                    matched_dashboards.append(dashboard)
                 else:
                     self.report.report_dropped(dashboard_name)
+
+            # Pre-fetch definitions + warehouse SQL for all matched dashboards
+            # concurrently to reduce wall-clock time.
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=self.config.max_workers
+            ) as executor:
+                prefetches = list(
+                    executor.map(
+                        lambda d: self._prefetch_dashboard(d, project),
+                        matched_dashboards,
+                    )
+                )
+
+            for dashboard, prefetch in zip(matched_dashboards, prefetches, strict=True):
+                yield from self._process_dashboard(
+                    dashboard, project, prefetch=prefetch
+                )
         except Exception as e:
             logger.warning("Failed to get dashboards for %s: %s", project_name, e)
             self.report.report_warning(
                 "dashboard-fetch-failed", context=project_name, exc=e
             )
+
+    def _prefetch_report(
+        self, report: Dict[str, Any], project: Dict[str, Any]
+    ) -> _ReportPrefetch:
+        """Fetch definition + warehouse lineage for one report (called from thread pool)."""
+        project_id = project["id"]
+        report_id = report["id"]
+        name = report.get("name", report_id)
+
+        definition: Optional[Dict[str, Any]] = None
+        if self.config.include_report_definitions:
+            try:
+                definition = self.client.get_report(report_id, project_id)
+            except Exception as e:
+                logger.warning("Could not prefetch report %s: %s", name, e)
+
+        warehouse: Optional[ReportLineageResult] = None
+        if self.config.include_lineage and self.config.include_warehouse_lineage:
+            try:
+                warehouse = self._get_report_warehouse_upstreams(
+                    report_id, project_id, name
+                )
+            except Exception as e:
+                logger.warning(
+                    "Could not prefetch warehouse lineage for report %s: %s", name, e
+                )
+
+        return _ReportPrefetch(definition=definition, warehouse_lineage=warehouse)
 
     def _yield_report_workunits(
         self,
@@ -999,13 +1234,10 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
             reports = list(self.client.search_objects(project_id, object_type=3))
             logger.info("Found %s reports in %s", len(reports), project_name)
             driven = self._dashboard_driven_mode()
-            matched = 0
+
+            matched_reports = []
             for report in reports:
                 if driven:
-                    # Dashboard-driven: only process reports referenced by matched dashboards.
-                    # Skip IDs that belong to embedded legacy document datasets — those already
-                    # have named stubs and consolidated lineage; full report processing would
-                    # incorrectly populate chartInfo.inputs with warehouse table URNs.
                     if report["id"] not in self._dashboard_referenced_ids:
                         continue
                     if report["id"] in self._document_embedded_ids:
@@ -1013,12 +1245,27 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 elif not self.config.report_pattern.allowed(report.get("name", "")):
                     self.report.report_dropped(report.get("name", report["id"]))
                     continue
-                matched += 1
-                yield from self._process_report(report, project)
+                matched_reports.append(report)
+
+            # Pre-fetch definitions + warehouse lineage for all matched reports
+            # concurrently to reduce wall-clock time.
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=self.config.max_workers
+            ) as executor:
+                prefetches = list(
+                    executor.map(
+                        lambda r: self._prefetch_report(r, project),
+                        matched_reports,
+                    )
+                )
+
+            for report, prefetch in zip(matched_reports, prefetches, strict=True):
+                yield from self._process_report(report, project, prefetch=prefetch)
+
             if driven:
                 logger.info(
                     "Dashboard-driven: ingested %s of %s reports (referenced by matched dashboards)",
-                    matched,
+                    len(matched_reports),
                     len(reports),
                 )
         except Exception as e:
@@ -1180,7 +1427,10 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
     # ── Dashboard processing ──────────────────────────────────────────────────
 
     def _process_dashboard(
-        self, dashboard: Dict[str, Any], project: Dict[str, Any]
+        self,
+        dashboard: Dict[str, Any],
+        project: Dict[str, Any],
+        prefetch: Optional[_DashboardPrefetch] = None,
     ) -> Iterable[Union[MetadataWorkUnit, Entity]]:
         """
         Process dashboard or document.
@@ -1189,6 +1439,9 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
           14081 (legacy document) → /api/documents/{id}/definition  → datasets[]
           14336 (modern dossier)  → /api/v2/dossiers/{id}/definition → chapters[].pages[].visualizations[]
           Other                   → try dossier endpoint as default
+
+        When prefetch is provided, uses the pre-fetched definition and warehouse
+        table mapping instead of making live API calls.
         """
         project_id = project["id"]
         subtype = dashboard.get("subtype", 0)
@@ -1212,31 +1465,37 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
         embedded_datasets: List[Dict[str, Any]] = []
 
         if self.config.include_lineage:
-            try:
-                if is_legacy:
-                    defn = self.client.get_document_definition(
-                        dashboard["id"], project_id
+            # Use prefetched definition when available, otherwise fetch live
+            defn: Optional[Dict[str, Any]] = prefetch.definition if prefetch else None
+            if defn is None and prefetch is None:
+                try:
+                    if is_legacy:
+                        defn = self.client.get_document_definition(
+                            dashboard["id"], project_id
+                        )
+                    else:
+                        defn = self.client.get_dossier_definition(
+                            dashboard["id"], project_id
+                        )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to get definition for %s (%s): %s",
+                        dashboard.get("name"),
+                        subtype,
+                        e,
                     )
+                    self.report.report_warning(
+                        "dashboard-definition-failed",
+                        context=f"{dashboard.get('name')} (subtype={subtype})",
+                        exc=e,
+                    )
+            if defn:
+                if is_legacy:
                     doc_extraction = self._extract_viz_ids_from_document(defn)
                     chart_urns = doc_extraction.chart_urns
                     embedded_datasets = doc_extraction.datasets
                 else:
-                    defn = self.client.get_dossier_definition(
-                        dashboard["id"], project_id
-                    )
                     chart_urns = self._extract_viz_ids_from_dossier(defn)
-            except Exception as e:
-                logger.warning(
-                    "Failed to get definition for %s (%s): %s",
-                    dashboard.get("name"),
-                    subtype,
-                    e,
-                )
-                self.report.report_warning(
-                    "dashboard-definition-failed",
-                    context=f"{dashboard.get('name')} (subtype={subtype})",
-                    exc=e,
-                )
 
         dash_props = self._build_common_custom_props(dashboard, project)
         dash_props["dashboard_id"] = dashboard["id"]
@@ -1266,19 +1525,18 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
             charts=chart_urns,
             dashboard_url=self._build_dashboard_url(dashboard["id"], project_id),
             custom_properties=dash_props,
-            parent_container=self._project_key(project).as_urn(),
+            parent_container=self._project_key(project),
             owners=owners,
             created_at=self._parse_datetime(dashboard.get("dateCreated")),
             last_modified=self._parse_datetime(dashboard.get("dateModified")),
             extra_aspects=extra_aspects,
         )
 
-        # For legacy documents and modern dossiers, fetch warehouse lineage per embedded
-        # dataset and store as a name→tables map so stubs can set inputs[] directly.
-        # This replaces the synthetic __datasource entity — each chart stub now carries its
-        # own specific warehouse tables, matching the standard DataHub BI connector pattern.
+        # Use prefetched warehouse lineage tables when available, otherwise fetch live.
         per_dataset_tables: Dict[str, List[str]] = {}
-        if (
+        if prefetch and prefetch.per_dataset_tables is not None:
+            per_dataset_tables = prefetch.per_dataset_tables
+        elif (
             (is_legacy or is_modern)
             and self.config.include_lineage
             and self.config.include_warehouse_lineage
@@ -1449,39 +1707,24 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 "source": "embedded_document_dataset",
             },
             subtype="Dataset",
-            parent_container=self._project_key(project).as_urn(),
+            parent_container=self._project_key(project),
             extra_aspects=extra_aspects,
         )
 
     # ── Report processing ─────────────────────────────────────────────────────
 
-    def _process_report(
-        self, report: Dict[str, Any], project: Dict[str, Any]
-    ) -> Iterable[Union[MetadataWorkUnit, Entity]]:
-        """
-        Process a report (emitted as a DataHub chart entity).
-
-        When include_report_definitions is true, fetches the full report definition
-        (GET /api/v2/reports/{id}) to unlock:
-          - dataSource.id  → report→cube lineage (the missing registry edge)
-          - availableObjects → report schema (attributes and metrics used)
-          - prompts / filter → enriched customProperties
-          - richer description from the full definition
-
-        The definition fetch is one extra API call per matched report, so this flag
-        defaults to false and should only be enabled for scoped runs.
-        """
-        chart_urn = make_chart_urn(
-            platform=self.platform,
-            name=report["id"],
-            platform_instance=self.config.platform_instance,
-        )
-
-        # Optionally fetch full report definition
-        report_defn: Optional[Dict[str, Any]] = None
+    def _resolve_report_definition(
+        self,
+        report: Dict[str, Any],
+        project: Dict[str, Any],
+        prefetch: Optional[_ReportPrefetch],
+    ) -> Optional[Dict[str, Any]]:
+        """Return the full report definition (prefetched or live-fetched)."""
+        if prefetch and prefetch.definition is not None:
+            return prefetch.definition
         if self.config.include_report_definitions:
             try:
-                report_defn = self.client.get_report(report["id"], project["id"])
+                return self.client.get_report(report["id"], project["id"])
             except Exception as e:
                 logger.warning(
                     "Could not fetch definition for report %s: %s",
@@ -1493,6 +1736,75 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                     context=report.get("name", report["id"]),
                     exc=e,
                 )
+        return None
+
+    def _resolve_report_lineage(
+        self,
+        report: Dict[str, Any],
+        project: Dict[str, Any],
+        report_defn: Optional[Dict[str, Any]],
+        prefetch: Optional[_ReportPrefetch],
+    ) -> tuple:
+        """Return (inputs, sql_for_column_lineage) for a report."""
+        inputs: List[str] = []
+        sql_for_column_lineage: Optional[str] = None
+
+        if not self.config.include_lineage:
+            return inputs, sql_for_column_lineage
+
+        source_for_registry = report_defn if report_defn else report
+        registry_inputs = self._get_report_registry_inputs(source_for_registry, project)
+        inputs.extend(registry_inputs)
+
+        # Dashboard-driven: register the referenced cube/dataset
+        if self._dashboard_driven_mode() and registry_inputs:
+            source_id = source_for_registry.get("dataSource", {}).get(
+                "id"
+            ) or source_for_registry.get("sourceId")
+            if source_id:
+                self._dashboard_referenced_ids.add(source_id)
+
+        # Warehouse lineage: prefetched or live-fetched
+        if not registry_inputs:
+            if prefetch and prefetch.warehouse_lineage is not None:
+                rlu = prefetch.warehouse_lineage
+                inputs.extend(rlu.upstream_urns)
+                sql_for_column_lineage = rlu.sql
+            elif self.config.include_warehouse_lineage:
+                rlu = self._get_report_warehouse_upstreams(
+                    report["id"], project["id"], report.get("name", "")
+                )
+                inputs.extend(rlu.upstream_urns)
+                sql_for_column_lineage = rlu.sql
+
+        return inputs, sql_for_column_lineage
+
+    def _process_report(
+        self,
+        report: Dict[str, Any],
+        project: Dict[str, Any],
+        prefetch: Optional[_ReportPrefetch] = None,
+    ) -> Iterable[Union[MetadataWorkUnit, Entity]]:
+        """
+        Process a report (emitted as a DataHub chart entity).
+
+        When include_report_definitions is true, fetches the full report definition
+        (GET /api/v2/reports/{id}) to unlock:
+          - dataSource.id  → report→cube lineage (the missing registry edge)
+          - availableObjects → report schema (attributes and metrics used)
+          - prompts / filter → enriched customProperties
+          - richer description from the full definition
+
+        When prefetch is provided, uses the pre-fetched definition and warehouse
+        lineage instead of making live API calls.
+        """
+        chart_urn = make_chart_urn(
+            platform=self.platform,
+            name=report["id"],
+            platform_instance=self.config.platform_instance,
+        )
+
+        report_defn = self._resolve_report_definition(report, project, prefetch)
 
         # Merge: full definition fields override shallow search-result fields where available
         effective = {**report}
@@ -1501,34 +1813,9 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 report_defn.get("description") or report.get("description") or ""
             )
 
-        inputs: List[str] = []
-        sql_for_column_lineage: Optional[str] = None
-
-        if self.config.include_lineage:
-            # When we have the full definition, dataSource.id is reliably populated
-            source_for_registry = report_defn if report_defn else report
-            registry_inputs = self._get_report_registry_inputs(
-                source_for_registry, project
-            )
-            inputs.extend(registry_inputs)
-
-            # Dashboard-driven: register the referenced cube/dataset so _yield_cube_workunits
-            # (which runs after report processing) includes it even if not directly linked
-            # from a dashboard.
-            if self._dashboard_driven_mode() and registry_inputs:
-                source_id = source_for_registry.get("dataSource", {}).get(
-                    "id"
-                ) or source_for_registry.get("sourceId")
-                if source_id:
-                    self._dashboard_referenced_ids.add(source_id)
-
-            # Fall back to warehouse lineage via sqlView for live reports (no cube backing)
-            if self.config.include_warehouse_lineage and not registry_inputs:
-                rlu = self._get_report_warehouse_upstreams(
-                    report["id"], project["id"], report.get("name", "")
-                )
-                inputs.extend(rlu.upstream_urns)
-                sql_for_column_lineage = rlu.sql
+        inputs, sql_for_column_lineage = self._resolve_report_lineage(
+            report, project, report_defn, prefetch
+        )
 
         # Build enriched customProperties
         subtype = report.get("subtype", 0)
@@ -1587,7 +1874,7 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
             chart_url=self._build_report_url(report["id"], project["id"]),
             custom_properties=custom_props,
             subtype=self._report_subtype_name(subtype),
-            parent_container=self._project_key(project).as_urn(),
+            parent_container=self._project_key(project),
             owners=owners,
             created_at=self._parse_datetime(effective.get("dateCreated")),
             last_modified=self._parse_datetime(effective.get("dateModified")),
@@ -1759,7 +2046,7 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
             description=cube.get("description"),
             custom_properties=cube_props,
             subtype="Intelligent Cube",
-            parent_container=self._project_key(project).as_urn(),
+            parent_container=self._project_key(project),
             schema=schema_metadata,
             upstreams=upstreams,
             owners=owners,
@@ -1890,6 +2177,73 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 native_data_type=f"attribute:{form_cat}" if form_cat else "attribute",
                 form_cat=form_cat,
             )
+
+    def _warm_expression_cache(self, project_id: str) -> None:
+        """Pre-fetch attribute and metric expressions in parallel.
+
+        Collects unique attr/metric IDs from all cubes in this project (via
+        the cube schemas already fetched during _build_registries), then fetches
+        their expressions concurrently. After warming, _build_input_fields will
+        hit the cache and make zero API calls.
+
+        Only effective when include_field_formulas is true and cubes have been
+        fetched (include_cubes=true). Falls back to lazy fetching otherwise.
+        """
+        if not self.config.include_field_formulas:
+            return
+
+        # Collect unique attr/metric IDs from cubes in this project
+        fetch_tasks: List[tuple] = []
+        seen_keys: Set[str] = set()
+        for cube in self._cubes_by_project.get(project_id, []):
+            avail = cube.get("definition", {}).get("availableObjects", {})
+            if not avail:
+                avail = cube.get("availableObjects", {})
+            for attr in avail.get("attributes", []):
+                attr_id = attr.get("id", "")
+                if attr_id:
+                    key = f"attr:{project_id}:{attr_id}"
+                    if key not in self._expr_cache and key not in seen_keys:
+                        seen_keys.add(key)
+                        fetch_tasks.append((key, "attr", attr_id))
+            for metric in avail.get("metrics", []):
+                metric_id = metric.get("id", "")
+                if metric_id:
+                    key = f"metric:{project_id}:{metric_id}"
+                    if key not in self._expr_cache and key not in seen_keys:
+                        seen_keys.add(key)
+                        fetch_tasks.append((key, "metric", metric_id))
+
+        if not fetch_tasks:
+            return
+
+        logger.info(
+            "Pre-warming expression cache: %s unique formulas for project %s",
+            len(fetch_tasks),
+            project_id,
+        )
+
+        def _fetch_one(
+            task: tuple,
+        ) -> tuple:
+            key, kind, obj_id = task
+            try:
+                if kind == "attr":
+                    val = self.client.get_attribute_expression(obj_id, project_id) or ""
+                else:
+                    val = self.client.get_metric_expression(obj_id, project_id) or ""
+            except Exception as e:
+                logger.debug("Failed to fetch %s expression %s: %s", kind, obj_id, e)
+                val = ""
+            return (key, val)
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=self.config.max_workers
+        ) as executor:
+            for key, val in executor.map(_fetch_one, fetch_tasks):
+                self._expr_cache[key] = val
+
+        logger.info("Expression cache warmed: %s entries", len(self._expr_cache))
 
     def _build_input_fields(
         self,
@@ -2093,7 +2447,7 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                 "dataset_id": dataset["id"],
             },
             subtype="Dataset",
-            parent_container=self._project_key(project).as_urn(),
+            parent_container=self._project_key(project),
             owners=owners,
             extra_aspects=[StatusClass(removed=False)],
         )
@@ -2128,13 +2482,34 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
 
     def _qualify_table_name(self, table: str) -> str:
         """
-        Optionally prepend configured database/schema to bare table names.
-        If table already has a schema prefix (contains '.'), leave it alone.
+        Qualify parsed table names to the depth expected by DataHub URNs.
+
+        MicroStrategy SQL typically produces 2-part names (SCHEMA.TABLE) but
+        platforms like Snowflake need 3-part (DATABASE.SCHEMA.TABLE) for URNs
+        to match assets already ingested from the warehouse connector.
+
+        Logic by part count:
+          1-part (TABLE)              → prepend db.schema / schema as available
+          2-part (SCHEMA.TABLE)       → prepend db if configured
+          3-part+ (DB.SCHEMA.TABLE)   → already fully qualified, return as-is
         """
-        if "." in table:
+        parts = table.split(".")
+        db = (
+            self.config.warehouse_lineage_database or self._detected_database or ""
+        ).strip()
+        schema = (
+            self.config.warehouse_lineage_schema or self._detected_schema or ""
+        ).strip()
+
+        if len(parts) >= 3:
+            # Already fully qualified
             return table
-        db = (self.config.warehouse_lineage_database or "").strip()
-        schema = (self.config.warehouse_lineage_schema or "").strip()
+        if len(parts) == 2:
+            # Has schema.table — prepend database if configured
+            if db:
+                return f"{db}.{table}"
+            return table
+        # Bare table name
         if db and schema:
             return f"{db}.{schema}.{table}"
         if schema:
