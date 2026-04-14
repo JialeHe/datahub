@@ -266,17 +266,23 @@ jobs:
       - name: Collect image references from bake spec
         id: collect-images
         shell: bash
+        env:
+          BAKE_SPEC: ${{ github.workspace }}/build/bake-spec-quickstart.json
         run: |
-          BAKE_SPEC="${{ github.workspace }}/build/bake-spec-quickstart.json"
-
-          # Extract all image:tag references from the bake spec and filter by the target tag.
+          # Extract all image:tag references from the bake spec.
           # Plain jq is used here instead of 'depot bake --print' since the spec is already
           # resolved JSON — no depot CLI dependency needed in this action.
-          images="$(jq -cr '.target[].tags[]' "${BAKE_SPEC}" \
-            | tr '\n' ' ')"
+          images="$(docker bake -f "$BAKE_SPEC" --print | jq -r '.target | to_entries[].value.tags[]')"
 
-          echo "Collected images: ${images}" | tee >> "$GITHUB_STEP_SUMMARY"
-          echo "built_images=${images}" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Built Images"
+            echo ""
+            echo "$images" | while IFS= read -r image; do
+              echo "- \`$image\`"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "built_images=$(echo "$images" | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
 
       - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         if: ${{ github.ref == 'refs/heads/master' }}
