@@ -571,9 +571,13 @@ class SnowflakeUsageExtractor(SnowflakeCommonMixin, Closeable):
         return any([obj.get(key) is not None for key in unsupported_keys])
 
     def _is_object_valid(self, obj: Dict[str, Any]) -> bool:
-        if self._is_unsupported_object_accessed(
-            obj
-        ) or not self.filter.is_dataset_pattern_allowed(
+        if self._is_unsupported_object_accessed(obj):
+            return False
+        # Objects without an objectName (e.g. Sequences) cannot be mapped to a
+        # dataset URN and would fail SnowflakeObjectAccessEntry validation.
+        if not obj.get("objectName"):
+            return False
+        if not self.filter.is_dataset_pattern_allowed(
             obj.get("objectName"), obj.get("objectDomain")
         ):
             return False
