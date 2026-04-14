@@ -315,10 +315,7 @@ jobs:
           BAKE_SPEC: ${{ github.workspace }}/build/bake-spec-quickstart.json
         run: |
           # Extract all image:tag references from the bake spec.
-          # Plain jq is used here instead of 'depot bake --print' since the spec is already
-          # resolved JSON — no depot CLI dependency needed in this action.
-          images="$(docker bake -f "$BAKE_SPEC" --print | jq -r '.target | to_entries[].value.tags[]')"
-
+          images="$(docker buildx bake -f "$BAKE_SPEC" --print | jq -r '.target | to_entries[].value.tags[]')"
           {
             echo "## Built Images"
             echo ""
