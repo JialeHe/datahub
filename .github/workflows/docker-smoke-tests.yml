@@ -261,13 +261,13 @@ jobs:
           name: build-metadata-${{ needs.setup-smoke-test.outputs.tag }}
           path: |
             ${{ github.workspace }}/build/build-metadata.json
-            ${{ github.workspace }}/build/bake-spec-allImages.json
+            ${{ github.workspace }}/build/bake-spec-quickstart.json
 
       - name: Collect image references from bake spec
         id: collect-images
         shell: bash
         run: |
-          BAKE_SPEC="${{ github.workspace }}/build/bake-spec-allImages.json"
+          BAKE_SPEC="${{ github.workspace }}/build/bake-spec-quickstart.json"
 
           # Extract all image:tag references from the bake spec and filter by the target tag.
           # Plain jq is used here instead of 'depot bake --print' since the spec is already
@@ -727,7 +727,7 @@ jobs:
   #       if: ${{ steps.tests_passed.outputs.tests_passed == 'true' && needs.setup-smoke-test.outputs.use_depot_cache == 'true' && needs.setup-smoke-test.outputs.publish == 'true' }}
   #       run: |
   #         set -euo pipefail
-  #         depot bake -f "${{ github.workspace }}/build/bake-spec-allImages.json" --print | jq -c '.target | to_entries | map({target: .key, tags: .value.tags[]})'| jq -c '.[]' | while IFS= read -r line; do
+  #         depot bake -f "${{ github.workspace }}/build/bake-spec-quickstart.json" --print | jq -c '.target | to_entries | map({target: .key, tags: .value.tags[]})'| jq -c '.[]' | while IFS= read -r line; do
   #           TARGET=$(echo "$line" | jq -r '.target')
   #           TAG=$(echo "$line" | jq -r '.tags')
   #           depot push --project "${{ env.DEPOT_PROJECT_ID }}" "${{ needs.build_quickstart_images.outputs.build_id }}" --target "$TARGET" --tag "$TAG"
