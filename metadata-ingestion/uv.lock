@@ -24,6 +24,8 @@ dependencies = [
     { name = "aiohttp" },
     { name = "avro" },
     { name = "avro-gen3" },
+    { name = "boto3" },
+    { name = "botocore" },
     { name = "cached-property" },
     { name = "click" },
     { name = "click-default-group" },
@@ -31,6 +33,7 @@ dependencies = [
     { name = "deprecated" },
     { name = "docker" },
     { name = "expandvars" },
+    { name = "google-cloud-secret-manager" },
     { name = "humanfriendly" },
     { name = "ijson" },
     { name = "jsonref" },
@@ -94,7 +97,6 @@ all = [
     { name = "azure-mgmt-datafactory" },
     { name = "azure-storage-blob" },
     { name = "azure-storage-file-datalake" },
-    { name = "boto3" },
     { name = "botocore" },
     { name = "cachetools" },
     { name = "cassandra-driver" },
@@ -359,7 +361,6 @@ cloud = [
 cockroachdb = [
     { name = "acryl-datahub-classify" },
     { name = "acryl-great-expectations" },
-    { name = "boto3" },
     { name = "botocore" },
     { name = "cachetools" },
     { name = "geoalchemy2" },
@@ -382,7 +383,6 @@ cockroachdb = [
 ]
 confluence = [
     { name = "atlassian-python-api" },
-    { name = "boto3" },
     { name = "botocore" },
     { name = "jsonpath-ng" },
     { name = "litellm" },
@@ -439,7 +439,6 @@ datahub-debug = [
     { name = "requests" },
 ]
 datahub-documents = [
-    { name = "boto3" },
     { name = "botocore" },
     { name = "jsonpath-ng" },
     { name = "litellm" },
@@ -487,7 +486,6 @@ db2 = [
     { name = "traitlets" },
 ]
 dbt = [
-    { name = "boto3" },
     { name = "botocore" },
     { name = "more-itertools" },
     { name = "patchy" },
@@ -514,7 +512,6 @@ delta-lake = [
     { name = "azure-identity" },
     { name = "azure-storage-blob" },
     { name = "azure-storage-file-datalake" },
-    { name = "boto3" },
     { name = "botocore" },
     { name = "cachetools" },
     { name = "deltalake" },
@@ -586,6 +583,7 @@ dev = [
     { name = "google-cloud-dataplex" },
     { name = "google-cloud-logging" },
     { name = "google-cloud-resource-manager" },
+    { name = "google-cloud-secret-manager" },
     { name = "graphql-core" },
     { name = "greenlet" },
     { name = "grpcio" },
@@ -778,6 +776,7 @@ docs = [
     { name = "google-cloud-dataplex" },
     { name = "google-cloud-logging" },
     { name = "google-cloud-resource-manager" },
+    { name = "google-cloud-secret-manager" },
     { name = "graphql-core" },
     { name = "greenlet" },
     { name = "grpcio" },
@@ -917,7 +916,6 @@ docs = [
 doris = [
     { name = "acryl-datahub-classify" },
     { name = "acryl-great-expectations" },
-    { name = "boto3" },
     { name = "botocore" },
     { name = "cachetools" },
     { name = "greenlet" },
@@ -976,7 +974,6 @@ druid = [
 ]
 dynamodb = [
     { name = "acryl-datahub-classify" },
-    { name = "boto3" },
     { name = "botocore" },
     { name = "numpy" },
     { name = "pip" },
@@ -992,7 +989,6 @@ excel = [
     { name = "azure-identity" },
     { name = "azure-storage-blob" },
     { name = "azure-storage-file-datalake" },
-    { name = "boto3" },
     { name = "botocore" },
     { name = "cachetools" },
     { name = "more-itertools" },
@@ -1056,7 +1052,6 @@ flink = [
     { name = "tenacity" },
 ]
 gcs = [
-    { name = "boto3" },
     { name = "botocore" },
     { name = "cachetools" },
     { name = "more-itertools" },
@@ -1072,7 +1067,6 @@ gcs = [
     { name = "wcmatch" },
 ]
 gcs-slim = [
-    { name = "boto3" },
     { name = "botocore" },
     { name = "cachetools" },
     { name = "more-itertools" },
@@ -1086,7 +1080,6 @@ gcs-slim = [
     { name = "wcmatch" },
 ]
 glue = [
-    { name = "boto3" },
     { name = "botocore" },
     { name = "cachetools" },
     { name = "patchy" },
@@ -1168,7 +1161,6 @@ iceberg = [
     { name = "pyiceberg", extra = ["adlfs", "dynamodb", "glue", "hive", "pyarrow", "s3fs", "snappy", "zstandard"] },
 ]
 iceberg-catalog = [
-    { name = "boto3" },
     { name = "botocore" },
     { name = "urllib3" },
 ]
@@ -1311,7 +1303,6 @@ lookml = [
 mariadb = [
     { name = "acryl-datahub-classify" },
     { name = "acryl-great-expectations" },
-    { name = "boto3" },
     { name = "botocore" },
     { name = "cachetools" },
     { name = "greenlet" },
@@ -1394,7 +1385,6 @@ mssql-odbc = [
 mysql = [
     { name = "acryl-datahub-classify" },
     { name = "acryl-great-expectations" },
-    { name = "boto3" },
     { name = "botocore" },
     { name = "cachetools" },
     { name = "greenlet" },
@@ -1422,7 +1412,6 @@ nifi = [
     { name = "requests-gssapi" },
 ]
 notion = [
-    { name = "boto3" },
     { name = "botocore" },
     { name = "jsonpath-ng" },
     { name = "litellm" },
@@ -1464,7 +1453,6 @@ pinecone = [
 postgres = [
     { name = "acryl-datahub-classify" },
     { name = "acryl-great-expectations" },
-    { name = "boto3" },
     { name = "botocore" },
     { name = "cachetools" },
     { name = "geoalchemy2" },
@@ -1608,7 +1596,6 @@ redshift-slim = [
     { name = "wcmatch" },
 ]
 s3 = [
-    { name = "boto3" },
     { name = "botocore" },
     { name = "cachetools" },
     { name = "more-itertools" },
@@ -1624,7 +1611,6 @@ s3 = [
     { name = "wcmatch" },
 ]
 s3-slim = [
-    { name = "boto3" },
     { name = "botocore" },
     { name = "cachetools" },
     { name = "more-itertools" },
@@ -1643,7 +1629,6 @@ sac = [
     { name = "requests" },
 ]
 sagemaker = [
-    { name = "boto3" },
     { name = "botocore" },
     { name = "urllib3" },
 ]
@@ -1753,7 +1738,6 @@ sql-parser = [
     { name = "sqlglot", extra = ["c"] },
 ]
 sql-queries = [
-    { name = "boto3" },
     { name = "botocore" },
     { name = "patchy" },
     { name = "smart-open", extra = ["s3"] },
@@ -1901,7 +1885,6 @@ unity-catalog = [
     { name = "traitlets" },
 ]
 unstructured = [
-    { name = "boto3" },
     { name = "botocore" },
     { name = "jsonpath-ng" },
     { name = "litellm" },
@@ -2081,58 +2064,38 @@ requires-dist = [
     { name = "azure-storage-file-datalake", marker = "extra == 'docs'", specifier = ">=12.14.0,<13.0.0" },
     { name = "azure-storage-file-datalake", marker = "extra == 'excel'", specifier = ">=12.14.0,<13.0.0" },
     { name = "azure-storage-file-datalake", marker = "extra == 'integration-tests'", specifier = ">=12.14.0,<13.0.0" },
-    { name = "boto3", marker = "extra == 'all'", specifier = ">=1.35.0,<2.0.0" },
-    { name = "boto3", marker = "extra == 'cockroachdb'", specifier = ">=1.35.0,<2.0.0" },
-    { name = "boto3", marker = "extra == 'confluence'", specifier = ">=1.35.0,<2.0.0" },
-    { name = "boto3", marker = "extra == 'datahub-documents'", specifier = ">=1.35.0,<2.0.0" },
-    { name = "boto3", marker = "extra == 'dbt'", specifier = ">=1.35.0,<2.0.0" },
-    { name = "boto3", marker = "extra == 'delta-lake'", specifier = ">=1.35.0,<2.0.0" },
+    { name = "boto3", specifier = ">=1.35.0,<2.0.0" },
     { name = "boto3", marker = "extra == 'dev'", specifier = ">=1.35.0,<2.0.0" },
     { name = "boto3", marker = "extra == 'docs'", specifier = ">=1.35.0,<2.0.0" },
-    { name = "boto3", marker = "extra == 'doris'", specifier = ">=1.35.0,<2.0.0" },
-    { name = "boto3", marker = "extra == 'dynamodb'", specifier = ">=1.35.0,<2.0.0" },
-    { name = "boto3", marker = "extra == 'excel'", specifier = ">=1.35.0,<2.0.0" },
-    { name = "boto3", marker = "extra == 'gcs'", specifier = ">=1.35.0,<2.0.0" },
-    { name = "boto3", marker = "extra == 'gcs-slim'", specifier = ">=1.35.0,<2.0.0" },
-    { name = "boto3", marker = "extra == 'glue'", specifier = ">=1.35.0,<2.0.0" },
-    { name = "boto3", marker = "extra == 'iceberg-catalog'", specifier = ">=1.35.0,<2.0.0" },
     { name = "boto3", marker = "extra == 'integration-tests'", specifier = ">=1.35.0,<2.0.0" },
-    { name = "boto3", marker = "extra == 'mariadb'", specifier = ">=1.35.0,<2.0.0" },
-    { name = "boto3", marker = "extra == 'mysql'", specifier = ">=1.35.0,<2.0.0" },
-    { name = "boto3", marker = "extra == 'notion'", specifier = ">=1.35.0,<2.0.0" },
-    { name = "boto3", marker = "extra == 'postgres'", specifier = ">=1.35.0,<2.0.0" },
-    { name = "boto3", marker = "extra == 's3'", specifier = ">=1.35.0,<2.0.0" },
-    { name = "boto3", marker = "extra == 's3-slim'", specifier = ">=1.35.0,<2.0.0" },
-    { name = "boto3", marker = "extra == 'sagemaker'", specifier = ">=1.35.0,<2.0.0" },
-    { name = "boto3", marker = "extra == 'sql-queries'", specifier = ">=1.35.0,<2.0.0" },
-    { name = "boto3", marker = "extra == 'unstructured'", specifier = ">=1.35.0,<2.0.0" },
     { name = "boto3-stubs", extras = ["dynamodb", "glue", "lakeformation", "s3", "sagemaker", "sts"], marker = "extra == 'dev'", specifier = "==1.40.0" },
     { name = "boto3-stubs", extras = ["dynamodb", "glue", "lakeformation", "s3", "sagemaker", "sts"], marker = "extra == 'docs'", specifier = "==1.40.0" },
-    { name = "botocore", marker = "extra == 'all'", specifier = "!=1.23.0,<2.0.0" },
-    { name = "botocore", marker = "extra == 'cockroachdb'", specifier = "!=1.23.0,<2.0.0" },
-    { name = "botocore", marker = "extra == 'confluence'", specifier = "!=1.23.0,<2.0.0" },
-    { name = "botocore", marker = "extra == 'datahub-documents'", specifier = "!=1.23.0,<2.0.0" },
-    { name = "botocore", marker = "extra == 'dbt'", specifier = "!=1.23.0,<2.0.0" },
-    { name = "botocore", marker = "extra == 'delta-lake'", specifier = "!=1.23.0,<2.0.0" },
+    { name = "botocore", specifier = "!=1.23.0,<2.0.0" },
+    { name = "botocore", marker = "extra == 'all'", specifier = "!=1.23.0" },
+    { name = "botocore", marker = "extra == 'cockroachdb'", specifier = "!=1.23.0" },
+    { name = "botocore", marker = "extra == 'confluence'", specifier = "!=1.23.0" },
+    { name = "botocore", marker = "extra == 'datahub-documents'", specifier = "!=1.23.0" },
+    { name = "botocore", marker = "extra == 'dbt'", specifier = "!=1.23.0" },
+    { name = "botocore", marker = "extra == 'delta-lake'", specifier = "!=1.23.0" },
     { name = "botocore", marker = "extra == 'dev'", specifier = "!=1.23.0,<2.0.0" },
     { name = "botocore", marker = "extra == 'docs'", specifier = "!=1.23.0,<2.0.0" },
-    { name = "botocore", marker = "extra == 'doris'", specifier = "!=1.23.0,<2.0.0" },
-    { name = "botocore", marker = "extra == 'dynamodb'", specifier = "!=1.23.0,<2.0.0" },
-    { name = "botocore", marker = "extra == 'excel'", specifier = "!=1.23.0,<2.0.0" },
-    { name = "botocore", marker = "extra == 'gcs'", specifier = "!=1.23.0,<2.0.0" },
-    { name = "botocore", marker = "extra == 'gcs-slim'", specifier = "!=1.23.0,<2.0.0" },
-    { name = "botocore", marker = "extra == 'glue'", specifier = "!=1.23.0,<2.0.0" },
-    { name = "botocore", marker = "extra == 'iceberg-catalog'", specifier = "!=1.23.0,<2.0.0" },
+    { name = "botocore", marker = "extra == 'doris'", specifier = "!=1.23.0" },
+    { name = "botocore", marker = "extra == 'dynamodb'", specifier = "!=1.23.0" },
+    { name = "botocore", marker = "extra == 'excel'", specifier = "!=1.23.0" },
+    { name = "botocore", marker = "extra == 'gcs'", specifier = "!=1.23.0" },
+    { name = "botocore", marker = "extra == 'gcs-slim'", specifier = "!=1.23.0" },
+    { name = "botocore", marker = "extra == 'glue'", specifier = "!=1.23.0" },
+    { name = "botocore", marker = "extra == 'iceberg-catalog'", specifier = "!=1.23.0" },
     { name = "botocore", marker = "extra == 'integration-tests'", specifier = "!=1.23.0,<2.0.0" },
-    { name = "botocore", marker = "extra == 'mariadb'", specifier = "!=1.23.0,<2.0.0" },
-    { name = "botocore", marker = "extra == 'mysql'", specifier = "!=1.23.0,<2.0.0" },
-    { name = "botocore", marker = "extra == 'notion'", specifier = "!=1.23.0,<2.0.0" },
-    { name = "botocore", marker = "extra == 'postgres'", specifier = "!=1.23.0,<2.0.0" },
-    { name = "botocore", marker = "extra == 's3'", specifier = "!=1.23.0,<2.0.0" },
-    { name = "botocore", marker = "extra == 's3-slim'", specifier = "!=1.23.0,<2.0.0" },
-    { name = "botocore", marker = "extra == 'sagemaker'", specifier = "!=1.23.0,<2.0.0" },
-    { name = "botocore", marker = "extra == 'sql-queries'", specifier = "!=1.23.0,<2.0.0" },
-    { name = "botocore", marker = "extra == 'unstructured'", specifier = "!=1.23.0,<2.0.0" },
+    { name = "botocore", marker = "extra == 'mariadb'", specifier = "!=1.23.0" },
+    { name = "botocore", marker = "extra == 'mysql'", specifier = "!=1.23.0" },
+    { name = "botocore", marker = "extra == 'notion'", specifier = "!=1.23.0" },
+    { name = "botocore", marker = "extra == 'postgres'", specifier = "!=1.23.0" },
+    { name = "botocore", marker = "extra == 's3'", specifier = "!=1.23.0" },
+    { name = "botocore", marker = "extra == 's3-slim'", specifier = "!=1.23.0" },
+    { name = "botocore", marker = "extra == 'sagemaker'", specifier = "!=1.23.0" },
+    { name = "botocore", marker = "extra == 'sql-queries'", specifier = "!=1.23.0" },
+    { name = "botocore", marker = "extra == 'unstructured'", specifier = "!=1.23.0" },
     { name = "build", marker = "extra == 'dev'", specifier = "<2.0.0" },
     { name = "build", marker = "extra == 'docs'", specifier = "<2.0.0" },
     { name = "cached-property", specifier = "<3.0.0" },
@@ -2372,6 +2335,9 @@ requires-dist = [
     { name = "google-cloud-resource-manager", marker = "extra == 'dev'", specifier = "<2.0.0" },
     { name = "google-cloud-resource-manager", marker = "extra == 'docs'", specifier = "<2.0.0" },
     { name = "google-cloud-resource-manager", marker = "extra == 'fivetran'", specifier = "<2.0.0" },
+    { name = "google-cloud-secret-manager", specifier = ">=2.0.0,<3.0.0" },
+    { name = "google-cloud-secret-manager", marker = "extra == 'dev'", specifier = ">=2.0.0,<3.0.0" },
+    { name = "google-cloud-secret-manager", marker = "extra == 'docs'", specifier = ">=2.0.0,<3.0.0" },
     { name = "gql", extras = ["requests"], marker = "extra == 'all'", specifier = ">=4.0.0" },
     { name = "gql", extras = ["requests"], marker = "extra == 'circuit-breaker'", specifier = ">=4.0.0" },
     { name = "gql", extras = ["requests"], marker = "extra == 'integration-tests'", specifier = ">=4.0.0" },
@@ -6552,6 +6518,23 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/4e/7f/db00b2820475793a52958dc55fe9ec2eb8e863546e05fcece9b921f86ebe/google_cloud_resource_manager-1.16.0.tar.gz", hash = "sha256:cc938f87cc36c2672f062b1e541650629e0d954c405a4dac35ceedee70c267c3", size = 459840, upload-time = "2026-01-15T13:04:07.726Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/94/ff/4b28bcc791d9d7e4ac8fea00fbd90ccb236afda56746a3b4564d2ae45df3/google_cloud_resource_manager-1.16.0-py3-none-any.whl", hash = "sha256:fb9a2ad2b5053c508e1c407ac31abfd1a22e91c32876c1892830724195819a28", size = 400218, upload-time = "2026-01-15T13:02:47.378Z" },
+]
+
+[[package]]
+name = "google-cloud-secret-manager"
+version = "2.27.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "google-api-core", extra = ["grpc"] },
+    { name = "google-auth" },
+    { name = "grpc-google-iam-v1" },
+    { name = "grpcio" },
+    { name = "proto-plus" },
+    { name = "protobuf" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/6d/df/fbea0536e1baa6ea2239fdd19e9e22c9d64c8e26a0f3921596ecc0e5397d/google_cloud_secret_manager-2.27.0.tar.gz", hash = "sha256:6af864c252bd3c11db7bb02b80cb0b14a8c9a33fc7ec4d6f245f33d8ce1f7cd1", size = 279769, upload-time = "2026-03-26T22:17:15.271Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1f/4b/6dd1e2efd9a2e73aa847fd455a1ce375d8d3cba1a2c4f7fd69f9bf0b9dce/google_cloud_secret_manager-2.27.0-py3-none-any.whl", hash = "sha256:e5540bece65a3ad720146f3b438973faf9315109b3ffa012a58711843047a3dc", size = 225577, upload-time = "2026-03-26T22:15:19.622Z" },
 ]
 
 [[package]]
