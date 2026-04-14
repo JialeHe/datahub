@@ -21,7 +21,6 @@ apply from: '../gradle/docker/docker.gradle'
 ext {
   python_executable = 'python3'
   venv_name = 'venv'
-  docker_registry = 'acryldata'
   docker_repo = 'datahub-actions'
   docker_target = project.getProperties().getOrDefault("dockerTarget", "slim")
 

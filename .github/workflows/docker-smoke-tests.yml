@@ -15,26 +15,24 @@ on:
       - master
       - releases/**
       - hotfixes/**
-  # pull_request:
-  #   types: [opened, synchronize, reopened]
-  #   branches:
-  #     - master
-  #     - releases/**
-  #     - hotfixes/**
-  #   paths-ignore:
-  #     - ".github/**"
-  #     - "!.github/workflows/docker-smoke-tests.yml"
-  #     - "!.github/scripts/send_failed_tests_to_posthog.py"
-  #     - "!.github/scripts/docker_helpers.sh"
-  #     - "!.github/actions/ci-optimization"
-  #     - "!.github/actions/smoke-test-retry-setup"
-  #     - "!.github/actions/run-smoke-tests"
-  #     - "!.github/scripts/check_python_package.py"
-  #     - "!.github/scripts/parse_failed_cypress_tests.py"
-  #     - "!.github/scripts/parse_failed_pytest_tests.py"
-  #     - "!.github/scripts/docker_logs.sh"
-  # release:
-  #   types: [published]
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - master
+      - releases/**
+      - hotfixes/**
+    paths-ignore:
+      - ".github/**"
+      - "!.github/workflows/docker-smoke-tests.yml"
+      - "!.github/scripts/send_failed_tests_to_posthog.py"
+      - "!.github/scripts/docker_helpers.sh"
+      - "!.github/actions/ci-optimization"
+      - "!.github/actions/smoke-test-retry-setup"
+      - "!.github/actions/run-smoke-tests"
+      - "!.github/scripts/check_python_package.py"
+      - "!.github/scripts/parse_failed_cypress_tests.py"
+      - "!.github/scripts/parse_failed_pytest_tests.py"
+      - "!.github/scripts/docker_logs.sh"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
@@ -65,9 +63,9 @@ jobs:
       unique_tag: ${{ steps.tag.outputs.unique_tag }}
       unique_slim_tag: ${{ steps.tag.outputs.unique_slim_tag }}
       unique_full_tag: ${{ steps.tag.outputs.unique_full_tag }}
-      docker-login: ${{ steps.docker-login.outputs.docker-login }}
-      publish: ${{ steps.publish.outputs.publish }}
-      pr-publish: ${{ steps.publish.outputs.pr-publish }}
+      # docker-login: ${{ steps.docker-login.outputs.docker-login }}
+      # publish: ${{ steps.publish.outputs.publish }}
+      # pr-publish: ${{ steps.publish.outputs.pr-publish }}
       python_release_version: ${{ steps.tag.outputs.python_release_version }}
       branch_name: ${{ steps.tag.outputs.branch_name }}
       repository_name: ${{ steps.tag.outputs.repository_name }}
@@ -118,31 +116,31 @@ jobs:
             echo "branch_name=${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}"
             echo "repository_name=${GITHUB_REPOSITORY#*/}"
           } >> "$GITHUB_OUTPUT"
-      - name: Check whether docker login is possible
-        id: docker-login
-        env:
-          ENABLE_DOCKER_LOGIN: ${{ secrets.ACRYL_DOCKER_PASSWORD != '' }}
-        run: |
-          echo "Enable Docker Login: ${{ env.ENABLE_DOCKER_LOGIN }}"
-          echo "docker-login=${{ env.ENABLE_DOCKER_LOGIN }}" >> "$GITHUB_OUTPUT"
-      - name: Check whether publishing should be enabled
-        id: publish
-        env:
-          ENABLE_PUBLISH: >-
-            ${{
-               (github.event_name == 'release' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'push') && github.ref == 'refs/heads/master'))
-               && steps.docker-login.outputs.docker-login == 'true'
-            }}
-          ENABLE_PR_PUBLISH: >-
-            ${{
-               (github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'publish') || contains(github.event.pull_request.labels.*.name, 'publish-docker')))
-               && steps.docker-login.outputs.docker-login == 'true'
-            }}
-        run: |
-          echo "Enable publish: ${{ env.ENABLE_PUBLISH }}"
-          echo "Enable PR publish: ${{ env.ENABLE_PR_PUBLISH }}"
-          echo "publish=${{ env.ENABLE_PUBLISH }}" >> "$GITHUB_OUTPUT"
-          echo "pr-publish=${{ env.ENABLE_PR_PUBLISH }}" >> "$GITHUB_OUTPUT"
+      # - name: Check whether docker login is possible
+      #   id: docker-login
+      #   env:
+      #     ENABLE_DOCKER_LOGIN: ${{ secrets.ACRYL_DOCKER_PASSWORD != '' }}
+      #   run: |
+      #     echo "Enable Docker Login: ${{ env.ENABLE_DOCKER_LOGIN }}"
+      #     echo "docker-login=${{ env.ENABLE_DOCKER_LOGIN }}" >> "$GITHUB_OUTPUT"
+      # - name: Check whether publishing should be enabled
+      #   id: publish
+      #   env:
+      #     ENABLE_PUBLISH: >-
+      #       ${{
+      #          (github.event_name == 'release' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'push') && github.ref == 'refs/heads/master'))
+      #          && steps.docker-login.outputs.docker-login == 'true'
+      #       }}
+      #     ENABLE_PR_PUBLISH: >-
+      #       ${{
+      #          (github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'publish') || contains(github.event.pull_request.labels.*.name, 'publish-docker')))
+      #          && steps.docker-login.outputs.docker-login == 'true'
+      #       }}
+      #   run: |
+      #     echo "Enable publish: ${{ env.ENABLE_PUBLISH }}"
+      #     echo "Enable PR publish: ${{ env.ENABLE_PR_PUBLISH }}"
+      #     echo "publish=${{ env.ENABLE_PUBLISH }}" >> "$GITHUB_OUTPUT"
+      #     echo "pr-publish=${{ env.ENABLE_PR_PUBLISH }}" >> "$GITHUB_OUTPUT"
       - uses: ./.github/actions/ci-optimization
         id: ci-optimize
       - uses: ./.github/actions/determine-runners
@@ -277,7 +275,7 @@ jobs:
           images="$(jq -cr '.target[].tags[]' "${BAKE_SPEC}" \
             | tr '\n' ' ')"
 
-          echo "Collected images: ${images}" | tee >> "$GITHUB_SUMMARY"
+          echo "Collected images: ${images}" | tee >> "$GITHUB_STEP_SUMMARY"
           echo "built_images=${images}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -387,7 +385,7 @@ jobs:
             includes="$python_matrix"
           fi
           echo "matrix={\"include\":[$includes]}" >> "$GITHUB_OUTPUT"
-          echo "matrix={\"include\":[$includes]}" >> "$GITHUB_SUMMARY"
+          echo "matrix={\"include\":[$includes]}" >> "$GITHUB_STEP_SUMMARY"
 
   smoke_test:
     name: Run Smoke Tests (${{ matrix.test_strategy }}, Batch ${{ matrix.batch }}/${{ matrix.batch_count }})
