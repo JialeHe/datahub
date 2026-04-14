@@ -267,7 +267,7 @@ jobs:
         id: collect-images
         shell: bash
         run: |
-          BAKE_SPEC="${{ github.workspace }}/bake-spec-allImages.json"
+          BAKE_SPEC="${{ github.workspace }}/build/bake-spec-allImages.json"
 
           # Extract all image:tag references from the bake spec and filter by the target tag.
           # Plain jq is used here instead of 'depot bake --print' since the spec is already
@@ -385,7 +385,13 @@ jobs:
             includes="$python_matrix"
           fi
           echo "matrix={\"include\":[$includes]}" >> "$GITHUB_OUTPUT"
-          echo "matrix={\"include\":[$includes]}" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Smoke Test Matrix"
+            echo ""
+            echo "| Strategy | Batch | Total Batches |"
+            echo "|----------|-------|---------------|"
+            echo "{\"include\":[$includes]}" | jq -r '.include[] | "| \(.test_strategy) | \(.batch) | \(.batch_count) |"'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   smoke_test:
     name: Run Smoke Tests (${{ matrix.test_strategy }}, Batch ${{ matrix.batch }}/${{ matrix.batch_count }})
