@@ -1070,8 +1070,8 @@ class TestQualifyTableName:
     qualified to the depth expected by DataHub URNs (e.g. 3-part for Snowflake)."""
 
     @staticmethod
-    def _make_source(**overrides: object) -> "MicroStrategySource":
-        base = {
+    def _make_source(**overrides: Any) -> "MicroStrategySource":
+        base: Dict[str, Any] = {
             "connection": {
                 "base_url": "https://demo.microstrategy.com",
                 "use_anonymous": True,
