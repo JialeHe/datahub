@@ -91,6 +91,9 @@ jobs:
       uv_cache_key_prefix: ${{ steps.uv-cache-key.outputs.uv_cache_key_prefix }}
       yarn_cache_key: ${{ steps.yarn-cache-key.outputs.yarn_cache_key }}
       yarn_cache_key_prefix: ${{ steps.yarn-cache-key.outputs.yarn_cache_key_prefix }}
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      cypress_batch_count: ${{ steps.set-test-batch-count.outputs.cypress_batch_count }}
+      python_batch_count: ${{ steps.set-test-batch-count.outputs.python_batch_count }}
     steps:
       - name: Check out the repo
         uses: acryldata/sane-checkout-action@186e92cc5948a9c3e1cc7a96eaff9f776f3fc8e3 # v7
@@ -100,7 +103,7 @@ jobs:
       - name: Compute Tag
         id: tag
         env:
-          GITHUB_REF_FALLBACK: ${{ github.event_name == 'release' && format('refs/tags/{0}', github.event.release.tag_name) || github.ref }}
+          GITHUB_REF_FALLBACK: ${{ github.ref }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
         run: |
           source .github/scripts/docker_helpers.sh
@@ -193,6 +196,48 @@ jobs:
         run: |
           echo "yarn_cache_key=docker-smoke-tests-${{ runner.os }}-yarn-${{ hashFiles('./smoke-test/tests/cypress/yarn.lock', './datahub-web-react/yarn.lock') }}" >> "$GITHUB_OUTPUT"
           echo "yarn_cache_key_prefix=docker-smoke-tests-${{ runner.os }}-yarn-" >> "$GITHUB_OUTPUT"
+      - id: set-test-batch-count
+        run: |
+          if [[ "${{ env.IS_FORK }}" == "true" ]]; then
+            echo "cypress_batch_count=5" >> "$GITHUB_OUTPUT"
+            echo "python_batch_count=3" >> "$GITHUB_OUTPUT"
+          else
+            echo "cypress_batch_count=8" >> "$GITHUB_OUTPUT"
+            echo "python_batch_count=7" >> "$GITHUB_OUTPUT"
+          fi
+
+      - id: set-matrix
+        run: |
+          python_batch_count=${{ steps.set-test-batch-count.outputs.python_batch_count }}
+          python_matrix='{"test_strategy":"pytests","batch":"0","batch_count":"'"$python_batch_count"'"}'
+          for ((i=1;i<python_batch_count;i++)); do
+            python_matrix="$python_matrix"',{"test_strategy":"pytests","batch_count":"'"$python_batch_count"'","batch":"'"$i"'"}'
+          done
+
+          cypress_batch_count=${{ steps.set-test-batch-count.outputs.cypress_batch_count }}
+          cypress_matrix='{"test_strategy":"cypress","batch":"0","batch_count":"'"$cypress_batch_count"'"}'
+          for ((i=1;i<cypress_batch_count;i++)); do
+            cypress_matrix="$cypress_matrix"',{"test_strategy":"cypress","batch_count":"'"$cypress_batch_count"'","batch":"'"$i"'"}'
+          done
+
+          includes=''
+          if [[ "${{ steps.ci-optimize.outputs.backend-change }}" == 'true' || "${{  steps.ci-optimize.outputs.smoke-test-change }}" == 'true' ]]; then
+            includes="$python_matrix,$cypress_matrix"
+          elif [[ "${{  steps.ci-optimize.outputs.frontend-only }}" == 'true' ]]; then
+            includes="$cypress_matrix"
+          elif [[ "${{  steps.ci-optimize.outputs.connector-source-only }}" == 'true' ]]; then
+            includes=""
+          elif [[ "${{  steps.ci-optimize.outputs.ingestion-only }}" == 'true' ]]; then
+            includes="$python_matrix"
+          fi
+          echo "matrix={\"include\":[$includes]}" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Smoke Test Matrix"
+            echo ""
+            echo "| Strategy | Total Batches |"
+            echo "|----------|---------------|"
+            echo "{\"include\":[$includes]}" | jq -r '[.include[] | {test_strategy, batch_count}] | unique[] | "| \(.test_strategy) | \(.batch_count) |"'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   build_quickstart_images:
     name: Build Quickstart images for smoke test
@@ -348,65 +393,14 @@ jobs:
   #       with:
   #         sarif_file: "trivy-results.sarif"
 
-  smoke_test_matrix:
-    runs-on: ${{ needs.setup-smoke-test.outputs.test_runner_type_small }}
-    needs: setup-smoke-test
-    outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
-      cypress_batch_count: ${{ steps.set-batch-count.outputs.cypress_batch_count }}
-      python_batch_count: ${{ steps.set-batch-count.outputs.python_batch_count }}
-    steps:
-      - id: set-batch-count
-        run: |
-          if [[ "${{ env.IS_FORK }}" == "true" ]]; then
-            echo "cypress_batch_count=5" >> "$GITHUB_OUTPUT"
-            echo "python_batch_count=3" >> "$GITHUB_OUTPUT"
-          else
-            echo "cypress_batch_count=8" >> "$GITHUB_OUTPUT"
-            echo "python_batch_count=7" >> "$GITHUB_OUTPUT"
-          fi
-
-      - id: set-matrix
-        run: |
-          python_batch_count=${{ steps.set-batch-count.outputs.python_batch_count }}
-          python_matrix='{"test_strategy":"pytests","batch":"0","batch_count":"'"$python_batch_count"'"}'
-          for ((i=1;i<python_batch_count;i++)); do
-            python_matrix="$python_matrix"',{"test_strategy":"pytests","batch_count":"'"$python_batch_count"'","batch":"'"$i"'"}'
-          done
-
-          cypress_batch_count=${{ steps.set-batch-count.outputs.cypress_batch_count }}
-          cypress_matrix='{"test_strategy":"cypress","batch":"0","batch_count":"'"$cypress_batch_count"'"}'
-          for ((i=1;i<cypress_batch_count;i++)); do
-            cypress_matrix="$cypress_matrix"',{"test_strategy":"cypress","batch_count":"'"$cypress_batch_count"'","batch":"'"$i"'"}'
-          done
-
-          includes=''
-          if [[ "${{ needs.setup-smoke-test.outputs.backend_change }}" == 'true' || "${{ needs.setup-smoke-test.outputs.smoke_test_change }}" == 'true' ]]; then
-            includes="$python_matrix,$cypress_matrix"
-          elif [[ "${{ needs.setup-smoke-test.outputs.frontend_only }}" == 'true' ]]; then
-            includes="$cypress_matrix"
-          elif [[ "${{ needs.setup-smoke-test.outputs.connector_source_only }}" == 'true' ]]; then
-            includes=""
-          elif [[ "${{ needs.setup-smoke-test.outputs.ingestion_only }}" == 'true' ]]; then
-            includes="$python_matrix"
-          fi
-          echo "matrix={\"include\":[$includes]}" >> "$GITHUB_OUTPUT"
-          {
-            echo "## Smoke Test Matrix"
-            echo ""
-            echo "| Strategy | Total Batches |"
-            echo "|----------|---------------|"
-            echo "{\"include\":[$includes]}" | jq -r '[.include[] | {test_strategy, batch_count}] | unique[] | "| \(.test_strategy) | \(.batch_count) |"'
-          } >> "$GITHUB_STEP_SUMMARY"
-
   smoke_test:
     name: Run Smoke Tests (${{ matrix.test_strategy }}, Batch ${{ matrix.batch }}/${{ matrix.batch_count }})
     runs-on: ${{ needs.setup-smoke-test.outputs.test_runner_type }}
-    needs: [setup-smoke-test, smoke_test_matrix, build_quickstart_images]
+    needs: [setup-smoke-test, build_quickstart_images]
     strategy:
       fail-fast: false
-      matrix: ${{ fromJson(needs.smoke_test_matrix.outputs.matrix || '{"include":[]}') }}
-    if: ${{ always() && !failure() && !cancelled() && needs.smoke_test_matrix.outputs.matrix != '' && needs.smoke_test_matrix.outputs.matrix != '{"include":[]}' }}
+      matrix: ${{ fromJson(needs.setup-smoke-test.outputs.matrix || '{"include":[]}') }}
+    if: ${{ always() && !failure() && !cancelled() && needs.setup-smoke-test.outputs.matrix != '' && needs.setup-smoke-test.outputs.matrix != '{"include":[]}' }}
     env:
       MIXPANEL_API_SECRET: ${{ secrets.MIXPANEL_API_SECRET }}
       MIXPANEL_PROJECT_ID: ${{ secrets.MIXPANEL_PROJECT_ID }}
