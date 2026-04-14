@@ -1,7 +1,7 @@
 import json
 import logging
 import sys
-from typing import Any, Dict, Iterable, List, Literal, Optional, cast
+from typing import Any, Dict, List, Literal, Optional, cast
 
 import requests
 
@@ -858,23 +858,32 @@ class PowerBiAPI:
         app.dashboards = app_dashboards
         workspace.app = app
 
-    def _fill_metadata_from_scan_result(
+    def fill_metadata_from_scan_result(
         self,
         workspaces: List[Workspace],
-    ) -> List[Workspace]:
-        workspace_ids = [workspace.id for workspace in workspaces]
-        scan_result = self._get_scan_result(workspace_ids)
-        if not scan_result:
-            return workspaces
+    ) -> set:
+        """Scan workspaces and populate datasets + dataset_registry.
 
-        workspaces = []
+        Mutates workspaces in-place. Must be called for ALL batches before
+        fill_regular_metadata_detail so that cross-workspace dataset references
+        resolve correctly.
+
+        Returns the set of workspace IDs that were successfully scanned
+        (active and not filtered). The caller should use this to filter out
+        inactive workspaces before Phase 2.
+        """
+        workspaces_by_id = {workspace.id: workspace for workspace in workspaces}
+        scan_result = self._get_scan_result(list(workspaces_by_id.keys()))
+        if not scan_result:
+            return set()
+
+        scanned_ids: set = set()
         for workspace_metadata in scan_result["workspaces"]:
             if (
                 workspace_metadata.get(Constant.STATE) != Constant.ACTIVE
                 or workspace_metadata.get(Constant.TYPE)
                 not in self.__config.workspace_type_filter
             ):
-                # if the state is not "Active" then in some state like Not Found, "name" attribute is not present
                 wrk_identifier: str = (
                     workspace_metadata[Constant.NAME]
                     if workspace_metadata.get(Constant.NAME)
@@ -888,42 +897,17 @@ class PowerBiAPI:
                 continue
 
             ws_id = workspace_metadata[Constant.ID]
-            cur_workspace = Workspace(
-                id=ws_id,
-                name=workspace_metadata[Constant.NAME],
-                type=workspace_metadata[Constant.TYPE],
-                webUrl=f"{self.__config.environment.web_app_base_url}/groups/{ws_id}",
-                datasets={},
-                dashboards={},
-                reports={},
-                report_endorsements={},
-                dashboard_endorsements={},
-                scan_result={},
-                independent_datasets={},
-                app=None,  # It is getting set from scan-result
-                fabric_artifacts=self._parse_fabric_artifacts(workspace_metadata),
-            )
-            cur_workspace.scan_result = workspace_metadata
-            cur_workspace.datasets = self._get_workspace_datasets(cur_workspace)
-            # collect all datasets in the registry
-            self.dataset_registry.update(cur_workspace.datasets)
-            # Fetch endorsement tag if it is enabled from configuration
-            if self.__config.extract_endorsements_to_tags:
-                cur_workspace.dashboard_endorsements = self._get_dashboard_endorsements(
-                    cur_workspace.scan_result
-                )
-                cur_workspace.report_endorsements = self._get_report_endorsements(
-                    cur_workspace.scan_result
-                )
-            else:
-                logger.info(
-                    "Skipping endorsements tag as extract_endorsements_to_tags is not enabled"
-                )
+            cur_workspace = workspaces_by_id.get(ws_id)
+            if not cur_workspace:
+                continue
 
-            self._populate_app_details(
-                workspace=cur_workspace,
-                workspace_metadata=workspace_metadata,
+            scanned_ids.add(ws_id)
+            cur_workspace.scan_result = workspace_metadata
+            cur_workspace.fabric_artifacts = self._parse_fabric_artifacts(
+                workspace_metadata
             )
+            cur_workspace.datasets = self._get_workspace_datasets(cur_workspace)
+            self.dataset_registry.update(cur_workspace.datasets)
 
             # When use_scan_result_only is enabled, build reports and dashboards
             # from scan result to avoid redundant per-workspace API calls
@@ -937,9 +921,7 @@ class PowerBiAPI:
                         cur_workspace
                     )
 
-            workspaces.append(cur_workspace)
-
-        return workspaces
+        return scanned_ids
 
     def _fill_independent_datasets(self, workspace: Workspace) -> None:
         reachable_datasets: List[str] = []
@@ -958,7 +940,14 @@ class PowerBiAPI:
             if dataset.id not in reachable_datasets:
                 workspace.independent_datasets[dataset.id] = dataset
 
-    def _fill_regular_metadata_detail(self, workspace: Workspace) -> None:
+    def fill_regular_metadata_detail(self, workspace: Workspace) -> None:
+        """Fill reports, dashboards, endorsements, and app details for a workspace.
+
+        Must be called after fill_metadata_from_scan_result has run for ALL
+        batches, so that the dataset_registry is complete and cross-workspace
+        references resolve correctly.
+        """
+
         def fill_dashboards() -> None:
             dashboards_from_scan = self.__config.use_scan_result_only
 
@@ -1021,22 +1010,27 @@ class PowerBiAPI:
             for dashboard in workspace.dashboards.values():
                 dashboard.tags = workspace.dashboard_endorsements.get(dashboard.id, [])
 
+        # Fetch endorsement tags if enabled
+        if self.__config.extract_endorsements_to_tags:
+            workspace.dashboard_endorsements = self._get_dashboard_endorsements(
+                workspace.scan_result
+            )
+            workspace.report_endorsements = self._get_report_endorsements(
+                workspace.scan_result
+            )
+        else:
+            logger.info(
+                "Skipping endorsements tag as extract_endorsements_to_tags is not enabled"
+            )
+
+        self._populate_app_details(
+            workspace=workspace,
+            workspace_metadata=workspace.scan_result,
+        )
+
         # fill reports first since some dashboard may reference a report
         fill_reports()
         if self.__config.extract_dashboards:
             fill_dashboards()
         fill_dashboard_tags()
         self._fill_independent_datasets(workspace=workspace)
-
-    def fill_workspaces(
-        self, workspaces: List[Workspace], reporter: PowerBiDashboardSourceReport
-    ) -> Iterable[Workspace]:
-        logger.info(
-            f"Fetching initial metadata for workspaces: {[workspace.format_name_for_logger() for workspace in workspaces]}"
-        )
-
-        workspaces = self._fill_metadata_from_scan_result(workspaces=workspaces)
-        # First try to fill the admin detail as some regular metadata contains lineage to admin metadata
-        for workspace in workspaces:
-            self._fill_regular_metadata_detail(workspace=workspace)
-        return workspaces
