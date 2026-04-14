@@ -41,7 +41,6 @@ def test_get_workunits_internal_wraps_project_processing() -> None:
 def test_get_workunits_internal_reports_project_google_api_failure() -> None:
     source = object.__new__(DataplexSource)
     source.entries_processor = Mock()
-    source.entries_processor.process_project.return_value = [Mock()]
     source.config = Mock()
     source.config.project_ids = ["project-1"]
     source.config.include_lineage = False
@@ -240,7 +239,6 @@ def test_get_workunits_internal_iterates_all_projects() -> None:
 def test_get_workunits_internal_skips_lineage_stage_when_disabled() -> None:
     source = object.__new__(DataplexSource)
     source.entries_processor = Mock()
-    source.entries_processor.process_project.return_value = []
     source.config = Mock()
     source.config.project_ids = ["project-1"]
     source.config.include_lineage = False
@@ -263,7 +261,6 @@ def test_get_workunits_internal_skips_lineage_stage_when_disabled() -> None:
 def test_get_workunits_internal_handles_empty_entries_for_lineage() -> None:
     source = object.__new__(DataplexSource)
     source.entries_processor = Mock()
-    source.entries_processor.process_project.return_value = []
     source.config = Mock()
     source.config.project_ids = ["project-1"]
     source.config.include_lineage = True
@@ -282,7 +279,6 @@ def test_get_workunits_internal_handles_empty_entries_for_lineage() -> None:
 def test_get_workunits_internal_yields_from_lineage_extractor() -> None:
     source = object.__new__(DataplexSource)
     source.entries_processor = Mock()
-    source.entries_processor.process_project.return_value = []
     source.config = Mock()
     source.config.include_lineage = True
     source.config.project_ids = ["project-1"]
@@ -325,7 +321,6 @@ def test_get_workunits_internal_uses_configured_project_location_cross_product()
 ):
     source = object.__new__(DataplexSource)
     source.entries_processor = Mock()
-    source.entries_processor.process_project.return_value = []
     source.config = Mock()
     source.config.include_lineage = True
     source.config.project_ids = ["project-1", "project-2"]
@@ -367,7 +362,6 @@ def test_get_workunits_internal_uses_configured_project_location_cross_product()
 def test_get_workunits_internal_reports_lineage_failure_on_exception() -> None:
     source = object.__new__(DataplexSource)
     source.entries_processor = Mock()
-    source.entries_processor.process_project.return_value = []
     source.config = Mock()
     source.config.include_lineage = True
     source.config.project_ids = ["project-1"]
@@ -400,7 +394,6 @@ def test_get_workunits_internal_reports_lineage_failure_on_exception() -> None:
 def test_get_workunits_internal_unions_entries_across_projects_for_lineage() -> None:
     source = object.__new__(DataplexSource)
     source.entries_processor = Mock()
-    source.entries_processor.process_project.return_value = []
     source.config = Mock()
     source.config.include_lineage = True
     source.config.project_ids = ["project-1", "project-2"]
