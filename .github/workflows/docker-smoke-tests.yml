@@ -388,9 +388,9 @@ jobs:
           {
             echo "## Smoke Test Matrix"
             echo ""
-            echo "| Strategy | Batch | Total Batches |"
-            echo "|----------|-------|---------------|"
-            echo "{\"include\":[$includes]}" | jq -r '.include[] | "| \(.test_strategy) | \(.batch) | \(.batch_count) |"'
+            echo "| Strategy | Total Batches |"
+            echo "|----------|---------------|"
+            echo "{\"include\":[$includes]}" | jq -r '[.include[] | {test_strategy, batch_count}] | unique[] | "| \(.test_strategy) | \(.batch_count) |"'
           } >> "$GITHUB_STEP_SUMMARY"
 
   smoke_test:
