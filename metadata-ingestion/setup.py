@@ -43,15 +43,11 @@ base_requirements = {
 }
 
 cloud_secret_common = {
-    # AWS Secrets Manager support
-    "boto3>=1.35.0,<2.0.0",
-    "botocore!=1.23.0,<2.0.0",
     # GCP Secret Manager support
     "google-cloud-secret-manager>=2.0.0,<3.0.0",
 }
 
 framework_common = {
-    *cloud_secret_common,
     # Avoiding click 8.2.0 due to https://github.com/pallets/click/issues/2894
     "click>=7.1.2,!=8.2.0,<9.0.0",
     "click-default-group<2.0.0",
@@ -810,6 +806,9 @@ plugins: Dict[str, Set[str]] = {
         # are expected to be provided by the source connector itself when needed.
         # The plugin is designed to be installed alongside source connectors, not standalone.
     },
+    # Cloud secret store plugins.
+    "aws-secret-manager": aws_common,
+    "gcp-secret-manager": cloud_secret_common,
 }
 
 # This is mainly used to exclude plugins from the Docker image.
