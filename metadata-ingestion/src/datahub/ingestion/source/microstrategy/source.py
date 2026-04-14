@@ -2455,7 +2455,17 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
     # ── Lineage helpers ───────────────────────────────────────────────────────
 
     def _tables_to_urns(self, tables: List[str]) -> List[str]:
-        """Convert parsed table names to DataHub dataset URNs."""
+        """Convert parsed table names to DataHub dataset URNs.
+
+        Applies case normalization to match URNs already ingested from the
+        warehouse connector.  Resolution order:
+
+        1. If a DataHub graph is available, build the URN in original, lowercase,
+           and mixed-case variants (same strategy as the SQL schema resolver) and
+           batch-check which one actually exists.  The first match wins.
+        2. If no graph is available — or the entity hasn't been ingested yet —
+           fall back to ``convert_lineage_urns_to_lowercase`` (default True).
+        """
         plat = self._warehouse_platform
         if not plat:
             if tables:
@@ -2467,18 +2477,68 @@ class MicroStrategySource(StatefulIngestionSourceBase, TestableSource):
                     title="warehouse-lineage-skipped",
                 )
             return []
-        urns = []
+        urns: List[str] = []
         for table in sorted(tables):
             fqn = self._qualify_table_name(table)
-            urns.append(
-                make_dataset_urn_with_platform_instance(
-                    platform=plat,
-                    name=fqn,
-                    env=self.config.env,
-                    platform_instance=None,
-                )
-            )
+            urn = self._resolve_upstream_urn(plat, fqn)
+            urns.append(urn)
         return urns
+
+    def _resolve_upstream_urn(self, platform: str, fqn: str) -> str:
+        """Resolve a fully-qualified table name to the best-matching DataHub URN.
+
+        When a graph is available, tries original-case, lowercase, and mixed-case
+        URNs (lowercase name, original-case platform_instance) and returns the
+        first that exists in DataHub.  Falls back to the
+        ``convert_lineage_urns_to_lowercase`` config flag.
+        """
+        fqn_lower = fqn.lower()
+
+        def _make_urn(name: str) -> str:
+            return make_dataset_urn_with_platform_instance(
+                platform=platform,
+                name=name,
+                env=self.config.env,
+                platform_instance=None,
+            )
+
+        urn_original = _make_urn(fqn)
+        urn_lower = _make_urn(fqn_lower)
+
+        # Build candidate list (deduplicated, preserving order)
+        candidates: List[str] = [urn_original]
+        if urn_lower != urn_original:
+            candidates.append(urn_lower)
+
+        # Try graph-based resolution when available
+        if self.ctx.graph:
+            resolved = self._resolve_urn_via_graph(candidates)
+            if resolved is not None:
+                return resolved
+
+        # Fallback: use config flag
+        if self.config.convert_lineage_urns_to_lowercase:
+            return urn_lower
+        return urn_original
+
+    def _resolve_urn_via_graph(self, candidates: List[str]) -> Optional[str]:
+        """Batch-check candidate URNs against the DataHub graph.
+
+        Returns the first URN that exists, or None if none match.
+        """
+        graph = self.ctx.graph
+        if graph is None:
+            return None
+        try:
+            for candidate in candidates:
+                if graph.exists(candidate):
+                    return candidate
+        except Exception as e:
+            logger.debug(
+                "Graph URN resolution failed (%s); falling back to config",
+                e,
+            )
+        return None
 
     def _qualify_table_name(self, table: str) -> str:
         """

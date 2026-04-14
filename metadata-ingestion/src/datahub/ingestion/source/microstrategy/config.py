@@ -285,6 +285,18 @@ class MicroStrategyConfig(
         ),
     )
 
+    convert_lineage_urns_to_lowercase: bool = Field(
+        default=True,
+        description=(
+            "When true, lowercase upstream table URNs so they match warehouse-ingested "
+            "assets regardless of casing (e.g. Snowflake, BigQuery). "
+            "When a DataHub graph connection is available (datahub_api configured), "
+            "the connector first tries to resolve the correct casing by looking up "
+            "the URN in DataHub; this flag is the fallback when the graph is unavailable "
+            "or the entity has not been ingested yet."
+        ),
+    )
+
     warehouse_lineage_database: Optional[str] = Field(
         default=None,
         description=(

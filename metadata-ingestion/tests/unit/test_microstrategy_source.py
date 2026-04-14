@@ -1124,6 +1124,112 @@ class TestQualifyTableName:
         )
 
 
+class TestUpstreamUrnCaseResolution:
+    """Tests for _tables_to_urns case normalization — graph lookup with fallback."""
+
+    @staticmethod
+    def _make_source(**overrides: Any) -> "MicroStrategySource":
+        base: Dict[str, Any] = {
+            "connection": {
+                "base_url": "https://demo.microstrategy.com",
+                "use_anonymous": True,
+            },
+        }
+        base.update(overrides)
+        config = MicroStrategyConfig.model_validate(base)
+        ctx = PipelineContext(run_id="urn-case-test")
+        return MicroStrategySource(config, ctx)
+
+    def test_lowercase_fallback_when_no_graph(self) -> None:
+        """Without a graph connection, convert_lineage_urns_to_lowercase=True lowercases URNs."""
+        source = self._make_source(convert_lineage_urns_to_lowercase=True)
+        source._warehouse_platform = "snowflake"
+        urns = source._tables_to_urns(["XRBIA_DM.FACT_SALES"])
+        assert urns == [
+            "urn:li:dataset:(urn:li:dataPlatform:snowflake,xrbia_dm.fact_sales,PROD)"
+        ]
+
+    def test_original_case_when_lowercase_disabled(self) -> None:
+        """convert_lineage_urns_to_lowercase=False preserves original casing."""
+        source = self._make_source(convert_lineage_urns_to_lowercase=False)
+        source._warehouse_platform = "snowflake"
+        urns = source._tables_to_urns(["XRBIA_DM.FACT_SALES"])
+        assert urns == [
+            "urn:li:dataset:(urn:li:dataPlatform:snowflake,XRBIA_DM.FACT_SALES,PROD)"
+        ]
+
+    def test_graph_resolves_lowercase_match(self) -> None:
+        """When the graph has the lowercase variant, return that URN."""
+        source = self._make_source()
+        source._warehouse_platform = "snowflake"
+
+        mock_graph = MagicMock()
+        # Original case doesn't exist, lowercase does
+        mock_graph.exists.side_effect = lambda urn: "xrbia_dm.fact_sales" in urn
+        source.ctx.graph = mock_graph
+
+        urns = source._tables_to_urns(["XRBIA_DM.FACT_SALES"])
+        assert urns == [
+            "urn:li:dataset:(urn:li:dataPlatform:snowflake,xrbia_dm.fact_sales,PROD)"
+        ]
+
+    def test_graph_resolves_original_case_match(self) -> None:
+        """When the graph has the original-case variant, return that URN."""
+        source = self._make_source()
+        source._warehouse_platform = "snowflake"
+
+        mock_graph = MagicMock()
+        # Original case exists
+        mock_graph.exists.side_effect = lambda urn: "XRBIA_DM.FACT_SALES" in urn
+        source.ctx.graph = mock_graph
+
+        urns = source._tables_to_urns(["XRBIA_DM.FACT_SALES"])
+        assert urns == [
+            "urn:li:dataset:(urn:li:dataPlatform:snowflake,XRBIA_DM.FACT_SALES,PROD)"
+        ]
+
+    def test_graph_miss_falls_back_to_lowercase(self) -> None:
+        """When graph has neither variant, fall back to convert_lineage_urns_to_lowercase."""
+        source = self._make_source(convert_lineage_urns_to_lowercase=True)
+        source._warehouse_platform = "snowflake"
+
+        mock_graph = MagicMock()
+        mock_graph.exists.return_value = False
+        source.ctx.graph = mock_graph
+
+        urns = source._tables_to_urns(["XRBIA_DM.FACT_SALES"])
+        assert urns == [
+            "urn:li:dataset:(urn:li:dataPlatform:snowflake,xrbia_dm.fact_sales,PROD)"
+        ]
+
+    def test_graph_error_falls_back_gracefully(self) -> None:
+        """Graph API errors should not crash; fall back to config flag."""
+        source = self._make_source(convert_lineage_urns_to_lowercase=True)
+        source._warehouse_platform = "snowflake"
+
+        mock_graph = MagicMock()
+        mock_graph.exists.side_effect = ConnectionError("graph unavailable")
+        source.ctx.graph = mock_graph
+
+        urns = source._tables_to_urns(["XRBIA_DM.FACT_SALES"])
+        assert urns == [
+            "urn:li:dataset:(urn:li:dataPlatform:snowflake,xrbia_dm.fact_sales,PROD)"
+        ]
+
+    def test_already_lowercase_skips_duplicate_candidate(self) -> None:
+        """When the table is already lowercase, only one candidate should be tried."""
+        source = self._make_source()
+        source._warehouse_platform = "snowflake"
+
+        mock_graph = MagicMock()
+        mock_graph.exists.return_value = True
+        source.ctx.graph = mock_graph
+
+        source._tables_to_urns(["xrbia_dm.fact_sales"])
+        # Should only call exists once since original == lowercase
+        assert mock_graph.exists.call_count == 1
+
+
 class TestApiCallReduction:
     def test_cube_search_once_per_project(self) -> None:
         config_dict = {
