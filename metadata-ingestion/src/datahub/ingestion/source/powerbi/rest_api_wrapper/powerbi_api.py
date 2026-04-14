@@ -909,6 +909,20 @@ class PowerBiAPI:
             cur_workspace.datasets = self._get_workspace_datasets(cur_workspace)
             self.dataset_registry.update(cur_workspace.datasets)
 
+            # Fetch endorsement tags if enabled
+            if self.__config.extract_endorsements_to_tags:
+                cur_workspace.dashboard_endorsements = self._get_dashboard_endorsements(
+                    cur_workspace.scan_result
+                )
+                cur_workspace.report_endorsements = self._get_report_endorsements(
+                    cur_workspace.scan_result
+                )
+
+            self._populate_app_details(
+                workspace=cur_workspace,
+                workspace_metadata=workspace_metadata,
+            )
+
             # When use_scan_result_only is enabled, build reports and dashboards
             # from scan result to avoid redundant per-workspace API calls
             if self.__config.use_scan_result_only:
@@ -920,6 +934,10 @@ class PowerBiAPI:
                     cur_workspace.dashboards = self._get_dashboards_from_scan_result(
                         cur_workspace
                     )
+
+            # Free the raw scan result — all needed data has been extracted
+            # into lightweight parsed fields. This will save memory for large workspaces
+            cur_workspace.scan_result = {}
 
         return scanned_ids
 
@@ -1010,23 +1028,8 @@ class PowerBiAPI:
             for dashboard in workspace.dashboards.values():
                 dashboard.tags = workspace.dashboard_endorsements.get(dashboard.id, [])
 
-        # Fetch endorsement tags if enabled
-        if self.__config.extract_endorsements_to_tags:
-            workspace.dashboard_endorsements = self._get_dashboard_endorsements(
-                workspace.scan_result
-            )
-            workspace.report_endorsements = self._get_report_endorsements(
-                workspace.scan_result
-            )
-        else:
-            logger.info(
-                "Skipping endorsements tag as extract_endorsements_to_tags is not enabled"
-            )
-
-        self._populate_app_details(
-            workspace=workspace,
-            workspace_metadata=workspace.scan_result,
-        )
+        # Endorsements and app details are already populated by
+        # fill_metadata_from_scan_result (Phase 1).
 
         # fill reports first since some dashboard may reference a report
         fill_reports()
