@@ -640,13 +640,13 @@ class DataplexLineageExtractor:
         upstream_lineage = self._to_upstream_lineage(dataset_id, lineage_edges)
         return list(self._gen_lineage(dataset_id, dataset_urn, upstream_lineage))
 
-    def get_lineage_workunits_parallel(
+    def get_lineage_workunits(
         self,
         entry_data: Iterable[EntryDataTuple],
         active_lineage_project_location_pairs: list[tuple[str, str]],
         max_workers: int = 20,
     ) -> Iterable[MetadataWorkUnit]:
-        """Parallel variant of ``get_lineage_workunits``.
+        """Extract lineage workunits for all entries using a thread pool.
 
         Submits one task per entry to a ``ThreadPoolExecutor``.  Each worker
         calls ``_process_entry_lineage`` which internally queries the Dataplex
@@ -715,100 +715,3 @@ class DataplexLineageExtractor:
             self.report.num_lineage_edges_added,
         )
 
-    def get_lineage_workunits(
-        self,
-        entry_data: Iterable[EntryDataTuple],
-        active_lineage_project_location_pairs: list[tuple[str, str]],
-    ) -> Iterable[MetadataWorkUnit]:
-        """
-        Main entry point to get lineage workunits for multiple entries.
-
-        Processes entries in a streaming mode to reduce memory pressure for large
-        deployments. Each entry is queried, normalized, and emitted independently.
-
-        Args:
-            entry_data: Iterable of EntryDataTuple objects
-
-        Yields:
-            MetadataWorkUnit objects containing lineage information
-        """
-        if not self.config.include_lineage:
-            logger.info("Lineage extraction is disabled")
-            return
-
-        logger.info("Extracting lineage")
-
-        entries_with_lineage = 0
-        for entry_index, entry in enumerate(entry_data, start=1):
-            lineage_data = self.get_lineage_for_entry(
-                entry,
-                active_lineage_project_location_pairs=active_lineage_project_location_pairs,
-            )
-            lineage_edges = self._extract_lineage_edges_for_entry(entry, lineage_data)
-            if not lineage_edges:
-                continue
-
-            dataset_id = entry.datahub_dataset_name
-            dataset_urn = builder.make_dataset_urn_with_platform_instance(
-                platform=entry.datahub_platform,
-                name=dataset_id,
-                platform_instance=None,
-                env=self.config.env,
-            )
-            upstream_lineage = self._to_upstream_lineage(dataset_id, lineage_edges)
-            if upstream_lineage is None:
-                continue
-
-            try:
-                yielded_for_entry = False
-                for workunit in self._gen_lineage(
-                    dataset_id,
-                    dataset_urn,
-                    upstream_lineage,
-                ):
-                    yielded_for_entry = True
-                    yield workunit
-                if yielded_for_entry:
-                    entries_with_lineage += 1
-            except Exception as e:
-                self.report.report_lineage_entry_failed(
-                    entry_name=entry.dataplex_entry_name,
-                    stage="gen_lineage_streaming",
-                )
-                self.source_report.warning(
-                    "Failed to generate lineage for entry.",
-                    context=(
-                        f"dataplex_entry_name={entry.dataplex_entry_name}, "
-                        f"datahub_dataset_name={entry.datahub_dataset_name}, "
-                        "stage=gen_lineage_streaming"
-                    ),
-                    exc=e,
-                )
-
-            if entry_index % 1000 == 0:
-                logger.info(
-                    "Lineage streaming progress: processed=%s, scanned=%s, "
-                    "no_lineage=%s, unsupported=%s, failed=%s, edges_added=%s, "
-                    "upstream_parse_skipped=%s",
-                    self.report.num_lineage_entries_processed,
-                    self.report.num_lineage_entries_scanned,
-                    self.report.num_lineage_entries_without_lineage,
-                    self.report.num_lineage_entries_skipped_unsupported_type,
-                    self.report.num_lineage_entries_failed,
-                    self.report.num_lineage_edges_added,
-                    self.report.num_lineage_upstream_fqns_skipped,
-                )
-
-        logger.info(
-            "Lineage streaming complete: entries_with_lineage=%s, processed=%s, "
-            "no_lineage=%s, unsupported=%s, failed=%s, upstream_parse_skipped=%s, "
-            "upstream_links_observed=%s, edges_added=%s",
-            entries_with_lineage,
-            self.report.num_lineage_entries_processed,
-            self.report.num_lineage_entries_without_lineage,
-            self.report.num_lineage_entries_skipped_unsupported_type,
-            self.report.num_lineage_entries_failed,
-            self.report.num_lineage_upstream_fqns_skipped,
-            self.report.num_lineage_upstream_links_found,
-            self.report.num_lineage_edges_added,
-        )

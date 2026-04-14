@@ -535,7 +535,7 @@ class TestDataplexEntriesProcessorDesign:
 
 
 class TestDataplexParallelEntries:
-    """Tests for the parallel entry processing path (process_entries_parallel)."""
+    """Tests for the parallel entry processing path (process_entries)."""
 
     @pytest.fixture
     def processor(self) -> DataplexEntriesProcessor:
@@ -552,7 +552,7 @@ class TestDataplexParallelEntries:
             source_report=Mock(),
         )
 
-    def test_process_entries_parallel_collects_all_entries(
+    def test_process_entries_collects_all_entries(
         self, processor: DataplexEntriesProcessor
     ) -> None:
         entity_a = Mock()
@@ -570,14 +570,14 @@ class TestDataplexParallelEntries:
             patch.object(processor, "_process_spanner_entries", return_value=[]),
         ):
             entities = list(
-                processor.process_entries_parallel(
+                processor.process_entries(
                     project_ids=["proj-1"], max_workers=2
                 )
             )
 
         assert set(entities) == {entity_a, entity_b}
 
-    def test_process_entries_parallel_includes_spanner_entities(
+    def test_process_entries_includes_spanner_entities(
         self, processor: DataplexEntriesProcessor
     ) -> None:
         spanner_entity = Mock()
@@ -589,14 +589,14 @@ class TestDataplexParallelEntries:
             ),
         ):
             entities = list(
-                processor.process_entries_parallel(
+                processor.process_entries(
                     project_ids=["proj-1"], max_workers=2
                 )
             )
 
         assert spanner_entity in entities
 
-    def test_process_entries_parallel_handles_fetch_failure(
+    def test_process_entries_handles_fetch_failure(
         self, processor: DataplexEntriesProcessor
     ) -> None:
         entity_ok = Mock()
@@ -615,7 +615,7 @@ class TestDataplexParallelEntries:
             patch.object(processor, "_process_spanner_entries", return_value=[]),
         ):
             entities = list(
-                processor.process_entries_parallel(
+                processor.process_entries(
                     project_ids=["proj-1"], max_workers=2
                 )
             )

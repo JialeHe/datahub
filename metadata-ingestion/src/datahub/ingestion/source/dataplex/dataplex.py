@@ -118,7 +118,7 @@ class DataplexSource(StatefulIngestionSourceBase, TestableSource):
 
     Parallelization strategy:
     - The entries stage runs in three sequential phases inside
-      ``DataplexEntriesProcessor.process_entries_parallel``:
+      ``DataplexEntriesProcessor.process_entries``:
 
       * Phase 1a (sequential): ``list_entry_groups`` + ``list_entries`` across all
         configured project × location pairs.  These listing calls are fast (paginated,
@@ -135,7 +135,7 @@ class DataplexSource(StatefulIngestionSourceBase, TestableSource):
 
     - The lineage stage submits one task per entry to a ``ThreadPoolExecutor``
       with ``max_workers_lineage`` workers via
-      ``DataplexLineageExtractor.get_lineage_workunits_parallel``.  Each worker
+      ``DataplexLineageExtractor.get_lineage_workunits``.  Each worker
       queries the Dataplex Lineage API across all configured project/location
       pairs with the configured retry logic.
 
@@ -290,7 +290,7 @@ class DataplexSource(StatefulIngestionSourceBase, TestableSource):
         ):
             try:
                 yield from auto_workunit(
-                    self.entries_processor.process_entries_parallel(
+                    self.entries_processor.process_entries(
                         project_ids=self.config.project_ids,
                         max_workers=self.config.max_workers_entries,
                     )
@@ -323,7 +323,7 @@ class DataplexSource(StatefulIngestionSourceBase, TestableSource):
                 )
 
                 try:
-                    yield from self.lineage_extractor.get_lineage_workunits_parallel(
+                    yield from self.lineage_extractor.get_lineage_workunits(
                         self.entry_data,
                         active_lineage_project_location_pairs=lineage_project_location_pairs,
                         max_workers=self.config.max_workers_lineage,

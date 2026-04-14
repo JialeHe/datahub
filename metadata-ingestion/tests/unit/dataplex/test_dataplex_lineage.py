@@ -1526,7 +1526,7 @@ class TestLineageMapKeyCollision:
 
 
 class TestDataplexParallelLineage:
-    """Tests for the parallel lineage workunit path (get_lineage_workunits_parallel)."""
+    """Tests for the parallel lineage workunit path (get_lineage_workunits)."""
 
     def _make_entry(self, idx: int) -> EntryDataTuple:
         return EntryDataTuple(
@@ -1540,7 +1540,7 @@ class TestDataplexParallelLineage:
             datahub_dataset_urn=f"urn:li:dataset:(urn:li:dataPlatform:bigquery,p.ds.table{idx},PROD)",
         )
 
-    def test_get_lineage_workunits_parallel_returns_all_workunits(
+    def test_get_lineage_workunits_returns_all_workunits(
         self,
         lineage_extractor: DataplexLineageExtractor,
     ) -> None:
@@ -1551,7 +1551,7 @@ class TestDataplexParallelLineage:
             lineage_extractor, "_process_entry_lineage", return_value=[workunit]
         ):
             workunits = list(
-                lineage_extractor.get_lineage_workunits_parallel(
+                lineage_extractor.get_lineage_workunits(
                     entry_data=entries,
                     active_lineage_project_location_pairs=[("p", "us-central1")],
                     max_workers=3,
@@ -1561,7 +1561,7 @@ class TestDataplexParallelLineage:
         assert len(workunits) == 5
         assert all(wu is workunit for wu in workunits)
 
-    def test_get_lineage_workunits_parallel_handles_entry_failure(
+    def test_get_lineage_workunits_handles_entry_failure(
         self,
         lineage_extractor: DataplexLineageExtractor,
         source_report: Mock,
@@ -1576,7 +1576,7 @@ class TestDataplexParallelLineage:
             side_effect=[[workunit], Exception("api error"), [workunit]],
         ):
             workunits = list(
-                lineage_extractor.get_lineage_workunits_parallel(
+                lineage_extractor.get_lineage_workunits(
                     entry_data=entries,
                     active_lineage_project_location_pairs=[("p", "us-central1")],
                     max_workers=3,
@@ -1586,7 +1586,7 @@ class TestDataplexParallelLineage:
         assert len(workunits) == 2
         source_report.warning.assert_called_once()
 
-    def test_get_lineage_workunits_parallel_skipped_when_disabled(
+    def test_get_lineage_workunits_skipped_when_disabled(
         self,
         dataplex_report: DataplexReport,
         source_report: Mock,
@@ -1604,7 +1604,7 @@ class TestDataplexParallelLineage:
         )
 
         workunits = list(
-            extractor.get_lineage_workunits_parallel(
+            extractor.get_lineage_workunits(
                 entry_data=[self._make_entry(0)],
                 active_lineage_project_location_pairs=[("p", "us-central1")],
                 max_workers=5,

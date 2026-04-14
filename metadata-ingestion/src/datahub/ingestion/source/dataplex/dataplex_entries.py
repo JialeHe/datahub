@@ -73,7 +73,7 @@ class DataplexEntriesReport(Report):
 
     def __post_init__(self) -> None:
         # Lock protecting all mutable fields when report methods are called from
-        # parallel worker threads (Phase 1b of process_entries_parallel).
+        # parallel worker threads (Phase 1b of process_entries).
         self._lock: threading.Lock = threading.Lock()
 
     def report_catalog_api_call(self, api_name: str, elapsed_seconds: float) -> None:
@@ -158,7 +158,7 @@ class DataplexEntriesProcessor:
     # Parallel entry processing (three-phase)
     # ------------------------------------------------------------------
 
-    def process_entries_parallel(
+    def process_entries(
         self, project_ids: List[str], max_workers: int
     ) -> Iterable["Entity"]:
         """Process all entries across configured projects using a thread pool.
