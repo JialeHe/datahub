@@ -33,6 +33,7 @@ on:
       - "Frontend Preview"
       - "spark smoke test"
       - "Verify Quickstart Compose"
+      - "Docker Smoke Tests"
     types:
       - completed
 

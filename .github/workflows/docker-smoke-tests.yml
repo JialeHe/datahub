@@ -9,11 +9,12 @@ on:
         required: false
         default: "quickstart-consumers"
         type: string
-  # push:
-  #   branches:
-  #     - master
-  #     - releases/**
-  #     - hotfixes/**
+  push:
+    branches:
+      - dc/docker-unified-refactor
+      - master
+      - releases/**
+      - hotfixes/**
   # pull_request:
   #   types: [opened, synchronize, reopened]
   #   branches:
