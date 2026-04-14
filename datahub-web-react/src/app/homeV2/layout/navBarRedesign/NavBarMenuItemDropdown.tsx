@@ -48,7 +48,7 @@ export default function NavBarMenuItemDropdown({ item, isCollapsed, isSelected, 
 
         if (clickedItem.disabled) return null;
 
-        analytics.event({ type: EventType.NavBarItemClick, label: `${item.title} -> ${clickedItem.title}` });
+        analytics.event({ type: EventType.NavBarItemClick, label: item.title, subLabel: clickedItem.title });
 
         if (item.key === 'mfe-dropdown' && clickedItem.link) {
             return history.push(clickedItem.link);
