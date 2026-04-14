@@ -1,9 +1,11 @@
 """Entry processing utilities for Dataplex source (Universal Catalog/Entries API)."""
 
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Iterable, Optional, cast
+from typing import TYPE_CHECKING, Iterable, List, Optional, Tuple, cast
 
 from google.cloud import dataplex_v1
 
@@ -69,26 +71,33 @@ class DataplexEntriesReport(Report):
     entries_processed_samples: LossyList[str] = field(default_factory=LossyList)
     catalog_api: dict[str, tuple[int, float]] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        # Lock protecting all mutable fields when report methods are called from
+        # parallel worker threads (Phase 1b of process_entries_parallel).
+        self._lock: threading.Lock = threading.Lock()
+
     def report_catalog_api_call(self, api_name: str, elapsed_seconds: float) -> None:
         """Accumulate per-API call count and total latency in seconds."""
-        num_calls, total_time_secs = self.catalog_api.get(api_name, (0, 0.0))
-        self.catalog_api[api_name] = (
-            num_calls + 1,
-            total_time_secs + elapsed_seconds,
-        )
+        with self._lock:
+            num_calls, total_time_secs = self.catalog_api.get(api_name, (0, 0.0))
+            self.catalog_api[api_name] = (
+                num_calls + 1,
+                total_time_secs + elapsed_seconds,
+            )
 
     def report_entry_group(self, entry_group_name: str, filtered: bool) -> None:
         """Report one scanned entry group and its filtering outcome."""
-        self.entry_groups_seen += 1
-        if filtered:
-            self.entry_groups_filtered += 1
-            self.entry_group_filtered_samples.append(entry_group_name)
-            logger.debug(
-                f"Entry group filtered out by entry_groups.pattern: {entry_group_name}"
-            )
-        else:
-            self.entry_groups_processed += 1
-            self.entry_group_processed_samples.append(entry_group_name)
+        with self._lock:
+            self.entry_groups_seen += 1
+            if filtered:
+                self.entry_groups_filtered += 1
+                self.entry_group_filtered_samples.append(entry_group_name)
+                logger.debug(
+                    f"Entry group filtered out by entry_groups.pattern: {entry_group_name}"
+                )
+            else:
+                self.entry_groups_processed += 1
+                self.entry_group_processed_samples.append(entry_group_name)
 
     def report_entry(
         self,
@@ -98,28 +107,29 @@ class DataplexEntriesReport(Report):
         filtered_name: bool,
     ) -> None:
         """Report one scanned entry and its filtering outcome."""
-        self.entries_seen += 1
+        with self._lock:
+            self.entries_seen += 1
 
-        if filtered_name:
-            self.entries_filtered_by_pattern += 1
-            self.entry_pattern_filtered_samples.append(entry_name)
-            logger.debug(f"Entry filtered out by entries.pattern: {entry_name}")
+            if filtered_name:
+                self.entries_filtered_by_pattern += 1
+                self.entry_pattern_filtered_samples.append(entry_name)
+                logger.debug(f"Entry filtered out by entries.pattern: {entry_name}")
 
-        if filtered_missing_fqn:
-            self.entries_filtered_by_missing_fqn += 1
-            self.entry_missing_fqn_samples.append(entry_name)
-            logger.debug(
-                f"Entry filtered out by missing fully_qualified_name: {entry_name}"
-            )
+            if filtered_missing_fqn:
+                self.entries_filtered_by_missing_fqn += 1
+                self.entry_missing_fqn_samples.append(entry_name)
+                logger.debug(
+                    f"Entry filtered out by missing fully_qualified_name: {entry_name}"
+                )
 
-        if filtered_fqn:
-            self.entries_filtered_by_fqn_pattern += 1
-            self.entry_fqn_filtered_samples.append(entry_name)
-            logger.debug(f"Entry filtered out by entries.fqn_pattern: {entry_name}")
+            if filtered_fqn:
+                self.entries_filtered_by_fqn_pattern += 1
+                self.entry_fqn_filtered_samples.append(entry_name)
+                logger.debug(f"Entry filtered out by entries.fqn_pattern: {entry_name}")
 
-        if not filtered_name and not filtered_missing_fqn and not filtered_fqn:
-            self.entries_processed += 1
-            self.entries_processed_samples.append(entry_name)
+            if not filtered_name and not filtered_missing_fqn and not filtered_fqn:
+                self.entries_processed += 1
+                self.entries_processed_samples.append(entry_name)
 
 
 class DataplexEntriesProcessor:
@@ -139,6 +149,10 @@ class DataplexEntriesProcessor:
         self.source_report = source_report
         self.entry_data = entry_data
         self._emitted_project_containers: set[str] = set()
+        # Guards the check+add on _emitted_project_containers across parallel workers.
+        self._container_lock: threading.Lock = threading.Lock()
+        # Guards appends to entry_data across parallel workers.
+        self._entry_data_lock: threading.Lock = threading.Lock()
 
     def process_project(self, project_id: str) -> Iterable["Entity"]:
         """Iterate all configured locations for project-level entry processing."""
@@ -150,9 +164,15 @@ class DataplexEntriesProcessor:
         for entry in self.collect_entries(project_id, location):
             project_container = self.build_project_container_for_entry(entry)
             if project_container is not None:
-                project_container_urn = project_container.urn.urn()
-                if project_container_urn not in self._emitted_project_containers:
-                    self._emitted_project_containers.add(project_container_urn)
+                with self._container_lock:
+                    project_container_urn = project_container.urn.urn()
+                    if project_container_urn not in self._emitted_project_containers:
+                        self._emitted_project_containers.add(project_container_urn)
+                        # Yield outside the lock to avoid holding it during I/O.
+                        emit_project_container = True
+                    else:
+                        emit_project_container = False
+                if emit_project_container:
                     yield project_container
 
             entity = self.build_entity_for_entry(entry)
@@ -163,6 +183,251 @@ class DataplexEntriesProcessor:
                 entry=entry,
             )
             yield entity
+
+    # ------------------------------------------------------------------
+    # Parallel entry processing (three-phase)
+    # ------------------------------------------------------------------
+
+    def process_entries_parallel(
+        self, project_ids: List[str], max_workers: int
+    ) -> Iterable["Entity"]:
+        """Process all entries across configured projects using a thread pool.
+
+        Three-phase execution:
+
+        * Phase 1a (sequential): iterate all project × location pairs and call
+          ``list_entry_groups`` + ``list_entries`` to accumulate the minimal set
+          of entry names that pass configured filters.  These listing calls are
+          fast (paginated, no detail payload) so sequential execution is fine.
+
+        * Phase 1b (parallel): submit all accumulated entry-name stubs to a
+          ``ThreadPoolExecutor``.  Each worker calls ``get_entry(view=ALL)``
+          (the expensive per-entry RPC) and then builds DataHub entities.
+          Distributing across a flat pool avoids the bottleneck of a single
+          project with thousands of entries.
+
+        * Phase 1c (sequential): run the Spanner ``search_entries`` workaround
+          for each project × location pair.  Spanner entries come back already
+          fully-fetched from the search API and require no separate
+          ``get_entry`` call, so there is nothing to parallelise here.
+        """
+        # Phase 1a: accumulate entry stubs across all projects and locations.
+        entry_stubs: List[Tuple[str, str]] = []  # (entry_name, location)
+        for project_id in project_ids:
+            for location in self.config.entries_locations:
+                for name in self._list_entry_stubs(project_id, location):
+                    entry_stubs.append((name, location))
+
+        # Phase 1b: fetch entry details in parallel and build entities.
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(self._fetch_and_build_entry, name, loc): (name, loc)
+                for name, loc in entry_stubs
+            }
+            for future in as_completed(futures):
+                entry_name, _ = futures[future]
+                try:
+                    yield from future.result()
+                except Exception as exc:
+                    self.source_report.warning(
+                        title="Dataplex entry processing failed",
+                        message="Unexpected error while building entity from fetched entry details.",
+                        context=f"entry_name={entry_name}",
+                        exc=exc,
+                    )
+
+        # Phase 1c: Spanner entries (sequential — already fully-fetched from search_entries).
+        for project_id in project_ids:
+            for location in self.config.entries_locations:
+                yield from self._process_spanner_entries(project_id, location)
+
+    def _list_entry_stubs(self, project_id: str, location: str) -> List[str]:
+        """Return entry names that pass filters for one project/location pair.
+
+        Only performs ``list_entry_groups`` and ``list_entries`` — does NOT
+        call ``get_entry``.  Meant to be called sequentially in Phase 1a so
+        that the slower ``get_entry`` calls can be parallelised in Phase 1b.
+        """
+        entry_names: List[str] = []
+        for entry_group in self.list_entry_groups(project_id, location):
+            logger.info(f"Listing entry group {entry_group.name}")
+            logger.info(f"Entry group payload: {entry_group}")
+            filtered = not self.should_process_entry_group(entry_group.name)
+            self.report.report_entry_group(entry_group.name, filtered=filtered)
+            if filtered:
+                continue
+
+            request = dataplex_v1.ListEntriesRequest(parent=entry_group.name)
+            with PerfTimer() as timer:
+                entries = list(self.catalog_client.list_entries(request=request))
+            self.report.report_catalog_api_call("list_entries", timer.elapsed_seconds())
+
+            for entry in entries:
+                logger.info(f"Listing entry {entry.name} from group {entry_group.name}")
+                logger.info(f"ListEntries payload: {entry}")
+                if self._report_and_should_process_entry(entry):
+                    entry_names.append(entry.name)
+                else:
+                    logger.debug(
+                        "Skipping entry stub for filtered entry %s from group %s",
+                        entry.name,
+                        entry_group.name,
+                    )
+        return entry_names
+
+    def _fetch_entry_detail(self, entry_name: str) -> Optional[dataplex_v1.Entry]:
+        """Fetch full entry detail via ``get_entry(view=ALL)``.
+
+        Safe to call from parallel worker threads — only reads from shared GCP
+        client (thread-safe) and reports via the lock-protected report methods.
+        Returns ``None`` on failure so callers can skip gracefully.
+        """
+        try:
+            request = dataplex_v1.GetEntryRequest(
+                name=entry_name,
+                view=dataplex_v1.EntryView.ALL,
+            )
+            with PerfTimer() as timer:
+                detailed_entry = self.catalog_client.get_entry(request=request)
+            self.report.report_catalog_api_call("get_entry", timer.elapsed_seconds())
+            logger.debug(f"Detailed entry {detailed_entry}")
+            return detailed_entry
+        except Exception as exc:
+            self.source_report.warning(
+                title="Dataplex entry fetch failed",
+                message="Failed to fetch Dataplex entry details. Skipping entry.",
+                context=f"entry_name={entry_name}",
+                exc=exc,
+            )
+            return None
+
+    def _build_entities_for_entry(
+        self, entry: dataplex_v1.Entry, location: str
+    ) -> List["Entity"]:
+        """Build DataHub entities from a fully-fetched entry.
+
+        Safe to call from parallel worker threads:
+        - Uses ``_container_lock`` for the atomic check+add on
+          ``_emitted_project_containers``.
+        - Uses ``_entry_data_lock`` for appends to ``entry_data``.
+        - All other state accessed here (config, report methods) is either
+          read-only or already lock-protected.
+        """
+        results: List["Entity"] = []
+
+        project_container = self.build_project_container_for_entry(entry)
+        if project_container is not None:
+            with self._container_lock:
+                project_container_urn = project_container.urn.urn()
+                if project_container_urn not in self._emitted_project_containers:
+                    self._emitted_project_containers.add(project_container_urn)
+                    results.append(project_container)
+
+        entity = self.build_entity_for_entry(entry)
+        self._track_entry_for_lineage_locked(dataplex_location=location, entry=entry)
+        if entity is not None:
+            results.append(entity)
+
+        return results
+
+    def _fetch_and_build_entry(self, entry_name: str, location: str) -> List["Entity"]:
+        """Fetch entry details and build entities.  Called from thread pool."""
+        detailed_entry = self._fetch_entry_detail(entry_name)
+        if detailed_entry is None:
+            return []
+        return self._build_entities_for_entry(detailed_entry, location)
+
+    def _process_spanner_entries(
+        self, project_id: str, location: str
+    ) -> Iterable["Entity"]:
+        """Process Spanner entries via ``search_entries`` workaround (Phase 1c).
+
+        Spanner entries are returned already fully-fetched from the search API
+        so no separate ``get_entry`` call is needed.  This phase runs
+        sequentially after the parallel Phase 1b because it uses a different
+        API surface and has nothing to parallelise.
+        """
+        logger.info(
+            f"SearchEntries spanner for project={project_id} location={location}"
+        )
+        request = dataplex_v1.SearchEntriesRequest(
+            name=f"projects/{project_id}/locations/{location}",
+            scope=f"projects/{project_id}",
+            query="system=cloud_spanner",
+        )
+        try:
+            with PerfTimer() as timer:
+                search_results = list(
+                    self.catalog_client.search_entries(request=request)
+                )
+            self.report.report_catalog_api_call(
+                "search_entries", timer.elapsed_seconds()
+            )
+            for result in search_results:
+                logger.info(f"SearchEntries result payload: {result}")
+                dataplex_entry = getattr(result, "dataplex_entry", None)
+                if dataplex_entry is None:
+                    continue
+                if not self._report_and_should_process_entry(dataplex_entry):
+                    logger.debug(
+                        "Skipping filtered spanner entry %s from search_entries",
+                        dataplex_entry.name,
+                    )
+                    continue
+                logger.debug(f"Spanner dataplex entry payload: {dataplex_entry}")
+                yield from self._build_entities_for_entry(dataplex_entry, location)
+        except Exception as exc:
+            logger.warning(
+                f"Spanner workaround search failed for {project_id}/{location}: {exc}"
+            )
+
+    def _track_entry_for_lineage_locked(
+        self, dataplex_location: str, entry: dataplex_v1.Entry
+    ) -> None:
+        """Thread-safe wrapper around ``_track_entry_for_lineage``."""
+        if not entry.fully_qualified_name:
+            return
+
+        short_name = extract_entry_type_short_name(entry.entry_type)
+        if short_name is None:
+            self.source_report.warning(
+                title="Invalid Dataplex entry type format",
+                message="Failed to extract short entry type from Dataplex entry_type. Skipping lineage tracking.",
+                context=f"entry_type={entry.entry_type}, entry_name={entry.name}, entry_payload={entry}",
+            )
+            return
+        mapping = DATAPLEX_ENTRY_TYPE_MAPPINGS.get(short_name)
+        if mapping is None or mapping.datahub_entity_type != "Dataset":
+            return
+
+        dataset_name = extract_datahub_dataset_name_from_fqn(
+            entry_type_or_short_name=short_name,
+            fully_qualified_name=entry.fully_qualified_name,
+        )
+        if dataset_name is None:
+            return
+
+        entry_data_tuple = EntryDataTuple(
+            dataplex_entry_short_name=entry.name.split("/")[-1],
+            dataplex_entry_name=entry.name,
+            dataplex_location=dataplex_location,
+            dataplex_entry_fqn=entry.fully_qualified_name,
+            dataplex_entry_type_short_name=short_name,
+            datahub_platform=mapping.datahub_platform,
+            datahub_dataset_name=dataset_name,
+            datahub_dataset_urn=make_dataset_urn_with_platform_instance(
+                platform=mapping.datahub_platform,
+                name=dataset_name,
+                platform_instance=None,
+                env=self.config.env,
+            ),
+        )
+        with self._entry_data_lock:
+            self.entry_data.append(entry_data_tuple)
+
+    # ------------------------------------------------------------------
+    # Original sequential API (kept for backward compatibility)
+    # ------------------------------------------------------------------
 
     def list_entry_groups(
         self, project_id: str, location: str
@@ -607,23 +872,24 @@ class DataplexEntriesProcessor:
         if dataset_name is None:
             return
 
-        self.entry_data.append(
-            EntryDataTuple(
-                dataplex_entry_short_name=entry.name.split("/")[-1],
-                dataplex_entry_name=entry.name,
-                dataplex_location=dataplex_location,
-                dataplex_entry_fqn=entry.fully_qualified_name,
-                dataplex_entry_type_short_name=short_name,
-                datahub_platform=mapping.datahub_platform,
-                datahub_dataset_name=dataset_name,
-                datahub_dataset_urn=make_dataset_urn_with_platform_instance(
-                    platform=mapping.datahub_platform,
-                    name=dataset_name,
-                    platform_instance=None,
-                    env=self.config.env,
-                ),
+        with self._entry_data_lock:
+            self.entry_data.append(
+                EntryDataTuple(
+                    dataplex_entry_short_name=entry.name.split("/")[-1],
+                    dataplex_entry_name=entry.name,
+                    dataplex_location=dataplex_location,
+                    dataplex_entry_fqn=entry.fully_qualified_name,
+                    dataplex_entry_type_short_name=short_name,
+                    datahub_platform=mapping.datahub_platform,
+                    datahub_dataset_name=dataset_name,
+                    datahub_dataset_urn=make_dataset_urn_with_platform_instance(
+                        platform=mapping.datahub_platform,
+                        name=dataset_name,
+                        platform_instance=None,
+                        env=self.config.env,
+                    ),
+                )
             )
-        )
 
     def _resolve_entry_type_mapping(
         self, entry: dataplex_v1.Entry

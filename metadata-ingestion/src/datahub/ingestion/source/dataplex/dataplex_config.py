@@ -190,6 +190,27 @@ class DataplexConfig(
         "Recommended: 1000 for large deployments (>10k entries), None for small deployments (<1k entries). Default: 1000.",
     )
 
+    max_workers_entries: int = Field(
+        default=10,
+        ge=1,
+        le=100,
+        description="Number of parallel worker threads for fetching entry details "
+        "(get_entry API calls). Entry detail fetching is the main bottleneck in the "
+        "entries stage because each entry requires one blocking RPC. Increasing this "
+        "value reduces wall-clock time proportionally up to the API quota limit. "
+        "Increase for large deployments (>1k entries). Default: 10.",
+    )
+
+    max_workers_lineage: int = Field(
+        default=20,
+        ge=1,
+        le=100,
+        description="Number of parallel worker threads for lineage lookups "
+        "(search_links API calls). Lineage lookup volume scales with entries × "
+        "lineage_locations, so parallelism here has a large impact on total "
+        "ingestion time. Increase for large entry × location matrices. Default: 20.",
+    )
+
     stateful_ingestion: Optional[StatefulStaleMetadataRemovalConfig] = Field(
         default=None,
         description="Stateful ingestion configuration for stale metadata removal.",

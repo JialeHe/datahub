@@ -1,5 +1,7 @@
 """Unit tests for Dataplex entry processing."""
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import cast
 from unittest.mock import Mock, patch
 
@@ -753,3 +755,161 @@ class TestDataplexEntriesProcessorDesign:
         non_dataset_entry.fully_qualified_name = "bigquery:p.ds"
         processor._track_entry_for_lineage("us", non_dataset_entry)
         assert len(processor.entry_data) == 1
+
+
+class TestDataplexParallelEntries:
+    """Tests for the parallel entry processing path (process_entries_parallel)."""
+
+    @pytest.fixture
+    def processor(self) -> DataplexEntriesProcessor:
+        config = DataplexConfig(
+            project_ids=["proj-1"],
+            entries_locations=["us"],
+            env="PROD",
+        )
+        return DataplexEntriesProcessor(
+            config=config,
+            catalog_client=Mock(spec=dataplex_v1.CatalogServiceClient),
+            report=DataplexEntriesReport(),
+            entry_data=[],
+            source_report=Mock(),
+        )
+
+    def test_process_entries_parallel_collects_all_entries(
+        self, processor: DataplexEntriesProcessor
+    ) -> None:
+        entity_a = Mock()
+        entity_b = Mock()
+
+        with (
+            patch.object(
+                processor, "_list_entry_stubs", return_value=["entry-a", "entry-b"]
+            ),
+            patch.object(
+                processor,
+                "_fetch_and_build_entry",
+                side_effect=[[entity_a], [entity_b]],
+            ),
+            patch.object(processor, "_process_spanner_entries", return_value=[]),
+        ):
+            entities = list(
+                processor.process_entries_parallel(
+                    project_ids=["proj-1"], max_workers=2
+                )
+            )
+
+        assert set(entities) == {entity_a, entity_b}
+
+    def test_process_entries_parallel_includes_spanner_entities(
+        self, processor: DataplexEntriesProcessor
+    ) -> None:
+        spanner_entity = Mock()
+
+        with (
+            patch.object(processor, "_list_entry_stubs", return_value=[]),
+            patch.object(
+                processor, "_process_spanner_entries", return_value=[spanner_entity]
+            ),
+        ):
+            entities = list(
+                processor.process_entries_parallel(
+                    project_ids=["proj-1"], max_workers=2
+                )
+            )
+
+        assert spanner_entity in entities
+
+    def test_process_entries_parallel_handles_fetch_failure(
+        self, processor: DataplexEntriesProcessor
+    ) -> None:
+        entity_ok = Mock()
+
+        with (
+            patch.object(
+                processor,
+                "_list_entry_stubs",
+                return_value=["entry-ok", "entry-fail"],
+            ),
+            patch.object(
+                processor,
+                "_fetch_and_build_entry",
+                side_effect=[[entity_ok], Exception("fetch failed")],
+            ),
+            patch.object(processor, "_process_spanner_entries", return_value=[]),
+        ):
+            entities = list(
+                processor.process_entries_parallel(
+                    project_ids=["proj-1"], max_workers=2
+                )
+            )
+
+        assert entity_ok in entities
+        source_report = cast(Mock, processor.source_report)
+        source_report.warning.assert_called_once()
+
+    def test_build_entities_deduplicates_project_container_across_threads(
+        self,
+    ) -> None:
+        """Two parallel workers encountering the same project container emit it once."""
+        processor = DataplexEntriesProcessor(
+            config=DataplexConfig(project_ids=["proj-1"], env="PROD"),
+            catalog_client=Mock(spec=dataplex_v1.CatalogServiceClient),
+            report=DataplexEntriesReport(),
+            entry_data=[],
+            source_report=Mock(),
+        )
+
+        project_container = Mock()
+        project_container.urn.urn.return_value = "urn:li:container:same-project"
+        entity_1 = Mock()
+        entity_2 = Mock()
+        entry_1 = Mock(spec=dataplex_v1.Entry)
+        entry_2 = Mock(spec=dataplex_v1.Entry)
+
+        with (
+            patch.object(
+                processor,
+                "build_project_container_for_entry",
+                return_value=project_container,
+            ),
+            patch.object(
+                processor,
+                "build_entity_for_entry",
+                side_effect=[entity_1, entity_2],
+            ),
+            patch.object(processor, "_track_entry_for_lineage_locked"),
+        ):
+            barrier = threading.Barrier(2)
+
+            def call_build(entry: dataplex_v1.Entry) -> list:
+                barrier.wait()
+                return processor._build_entities_for_entry(entry, "us")
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                f1 = executor.submit(call_build, entry_1)
+                f2 = executor.submit(call_build, entry_2)
+            results = f1.result() + f2.result()
+
+        containers = [e for e in results if e is project_container]
+        assert len(containers) == 1
+        assert entity_1 in results
+        assert entity_2 in results
+
+    def test_report_thread_safety(self) -> None:
+        """Concurrent calls to report methods produce consistent counter totals."""
+        report = DataplexEntriesReport()
+        n_threads = 50
+        barrier = threading.Barrier(n_threads)
+
+        def bump() -> None:
+            barrier.wait()
+            report.report_entry_group("eg", filtered=True)
+
+        threads = [threading.Thread(target=bump) for _ in range(n_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert report.entry_groups_seen == n_threads
+        assert report.entry_groups_filtered == n_threads
