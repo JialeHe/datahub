@@ -1,5 +1,6 @@
 package com.linkedin.metadata.kafka.listener;
 
+import com.linkedin.metadata.kafka.InboundMetadataEnvelope;
 import io.datahubproject.metadata.context.OperationContext;
 import java.io.IOException;
 import java.util.Collections;
@@ -52,6 +53,9 @@ public interface GenericKafkaListener<E, H extends EventHook<E>, R> {
   default void consume(@Nonnull ConsumerRecord<String, R> consumerRecord) {
     consumeBatch(Collections.singletonList(consumerRecord));
   }
+
+  /** Transport-neutral entry for Kafka, pgQueue, and other transports. */
+  void acceptInbound(@Nonnull InboundMetadataEnvelope<R> envelope);
 
   /**
    * Converts a generic record to the specific event type.

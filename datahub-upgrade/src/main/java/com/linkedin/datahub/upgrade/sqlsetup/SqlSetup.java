@@ -3,9 +3,14 @@ package com.linkedin.datahub.upgrade.sqlsetup;
 import com.linkedin.datahub.upgrade.Upgrade;
 import com.linkedin.datahub.upgrade.UpgradeCleanupStep;
 import com.linkedin.datahub.upgrade.UpgradeStep;
+import com.linkedin.datahub.upgrade.sqlsetup.postgres.PgQueueSchemaStep;
+import com.linkedin.metadata.config.kafka.KafkaConfiguration;
+import com.linkedin.metadata.config.postgres.DatabaseType;
+import com.linkedin.metadata.config.postgres.PostgresSqlSetupProperties;
 import io.ebean.Database;
 import java.util.ArrayList;
 import java.util.List;
+import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
 /**
@@ -16,14 +21,39 @@ public class SqlSetup implements Upgrade {
   private final List<UpgradeStep> _steps;
 
   /**
+   * Same as {@link #SqlSetup(Database, SqlSetupArgs, PostgresSqlSetupProperties)} with default
+   * {@link PostgresSqlSetupProperties#disabled()} (no PostgreSQL extension DDL steps).
+   */
+  public SqlSetup(@Nullable final Database server, @Nullable final SqlSetupArgs setupArgs) {
+    this(server, setupArgs, PostgresSqlSetupProperties.disabled(), null);
+  }
+
+  /**
    * Constructs a SqlSetup upgrade with the specified database server and configuration.
    *
    * @param server the database server instance, or null to create an empty upgrade
    * @param setupArgs the SQL setup configuration arguments, or null to create an empty upgrade
+   * @param postgresProperties optional PostgreSQL DDL extensions from {@code postgres.*} in Spring
+   *     configuration
    */
-  public SqlSetup(@Nullable final Database server, @Nullable final SqlSetupArgs setupArgs) {
+  public SqlSetup(
+      @Nullable final Database server,
+      @Nullable final SqlSetupArgs setupArgs,
+      @Nonnull final PostgresSqlSetupProperties postgresProperties) {
+    this(server, setupArgs, postgresProperties, null);
+  }
+
+  /**
+   * @param kafkaConfiguration optional; used with {@code postgres.pgQueue.inheritKafkaTopics} for
+   *     pgQueue topic catalog alignment with {@code kafka.topics.*}
+   */
+  public SqlSetup(
+      @Nullable final Database server,
+      @Nullable final SqlSetupArgs setupArgs,
+      @Nonnull final PostgresSqlSetupProperties postgresProperties,
+      @Nullable final KafkaConfiguration kafkaConfiguration) {
     if (server != null && setupArgs != null) {
-      _steps = buildSteps(server, setupArgs);
+      _steps = buildSteps(server, setupArgs, postgresProperties, kafkaConfiguration);
     } else {
       _steps = List.of();
     }
@@ -49,11 +79,20 @@ public class SqlSetup implements Upgrade {
     return _steps;
   }
 
-  private List<UpgradeStep> buildSteps(final Database server, final SqlSetupArgs setupArgs) {
+  private List<UpgradeStep> buildSteps(
+      final Database server,
+      final SqlSetupArgs setupArgs,
+      final PostgresSqlSetupProperties postgresProperties,
+      @Nullable final KafkaConfiguration kafkaConfiguration) {
     final List<UpgradeStep> steps = new ArrayList<>();
 
     // Add database table creation step
     steps.add(new CreateTablesStep(server, setupArgs));
+
+    if (setupArgs.getDbType() == DatabaseType.POSTGRES
+        && postgresProperties.getPgQueue().isEnabled()) {
+      steps.add(new PgQueueSchemaStep(server, postgresProperties, kafkaConfiguration));
+    }
 
     // Add user creation step if enabled
     if (setupArgs.isCreateUser()) {

@@ -79,7 +79,12 @@ public class PropertiesCollectorConfigurationTest extends AbstractTestNGSpringCo
           "GIT_ASKPASS", // Can contain path to credential helper
           "PWD", // Current directory may contain sensitive info
           // CDC db password
-          "mclProcessing.cdcSource.debeziumConfig.config.database.password");
+          "mclProcessing.cdcSource.debeziumConfig.config.database.password",
+          // Postgres PgQueue/PgCron credentials
+          "postgres.pgQueue.pool.password",
+          "postgres.pgCron.admin.password",
+          "postgres.pgCron.iam.awsSecretAccessKey",
+          "postgres.pgCron.iam.awsSessionToken");
 
   /**
    * Template patterns for sensitive properties that contain dynamic parts. Use [*] for numeric
@@ -159,7 +164,13 @@ public class PropertiesCollectorConfigurationTest extends AbstractTestNGSpringCo
           "authentication.authenticators[*].configs.algorithm",
           "authentication.authenticators[*].configs.discoveryUri",
           // Shim properties
-          "elasticsearch.shim.*");
+          "elasticsearch.shim.*",
+          // Postgres PgQueue configuration (non-credential settings)
+          "postgres.pgQueue.topicDefaults.*",
+          "postgres.pgQueue.topics.*.*",
+          "postgres.pgQueue.maintenance.*",
+          "postgres.pgQueue.retention.*",
+          "postgres.pgQueue.producer.*");
 
   /**
    * Property keys that should NOT be redacted. Add new non-sensitive properties here when they are
@@ -1045,7 +1056,40 @@ public class PropertiesCollectorConfigurationTest extends AbstractTestNGSpringCo
 
           // Elasticsearch Build Indices - Parallel reindex execution configuration
           "elasticsearch.buildIndices.rethrottleExecutorPoolSize",
-          "elasticsearch.buildIndices.minimumReplicasForPromotion"
+          "elasticsearch.buildIndices.minimumReplicasForPromotion",
+          // Postgres PgQueue configuration
+          "postgres.pgQueue.inheritKafkaTopics",
+          "postgres.pgQueue.schema",
+          "postgres.pgQueue.tablePrefix",
+          "postgres.pgQueue.pool.driver",
+          "postgres.pgQueue.pool.leakTimeMinutes",
+          "postgres.pgQueue.pool.maxAgeMinutes",
+          "postgres.pgQueue.pool.maxConnections",
+          "postgres.pgQueue.pool.maxInactiveTimeSeconds",
+          "postgres.pgQueue.pool.minConnections",
+          "postgres.pgQueue.pool.url",
+          "postgres.pgQueue.pool.username",
+          "postgres.pgQueue.pool.waitTimeoutMillis",
+          // Postgres PgCron configuration
+          "postgres.pgCron.cronSchema",
+          "postgres.pgCron.admin.driver",
+          "postgres.pgCron.admin.jdbcUrl",
+          "postgres.pgCron.admin.username",
+          "postgres.pgCron.iam.awsAccessKeyId",
+          "postgres.pgCron.iam.awsRegion",
+          "postgres.pgCron.iam.cloudProvider",
+          "postgres.pgCron.iam.gcpProject",
+          "postgres.pgCron.iam.googleApplicationCredentials",
+          "postgres.pgCron.iam.instanceConnectionName",
+          "postgres.pgCron.iam.postgresUseIamAuth",
+          "postgres.pgCron.iam.useIamAuth",
+          // Postgres schema
+          "postgres.schema",
+          // Bootstrap configuration
+          "bootstrap.async.workerThreads",
+          // Metadata Change Log batch configuration
+          "metadataChangeLog.consumer.batch.maxMessages",
+          "metadataChangeLog.consumer.batch.maxAgeMs"
 
           // TODO: Add more properties as they are discovered during testing
           // When this test fails due to unclassified properties, add them to

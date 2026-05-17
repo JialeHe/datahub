@@ -17,6 +17,7 @@ import com.linkedin.gms.factory.kafka.SimpleKafkaConsumerFactory;
 import com.linkedin.metadata.dao.throttle.ThrottleSensor;
 import com.linkedin.metadata.entity.EntityService;
 import com.linkedin.metadata.kafka.config.CDCProcessorCondition;
+import com.linkedin.metadata.kafka.pause.ConsumerPauseSupport;
 import com.linkedin.metadata.kafka.util.KafkaListenerUtil;
 import com.linkedin.metadata.models.AspectSpec;
 import com.linkedin.metadata.utils.metrics.MetricUtils;
@@ -40,14 +41,10 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Conditional;
 import org.springframework.context.annotation.Import;
-import org.springframework.kafka.annotation.EnableKafka;
-import org.springframework.kafka.annotation.KafkaListener;
-import org.springframework.kafka.config.KafkaListenerEndpointRegistry;
 import org.springframework.stereotype.Component;
 
 @Slf4j
 @Component
-@EnableKafka
 @Conditional(CDCProcessorCondition.class)
 @Import({
   RestliEntityClientFactory.class,
@@ -70,8 +67,8 @@ public class CDCProcessor {
   private static final String CDC_CREATED_FOR_FIELD = "createdfor";
   private static final String CDC_VERSION_FIELD = "version";
 
-  // Constants for consumer configuration
-  private static final String CDC_CONSUMER_GROUP_ID = "cdc-consumer-job-client";
+  /** Kafka listener id / default consumer group (see {@link CDCKafkaListener}). */
+  public static final String CDC_CONSUMER_GROUP_ID = "cdc-consumer-job-client";
 
   private final OperationContext systemOperationContext;
 
@@ -80,8 +77,8 @@ public class CDCProcessor {
   @Qualifier("kafkaThrottle")
   private final ThrottleSensor kafkaThrottle;
 
-  private final KafkaListenerEndpointRegistry registry;
   private final ConfigurationProvider provider;
+  private final ConsumerPauseSupport consumerPauseSupport;
 
   @Value("${mclProcessing.cdcSource.enabled:false}")
   @VisibleForTesting
@@ -97,17 +94,13 @@ public class CDCProcessor {
   @PostConstruct
   public void registerConsumerThrottle() {
     if (cdcMclProcessingEnabled) {
-      KafkaListenerUtil.registerThrottle(kafkaThrottle, provider, registry, cdcConsumerGroupId);
+      KafkaListenerUtil.registerThrottle(
+          kafkaThrottle, provider, consumerPauseSupport, cdcConsumerGroupId);
     }
   }
 
-  @KafkaListener(
-      id = CDC_CONSUMER_GROUP_ID,
-      topics =
-          "#{${mclProcessing.cdcSource.enabled:true}?'${kafka.topics.cdcTopic.name:datahub.datahub.metadata_aspect_v2}' : null}",
-      containerFactory = CDC_EVENT_CONSUMER_NAME,
-      autoStartup = "false")
-  public void consume(final ConsumerRecord<String, String> consumerRecord) {
+  /** Used by {@link CDCKafkaListener}. */
+  public void consumeKafka(final ConsumerRecord<String, String> consumerRecord) {
     try {
 
       systemOperationContext
@@ -149,6 +142,54 @@ public class CDCProcessor {
     } catch (Exception e) {
       log.error("CDC Processor Error", e);
       log.error("CDC Message: {}", consumerRecord.value());
+    } finally {
+      MDC.clear();
+    }
+  }
+
+  /** Used by pgQueue transport ({@link com.linkedin.metadata.pgqueue.PgQueuePollWorker}). */
+  public void consumePgQueue(
+      String topic,
+      String key,
+      String value,
+      int partition,
+      long offset,
+      int serializedValueSize,
+      long timestampMillis) {
+    try {
+      systemOperationContext
+          .getMetricUtils()
+          .ifPresent(
+              metricUtils -> {
+                long queueTimeMs = System.currentTimeMillis() - timestampMillis;
+                metricUtils.histogram(this.getClass(), "kafkaLag", queueTimeMs);
+                metricUtils
+                    .getRegistry()
+                    .timer(
+                        MetricUtils.KAFKA_MESSAGE_QUEUE_TIME,
+                        "topic",
+                        topic,
+                        "consumer.group",
+                        cdcConsumerGroupId)
+                    .record(Duration.ofMillis(queueTimeMs));
+              });
+
+      log.info(
+          "Got CDC event key: {}, topic: {}, partition: {}, offset: {}, value size: {}, timestamp: {}",
+          key,
+          topic,
+          partition,
+          offset,
+          serializedValueSize,
+          timestampMillis);
+
+      if (value != null) {
+        processCDCRecord(value);
+      }
+
+    } catch (Exception e) {
+      log.error("CDC Processor Error", e);
+      log.error("CDC Message: {}", value);
     } finally {
       MDC.clear();
     }

@@ -1,6 +1,5 @@
 package com.linkedin.metadata.kafka.batch;
 
-import static com.linkedin.metadata.config.kafka.KafkaConfiguration.MCP_EVENT_CONSUMER_NAME;
 import static com.linkedin.metadata.utils.metrics.MetricUtils.BATCH_SIZE_ATTR;
 import static com.linkedin.mxe.ConsumerGroups.MCP_CONSUMER_GROUP_ID_VALUE;
 
@@ -11,6 +10,7 @@ import com.linkedin.metadata.EventUtils;
 import com.linkedin.metadata.dao.throttle.ThrottleSensor;
 import com.linkedin.metadata.event.EventProducer;
 import com.linkedin.metadata.kafka.config.batch.BatchMetadataChangeProposalProcessorCondition;
+import com.linkedin.metadata.kafka.pause.ConsumerPauseSupport;
 import com.linkedin.metadata.kafka.util.KafkaListenerUtil;
 import com.linkedin.metadata.utils.metrics.MetricUtils;
 import com.linkedin.mxe.MetadataChangeProposal;
@@ -34,16 +34,12 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Conditional;
 import org.springframework.context.annotation.Import;
-import org.springframework.kafka.annotation.EnableKafka;
-import org.springframework.kafka.annotation.KafkaListener;
-import org.springframework.kafka.config.KafkaListenerEndpointRegistry;
 import org.springframework.stereotype.Component;
 
 @Slf4j
 @Component
 @Import({RestliEntityClientFactory.class})
 @Conditional(BatchMetadataChangeProposalProcessorCondition.class)
-@EnableKafka
 @RequiredArgsConstructor
 public class BatchMetadataChangeProposalsProcessor {
   private final OperationContext systemOperationContext;
@@ -53,8 +49,8 @@ public class BatchMetadataChangeProposalsProcessor {
   @Qualifier("kafkaThrottle")
   private final ThrottleSensor kafkaThrottle;
 
-  private final KafkaListenerEndpointRegistry registry;
   private final ConfigurationProvider provider;
+  private final ConsumerPauseSupport consumerPauseSupport;
 
   @Value(
       "${FAILED_METADATA_CHANGE_PROPOSAL_TOPIC_NAME:"
@@ -67,15 +63,11 @@ public class BatchMetadataChangeProposalsProcessor {
 
   @PostConstruct
   public void registerConsumerThrottle() {
-    KafkaListenerUtil.registerThrottle(kafkaThrottle, provider, registry, mceConsumerGroupId);
+    KafkaListenerUtil.registerThrottle(
+        kafkaThrottle, provider, consumerPauseSupport, mceConsumerGroupId);
   }
 
-  @KafkaListener(
-      id = MCP_CONSUMER_GROUP_ID_VALUE,
-      topics = "${METADATA_CHANGE_PROPOSAL_TOPIC_NAME:" + Topics.METADATA_CHANGE_PROPOSAL + "}",
-      containerFactory = MCP_EVENT_CONSUMER_NAME,
-      batch = "true",
-      autoStartup = "false")
+  /** Used by {@link BatchMetadataChangeProposalsKafkaListener}, tests, and pgQueue batch poller. */
   public void consume(final List<ConsumerRecord<String, GenericRecord>> consumerRecords) {
 
     List<MetadataChangeProposal> allMCPs = new ArrayList<>(consumerRecords.size());

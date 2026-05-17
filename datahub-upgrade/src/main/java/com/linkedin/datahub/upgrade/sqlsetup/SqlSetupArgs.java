@@ -1,12 +1,16 @@
 package com.linkedin.datahub.upgrade.sqlsetup;
 
-import lombok.AllArgsConstructor;
+import com.linkedin.metadata.config.postgres.DatabaseType;
 import lombok.Getter;
 import lombok.ToString;
 import lombok.Value;
 
+/**
+ * Command-line / environment-driven SqlSetup operations (tables, database, users, CDC). Details for
+ * optional PostgreSQL extensions use {@code postgres.*} via {@link
+ * com.linkedin.metadata.config.postgres.PostgresSqlSetupProperties}.
+ */
 @Value
-@AllArgsConstructor
 @ToString(exclude = {"cdcPassword", "createUserPassword"})
 public class SqlSetupArgs {
   boolean createTables;
@@ -22,6 +26,12 @@ public class SqlSetupArgs {
   String host;
   int port;
   String databaseName;
+
+  /**
+   * PostgreSQL: normalized schema for metadata DDL (matches {@code postgres.schema}, typically
+   * {@code public}); null for MySQL.
+   */
+  String postgresMetadataSchema;
 
   @Getter(lombok.AccessLevel.NONE)
   boolean createSchemaVersionIndex;

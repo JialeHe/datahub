@@ -27,6 +27,7 @@ import com.linkedin.metadata.dao.throttle.ThrottleSensor;
 import com.linkedin.metadata.entity.DeleteEntityService;
 import com.linkedin.metadata.entity.EntityService;
 import com.linkedin.metadata.event.EventProducer;
+import com.linkedin.metadata.kafka.pause.ConsumerPauseSupport;
 import com.linkedin.metadata.search.EntitySearchService;
 import com.linkedin.metadata.search.LineageSearchService;
 import com.linkedin.metadata.search.SearchService;
@@ -56,7 +57,6 @@ import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.MockitoAnnotations;
 import org.slf4j.MDC;
-import org.springframework.kafka.config.KafkaListenerEndpointRegistry;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
@@ -89,7 +89,7 @@ public class MetadataChangeProposalsProcessorTest {
 
   @Mock private ThrottleSensor mockKafkaThrottle;
 
-  @Mock private KafkaListenerEndpointRegistry mockRegistry;
+  @Mock private ConsumerPauseSupport mockConsumerPauseSupport;
 
   @Mock private ConfigurationProvider mockProvider;
 
@@ -136,14 +136,11 @@ public class MetadataChangeProposalsProcessorTest {
             null);
 
     // Setup the processor
+    MetadataChangeProposalConsumer mcpConsumer =
+        new MetadataChangeProposalConsumer(opContext, entityClient, mockKafkaProducer);
     processor =
         new MetadataChangeProposalsProcessor(
-            opContext,
-            entityClient,
-            mockKafkaProducer,
-            mockKafkaThrottle,
-            mockRegistry,
-            mockProvider);
+            mockKafkaThrottle, mockProvider, mockConsumerPauseSupport, mcpConsumer);
 
     // Set the mceConsumerGroupId field via reflection
     try {
@@ -536,14 +533,11 @@ public class MetadataChangeProposalsProcessorTest {
             .build(opContext.getSystemActorContext().getAuthentication(), false);
 
     // Create a new processor with this context
+    MetadataChangeProposalConsumer mcpConsumerNoMetrics =
+        new MetadataChangeProposalConsumer(opContextNoMetrics, entityClient, mockKafkaProducer);
     MetadataChangeProposalsProcessor processorNoMetrics =
         new MetadataChangeProposalsProcessor(
-            opContextNoMetrics,
-            entityClient,
-            mockKafkaProducer,
-            mockKafkaThrottle,
-            mockRegistry,
-            mockProvider);
+            mockKafkaThrottle, mockProvider, mockConsumerPauseSupport, mcpConsumerNoMetrics);
 
     // Create MCP
     MetadataChangeProposal mcp = createSimpleMCP();

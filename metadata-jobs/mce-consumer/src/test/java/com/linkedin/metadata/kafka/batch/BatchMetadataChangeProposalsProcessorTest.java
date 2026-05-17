@@ -36,6 +36,7 @@ import com.linkedin.metadata.dao.throttle.ThrottleSensor;
 import com.linkedin.metadata.entity.DeleteEntityService;
 import com.linkedin.metadata.entity.EntityService;
 import com.linkedin.metadata.event.EventProducer;
+import com.linkedin.metadata.kafka.pause.ConsumerPauseSupport;
 import com.linkedin.metadata.search.EntitySearchService;
 import com.linkedin.metadata.search.LineageSearchService;
 import com.linkedin.metadata.search.SearchService;
@@ -65,7 +66,6 @@ import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.MockitoAnnotations;
 import org.slf4j.MDC;
-import org.springframework.kafka.config.KafkaListenerEndpointRegistry;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
@@ -99,7 +99,7 @@ public class BatchMetadataChangeProposalsProcessorTest {
 
   @Mock private ThrottleSensor mockKafkaThrottle;
 
-  @Mock private KafkaListenerEndpointRegistry mockRegistry;
+  @Mock private ConsumerPauseSupport mockConsumerPauseSupport;
 
   @Mock private ConfigurationProvider mockProvider;
 
@@ -151,8 +151,8 @@ public class BatchMetadataChangeProposalsProcessorTest {
             entityClient,
             mockKafkaProducer,
             mockKafkaThrottle,
-            mockRegistry,
-            mockProvider);
+            mockProvider,
+            mockConsumerPauseSupport);
 
     // Set fmcpTopicName field via reflection
     try {
@@ -593,8 +593,8 @@ public class BatchMetadataChangeProposalsProcessorTest {
             entityClient,
             mockKafkaProducer,
             mockKafkaThrottle,
-            mockRegistry,
-            mockProvider);
+            mockProvider,
+            mockConsumerPauseSupport);
 
     // Set required fields via reflection
     try {
@@ -675,8 +675,8 @@ public class BatchMetadataChangeProposalsProcessorTest {
             entityClient,
             mockKafkaProducer,
             mockKafkaThrottle,
-            mockRegistry,
-            mockProvider);
+            mockProvider,
+            mockConsumerPauseSupport);
 
     // Set required fields
     setProcessorFields(processorWithMetrics);
@@ -738,8 +738,8 @@ public class BatchMetadataChangeProposalsProcessorTest {
             entityClient,
             mockKafkaProducer,
             mockKafkaThrottle,
-            mockRegistry,
-            mockProvider);
+            mockProvider,
+            mockConsumerPauseSupport);
 
     setProcessorFields(processorWithMetrics);
     setupBasicConfiguration();
@@ -803,8 +803,8 @@ public class BatchMetadataChangeProposalsProcessorTest {
             entityClient,
             mockKafkaProducer,
             mockKafkaThrottle,
-            mockRegistry,
-            mockProvider);
+            mockProvider,
+            mockConsumerPauseSupport);
 
     setProcessorFields(processorWithMetrics);
     setupBasicConfiguration();
@@ -881,8 +881,8 @@ public class BatchMetadataChangeProposalsProcessorTest {
             entityClient,
             mockKafkaProducer,
             mockKafkaThrottle,
-            mockRegistry,
-            mockProvider);
+            mockProvider,
+            mockConsumerPauseSupport);
 
     setProcessorFields(processorNoRegistry);
     setupBasicConfiguration();

@@ -70,9 +70,14 @@ import lombok.extern.slf4j.Slf4j;
 
 @Slf4j
 public class EbeanAspectDao implements AspectDao, AspectMigrationsDao {
-  // READ COMMITED is used in conjunction with SELECT FOR UPDATE (read lock) in order
-  // to ensure that the aspect's version is not modified outside the transaction.
-  // We rely on the retry mechanism if the row is modified and will re-read (require the lock)
+  /**
+   * Preferred isolation for aspect writes (matches {@link
+   * java.sql.Connection#TRANSACTION_READ_COMMITTED}). Ingest transactions use {@link
+   * TxScope#requiresNew()} without per-scope {@link TxScope#setIsolation} so Ebean does not call
+   * {@link java.sql.Connection#setTransactionIsolation} on each begin (PostgreSQL forbids changing
+   * isolation mid-transaction). Connection pools pin READ COMMITTED in GMS configuration ({@code
+   * EbeanPoolDefaults}).
+   */
   public static final TxIsolation TX_ISOLATION = TxIsolation.READ_COMMITED;
 
   /** -- GETTER -- Return the server instance used for customized queries. Only used in tests. */
@@ -892,8 +897,12 @@ public class EbeanAspectDao implements AspectDao, AspectMigrationsDao {
     // Default state is rollback
     TransactionResult<T> result = TransactionResult.rollback();
     do {
-      try (Transaction transaction =
-          server.beginTransaction(TxScope.requiresNew().setIsolation(TX_ISOLATION))) {
+      // Use TxScope.requiresNew() without setIsolation(): explicit isolation forces JDBC
+      // Connection.setTransactionIsolation on every begin, which PostgreSQL rejects if the pooled
+      // connection already has an active transaction ("Cannot change transaction isolation level in
+      // the middle of a transaction"). READ COMMITTED remains the effective level via pool defaults
+      // on the metadata DataSource where configured.
+      try (Transaction transaction = server.beginTransaction(TxScope.requiresNew())) {
         transaction.setBatchMode(true);
         result = block.apply(transactionContext.tx(transaction));
         if (result.isCommitOrRollback()) {

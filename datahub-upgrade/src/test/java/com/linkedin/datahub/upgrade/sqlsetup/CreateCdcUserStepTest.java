@@ -8,6 +8,7 @@ import static org.testng.Assert.assertTrue;
 import com.linkedin.datahub.upgrade.UpgradeContext;
 import com.linkedin.datahub.upgrade.UpgradeReport;
 import com.linkedin.datahub.upgrade.UpgradeStepResult;
+import com.linkedin.metadata.config.postgres.DatabaseType;
 import com.linkedin.upgrade.DataHubUpgradeState;
 import io.ebean.Database;
 import io.ebean.SqlUpdate;
@@ -53,6 +54,7 @@ public class CreateCdcUserStepTest {
             "localhost", // host
             3306, // port
             "testdb", // databaseName
+            null, // postgresMetadataSchema
             false // createSchemaVersionIndex
             );
     createCdcUserStep = new CreateCdcUserStep(mockDatabase, defaultSetupArgs);
@@ -116,6 +118,7 @@ public class CreateCdcUserStepTest {
             "localhost",
             3306,
             "testdb",
+            null,
             false);
     CreateCdcUserStep disabledCdcStep = new CreateCdcUserStep(mockDatabase, disabledCdcArgs);
 
@@ -150,6 +153,7 @@ public class CreateCdcUserStepTest {
             "localhost",
             3306,
             "testdb",
+            null,
             false);
     CreateCdcUserStep mysqlCdcStep = new CreateCdcUserStep(mockDatabase, mysqlCdcArgs);
 
@@ -184,6 +188,7 @@ public class CreateCdcUserStepTest {
             null,
             "localhost",
             5432,
+            "testdb",
             "testdb",
             false);
     CreateCdcUserStep postgresCdcStep = new CreateCdcUserStep(mockDatabase, postgresCdcArgs);
@@ -274,6 +279,7 @@ public class CreateCdcUserStepTest {
             "localhost",
             5432,
             "custom_db",
+            "custom_db",
             false);
     CreateCdcUserStep customCdcStep = new CreateCdcUserStep(mockDatabase, customCdcArgs);
 
@@ -308,6 +314,7 @@ public class CreateCdcUserStepTest {
             "localhost",
             3306,
             "testdb",
+            null,
             false);
     CreateCdcUserStep defaultCdcStep = new CreateCdcUserStep(mockDatabase, defaultCdcArgs);
 
@@ -341,6 +348,7 @@ public class CreateCdcUserStepTest {
             "localhost",
             5432,
             "testdb",
+            "testdb",
             false);
     CreateCdcUserStep postgresStep = new CreateCdcUserStep(mockDatabase, postgresArgs);
 
@@ -368,6 +376,7 @@ public class CreateCdcUserStepTest {
             "localhost",
             3306,
             "testdb",
+            null,
             false);
     CreateCdcUserStep mysqlStep = new CreateCdcUserStep(mockDatabase, mysqlArgs);
 
@@ -394,6 +403,7 @@ public class CreateCdcUserStepTest {
             null,
             "localhost",
             5432,
+            "testdb",
             "testdb",
             false);
     CreateCdcUserStep postgresStep = new CreateCdcUserStep(mockDatabase, postgresArgs);
@@ -422,6 +432,7 @@ public class CreateCdcUserStepTest {
             "localhost",
             3306,
             "testdb",
+            null,
             false);
     CreateCdcUserStep mysqlStep = new CreateCdcUserStep(mockDatabase, mysqlArgs);
 
@@ -455,6 +466,7 @@ public class CreateCdcUserStepTest {
               "localhost",
               3306,
               "testdb",
+              null,
               false);
       createCdcUserStep.createCdcUser(testArgs);
       assertTrue(false, "Expected RuntimeException to be thrown");
@@ -483,6 +495,7 @@ public class CreateCdcUserStepTest {
             "localhost",
             3306,
             "testdb",
+            null,
             false);
     SqlSetupResult result = createCdcUserStep.createCdcUser(testArgs);
 
@@ -516,6 +529,7 @@ public class CreateCdcUserStepTest {
             "localhost",
             3306,
             "testdb",
+            null,
             false);
     SqlSetupResult result = createCdcUserStep.createCdcUser(testArgs);
 
@@ -543,6 +557,7 @@ public class CreateCdcUserStepTest {
             "localhost",
             3306,
             "testdb",
+            null,
             false);
     SqlSetupResult result = createCdcUserStep.createCdcUser(testArgs);
 
@@ -574,6 +589,7 @@ public class CreateCdcUserStepTest {
             "localhost",
             3306,
             "testdb",
+            null,
             false);
     SqlSetupResult result = createCdcUserStep.createCdcUser(testArgs);
 

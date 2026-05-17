@@ -8,6 +8,7 @@ import static org.testng.Assert.assertTrue;
 import com.linkedin.datahub.upgrade.UpgradeContext;
 import com.linkedin.datahub.upgrade.UpgradeReport;
 import com.linkedin.datahub.upgrade.UpgradeStepResult;
+import com.linkedin.metadata.config.postgres.DatabaseType;
 import com.linkedin.upgrade.DataHubUpgradeState;
 import io.ebean.Database;
 import io.ebean.SqlUpdate;
@@ -65,6 +66,7 @@ public class CreateTablesStepTest {
             "localhost", // host
             3306, // port
             "testdb", // databaseName
+            null, // postgresMetadataSchema
             false // createSchemaVersionIndex
             );
     createTablesStep = new CreateTablesStep(mockDatabase, defaultSetupArgs);
@@ -132,6 +134,7 @@ public class CreateTablesStepTest {
             "localhost", // host
             5432, // port
             "testdb", // databaseName
+            "public", // postgresMetadataSchema
             false // createSchemaVersionIndex
             );
     CreateTablesStep postgresStep = new CreateTablesStep(mockDatabase, postgresSetupArgs);
@@ -332,6 +335,7 @@ public class CreateTablesStepTest {
             "localhost",
             5432,
             "testdb",
+            "testdb",
             false);
     CreateTablesStep postgresStep = new CreateTablesStep(mockDatabase, postgresArgs);
 
@@ -383,6 +387,7 @@ public class CreateTablesStepTest {
             null,
             "localhost",
             5432,
+            "testdb",
             "testdb",
             false);
     CreateTablesStep postgresStep = new CreateTablesStep(mockDatabase, postgresArgs);
@@ -441,6 +446,7 @@ public class CreateTablesStepTest {
             "localhost",
             3306,
             "testdb",
+            null,
             false);
     CreateTablesStep step = new CreateTablesStep(mockDatabase, args);
 
@@ -469,6 +475,7 @@ public class CreateTablesStepTest {
             "localhost",
             3306,
             "testdb",
+            null,
             false);
     CreateTablesStep step = new CreateTablesStep(mockDatabase, args);
 
@@ -495,13 +502,14 @@ public class CreateTablesStepTest {
             "localhost",
             5432,
             "testdb",
+            "testdb",
             false);
     CreateTablesStep step = new CreateTablesStep(mockDatabase, args);
 
     step.createTables(args);
 
     verify(mockDatabase, times(1)).sqlUpdate(contains("CREATE TABLE IF NOT EXISTS"));
-    verify(mockStatement, times(7)).execute(anyString());
+    verify(mockStatement, times(9)).execute(anyString());
   }
 
   @Test
@@ -522,14 +530,15 @@ public class CreateTablesStepTest {
             "localhost",
             5432,
             "testdb",
+            "testdb",
             true);
     CreateTablesStep step = new CreateTablesStep(mockDatabase, args);
     when(mockResultSet.next()).thenReturn(false);
 
     step.createTables(args);
 
-    verify(mockDataSource, times(5)).getConnection();
-    verify(mockStatement, times(8)).execute(anyString());
+    verify(mockDataSource, times(6)).getConnection();
+    verify(mockStatement, times(10)).execute(anyString());
     verify(mockStatement)
         .execute(
             "CREATE INDEX CONCURRENTLY IF NOT EXISTS schemaVersionIndex ON metadata_aspect_v2 ((systemmetadata::jsonb ->> 'schemaVersion'));");

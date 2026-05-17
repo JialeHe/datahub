@@ -11,6 +11,7 @@ import java.util.List;
 import javax.annotation.Nonnull;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Conditional;
 import org.springframework.context.annotation.Configuration;
@@ -29,12 +30,13 @@ public class MCLBootstrapManagerFactory {
   @Bean(name = "mclBootstrapManager")
   @Scope("singleton")
   @Nonnull
-  protected BootstrapManager createInstance() {
+  protected BootstrapManager createInstance(
+      @Value("${bootstrap.async.workerThreads:5}") final int asyncWorkerThreads) {
     final WaitForSystemUpdateStep waitForSystemUpdateStep =
         new WaitForSystemUpdateStep(_dataHubUpgradeKafkaListener, _configurationProvider);
 
     final List<BootstrapStep> finalSteps = ImmutableList.of(waitForSystemUpdateStep);
 
-    return new BootstrapManager(finalSteps);
+    return new BootstrapManager(finalSteps, asyncWorkerThreads);
   }
 }

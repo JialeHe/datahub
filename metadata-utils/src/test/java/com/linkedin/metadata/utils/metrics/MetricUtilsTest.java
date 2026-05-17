@@ -695,4 +695,24 @@ public class MetricUtilsTest {
     assertNotNull(summary);
     assertEquals(summary.getId().getTags().size(), 0);
   }
+
+  @Test
+  public void testRecordInboundMessageQueueLagRecordsHistogramAndTimer() {
+    Class<?> scope = this.getClass();
+    String topic = "logical-topic";
+    String group = "consumer-group-id";
+    long enqueuedAt = System.currentTimeMillis() - 42L;
+
+    MetricUtils.recordInboundMessageQueueLag(metricUtils, scope, topic, group, enqueuedAt);
+
+    String histName = MetricRegistry.name(scope, "kafkaLag");
+    DistributionSummary summary =
+        meterRegistry.summary(histName, MetricUtils.DROPWIZARD_METRIC, "true");
+    assertEquals(summary.count(), 1);
+
+    Timer timer =
+        meterRegistry.timer(
+            MetricUtils.KAFKA_MESSAGE_QUEUE_TIME, "topic", topic, "consumer.group", group);
+    assertEquals(timer.count(), 1);
+  }
 }

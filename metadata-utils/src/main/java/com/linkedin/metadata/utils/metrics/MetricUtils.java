@@ -8,6 +8,7 @@ import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import io.micrometer.core.instrument.composite.CompositeMeterRegistry;
+import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -58,6 +59,26 @@ public class MetricUtils {
 
   public MeterRegistry getRegistry() {
     return registry;
+  }
+
+  /**
+   * Records end-to-end queue lag for an inbound metadata message (legacy Dropwizard histogram +
+   * Micrometer timer). Use for Kafka listeners and other transports that expose enqueue time and
+   * logical topic.
+   */
+  public static void recordInboundMessageQueueLag(
+      MetricUtils metricUtils,
+      Class<?> histogramScopeClass,
+      String logicalTopic,
+      String consumerGroupId,
+      long enqueuedAtEpochMillis) {
+    long queueTimeMs = System.currentTimeMillis() - enqueuedAtEpochMillis;
+    metricUtils.histogram(histogramScopeClass, "kafkaLag", queueTimeMs);
+    // TODO: include priority level when available (pgQueue)
+    metricUtils
+        .getRegistry()
+        .timer(KAFKA_MESSAGE_QUEUE_TIME, "topic", logicalTopic, "consumer.group", consumerGroupId)
+        .record(Duration.ofMillis(queueTimeMs));
   }
 
   @Deprecated

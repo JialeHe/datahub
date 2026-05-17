@@ -1,0 +1,2 @@
+-- pg_partman is installed from Java when pgQueue is enabled; pg_cron when maintenance.cronEnabled
+-- is true, if listed in pg_available_extensions. This file is reserved for future pure-SQL hooks.

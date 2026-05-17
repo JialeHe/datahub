@@ -1,12 +1,12 @@
 package com.linkedin.metadata.kafka.listener;
 
+import com.linkedin.metadata.kafka.InboundMetadataEnvelope;
 import com.linkedin.metadata.utils.metrics.CascadeOperationContext;
 import com.linkedin.metadata.utils.metrics.MetricUtils;
 import com.linkedin.mxe.SystemMetadata;
 import io.datahubproject.metadata.context.OperationContext;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.StatusCode;
-import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -56,38 +56,38 @@ public abstract class AbstractKafkaListener<E, H extends EventHook<E>, R>
 
   @Override
   public void consume(@Nonnull final ConsumerRecord<String, R> consumerRecord) {
+    processEnvelope(InboundMetadataEnvelope.fromKafka(consumerRecord, consumerGroupId));
+  }
+
+  /** pgQueue and other transports call this after building {@link InboundMetadataEnvelope}. */
+  @Override
+  public void acceptInbound(@Nonnull final InboundMetadataEnvelope<R> envelope) {
+    processEnvelope(envelope);
+  }
+
+  /** Shared path for Kafka and future non-Kafka transports. */
+  protected void processEnvelope(@Nonnull final InboundMetadataEnvelope<R> envelope) {
     try {
       systemOperationContext
           .getMetricUtils()
           .ifPresent(
-              metricUtils -> {
-                long queueTimeMs = System.currentTimeMillis() - consumerRecord.timestamp();
-
-                // Dropwizard legacy
-                metricUtils.histogram(this.getClass(), "kafkaLag", queueTimeMs);
-
-                // Micrometer with tags
-                // TODO: include priority level when available
-                metricUtils
-                    .getRegistry()
-                    .timer(
-                        MetricUtils.KAFKA_MESSAGE_QUEUE_TIME,
-                        "topic",
-                        consumerRecord.topic(),
-                        "consumer.group",
-                        consumerGroupId)
-                    .record(Duration.ofMillis(queueTimeMs));
-              });
-      final R record = consumerRecord.value();
+              metricUtils ->
+                  MetricUtils.recordInboundMessageQueueLag(
+                      metricUtils,
+                      this.getClass(),
+                      envelope.getLogicalTopic(),
+                      consumerGroupId,
+                      envelope.getEnqueuedAtMillis()));
+      final R record = envelope.getPayload();
       log.debug(
           "Got event consumer: {} key: {}, topic: {}, partition: {}, offset: {}, value size: {}, timestamp: {}",
           consumerGroupId,
-          consumerRecord.key(),
-          consumerRecord.topic(),
-          consumerRecord.partition(),
-          consumerRecord.offset(),
-          consumerRecord.serializedValueSize(),
-          consumerRecord.timestamp());
+          envelope.getKey(),
+          envelope.getLogicalTopic(),
+          envelope.getKafkaPartition(),
+          envelope.getKafkaOffset(),
+          envelope.getSerializedValueSize(),
+          envelope.getEnqueuedAtMillis());
 
       systemOperationContext
           .getMetricUtils()
@@ -132,7 +132,7 @@ public abstract class AbstractKafkaListener<E, H extends EventHook<E>, R>
 
       List<String> loggingAttributes = getFineGrainedLoggingAttributes(event);
 
-      processWithHooks(event, loggingAttributes, consumerRecord.topic());
+      processWithHooks(event, loggingAttributes, envelope.getLogicalTopic());
 
     } finally {
       MDC.clear();

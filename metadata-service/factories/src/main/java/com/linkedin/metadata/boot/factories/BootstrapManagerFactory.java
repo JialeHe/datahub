@@ -85,7 +85,8 @@ public class BootstrapManagerFactory {
   @Scope("singleton")
   @Nonnull
   protected BootstrapManager createInstance(
-      @Qualifier("systemOperationContext") final OperationContext systemOpContext) {
+      @Qualifier("systemOperationContext") final OperationContext systemOpContext,
+      @Value("${bootstrap.async.workerThreads:5}") final int asyncWorkerThreads) {
     final IngestPoliciesStep ingestPoliciesStep =
         new IngestPoliciesStep(
             _entityService, _entitySearchService, _searchDocumentTransformer, _policiesResource);
@@ -127,6 +128,6 @@ public class BootstrapManagerFactory {
       finalSteps.add(migrateHomePageLinksStep);
     }
 
-    return new BootstrapManager(finalSteps);
+    return new BootstrapManager(finalSteps, asyncWorkerThreads);
   }
 }
