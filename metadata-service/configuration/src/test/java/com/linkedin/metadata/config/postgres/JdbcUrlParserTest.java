@@ -1,9 +1,8 @@
-package com.linkedin.datahub.upgrade.sqlsetup;
+package com.linkedin.metadata.config.postgres;
 
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertNull;
 
-import com.linkedin.metadata.config.postgres.DatabaseType;
-import com.linkedin.metadata.config.postgres.JdbcUrlParser;
 import org.testng.annotations.Test;
 
 public class JdbcUrlParserTest {
@@ -172,5 +171,50 @@ public class JdbcUrlParserTest {
       expectedExceptionsMessageRegExp = "JDBC URL cannot be null or empty")
   public void testParseWhitespaceOnlyUrlThrowsException() {
     JdbcUrlParser.parseJdbcUrl("   ");
+  }
+
+  @Test
+  public void testParseAwsWrapperMysqlUrl() {
+    String url = "jdbc:aws-wrapper:mysql://localhost:3306/datahub";
+    JdbcUrlParser.JdbcInfo info = JdbcUrlParser.parseJdbcUrl(url);
+    assertEquals(info.databaseType, DatabaseType.MYSQL);
+    assertEquals(info.host, "localhost");
+    assertEquals(info.port, 3306);
+    assertEquals(info.database, "datahub");
+  }
+
+  @Test
+  public void testParseMariadbUrl() {
+    JdbcUrlParser.JdbcInfo info =
+        JdbcUrlParser.parseJdbcUrl("jdbc:mariadb://db.example.com:3307/mydb");
+    assertEquals(info.databaseType, DatabaseType.MYSQL);
+    assertEquals(info.database, "mydb");
+    assertEquals(info.port, 3307);
+  }
+
+  @Test(expectedExceptions = IllegalArgumentException.class)
+  public void testParseUrlWithPortOutOfRange() {
+    JdbcUrlParser.parseJdbcUrl("jdbc:mysql://localhost:70000/datahub");
+  }
+
+  @Test
+  public void extractQueryParameterIgnoreCase_decodesValues() {
+    assertNull(JdbcUrlParser.extractQueryParameterIgnoreCase(null, "currentSchema"));
+    assertNull(JdbcUrlParser.extractQueryParameterIgnoreCase("", "currentSchema"));
+    assertEquals(
+        JdbcUrlParser.extractQueryParameterIgnoreCase(
+            "CurrentSchema=app&ssl=true", "currentSchema"),
+        "app");
+    assertEquals(
+        JdbcUrlParser.extractQueryParameterIgnoreCase(
+            "ssl=true&currentSchema=queue%2Fmain", "currentSchema"),
+        "queue/main");
+  }
+
+  @Test
+  public void createUrlWithoutDatabase_preservesMariadbScheme() {
+    String url = "jdbc:mariadb://host:3306/db?useSSL=false";
+    assertEquals(
+        JdbcUrlParser.createUrlWithoutDatabase(url), "jdbc:mariadb://host:3306/?useSSL=false");
   }
 }

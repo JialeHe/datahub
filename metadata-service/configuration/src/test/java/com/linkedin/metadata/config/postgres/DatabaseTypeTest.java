@@ -1,9 +1,8 @@
-package com.linkedin.datahub.upgrade.sqlsetup;
+package com.linkedin.metadata.config.postgres;
 
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.expectThrows;
 
-import com.linkedin.metadata.config.postgres.DatabaseType;
 import org.testng.annotations.Test;
 
 /** Unit tests for DatabaseType enum. */
