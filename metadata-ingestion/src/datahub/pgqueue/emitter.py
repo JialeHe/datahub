@@ -138,6 +138,7 @@ class DatahubPgQueueEmitter(Closeable, Emitter):
                 max_rows_per_topic=td.max_rows_per_topic,
                 max_total_payload_bytes=td.max_total_payload_bytes_per_topic,
                 default_content_type_mime=td.default_content_type_mime,
+                aggressive_retention=td.aggressive_retention,
                 priority=self.config.default_priority,
                 payload=stored,
                 content_type=self.config.content_type,
@@ -196,6 +197,7 @@ class DatahubPgQueueEmitter(Closeable, Emitter):
                 max_rows_per_topic=td.max_rows_per_topic,
                 max_total_payload_bytes=td.max_total_payload_bytes_per_topic,
                 default_content_type_mime=td.default_content_type_mime,
+                aggressive_retention=td.aggressive_retention,
             )
             for _ in items:
                 cb(None, "pgQueue enqueue succeeded")  # type: ignore[arg-type]

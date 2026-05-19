@@ -20,7 +20,9 @@ payload and Kafka-style headers (JSONB ``headers``). Keep JSON aligned with
 4. Persisted ``routing_key`` on each message row (Kafka-style enqueue key; aligns with Java).
 5. Topic upsert: ``partition_count`` is set with ``GREATEST`` so it never drops below the prior
    catalog value or below ``MAX(partition_id)+1`` over existing message rows (matches Java
-   ``EbeanPostgresMetadataQueueStore`` / SqlSetup).
+   ``EbeanPostgresMetadataQueueStore`` / SqlSetup). ``aggressive_retention`` is upserted like Java.
+6. Message retention runs via SqlSetup ``{prefix}_apply_retention`` (see ``datahub.pgqueue.retention``);
+   any client-side DELETE must use ``sequence_anchor_exclusion_sql`` so ``MAX(enqueue_seq)+1`` stays valid.
 """
 
 from __future__ import annotations
@@ -48,12 +50,19 @@ from datahub.pgqueue.connection import (
 from datahub.pgqueue.headers import headers_from_db, headers_to_json
 from datahub.pgqueue.offset_skew import PartitionOffsetSkew, warn_if_ahead
 from datahub.pgqueue.priority_bands import DEFAULT_BANDS_JSON, PriorityBandConfig
+from datahub.pgqueue.retention import (
+    apply_retention,
+    qualified_apply_retention_function,
+)
 from datahub.pgqueue.sql import qualified_table
 
 if TYPE_CHECKING:
     from psycopg2.extensions import connection as PGConnection
 
 logger = logging.getLogger(__name__)
+
+# (topic_id, partition_count, default_content_type_id)
+TopicRow = Tuple[int, int, Optional[int]]
 
 
 @dataclass(frozen=True)
@@ -145,12 +154,19 @@ class PgQueueRepository:
         self._consumer_registration = qualified_table(
             schema, table_prefix, "consumer_registration"
         )
+        self._apply_retention = qualified_apply_retention_function(schema, table_prefix)
         self._lease = qualified_table(schema, table_prefix, "message_group_lease")
+        # Per-process caches for immutable catalog rows (aligned with Java EbeanPostgresMetadataQueueStore).
+        self._content_type_id_by_mime: Dict[str, int] = {}
+        self._topic_row_by_name: Dict[str, TopicRow] = {}
 
     def fetch_topic_row(
         self, conn: PGConnection, topic_name: str
-    ) -> Optional[Tuple[int, int, Optional[int]]]:
+    ) -> Optional[TopicRow]:
         """Return ``(topic_id, partition_count, default_content_type_id)`` or None."""
+        cached = self._topic_row_by_name.get(topic_name)
+        if cached is not None:
+            return cached
         with conn.cursor() as cur:
             cur.execute(
                 f"SELECT id, partition_count, default_content_type_id FROM {self._topic} WHERE topic_name = %s",
@@ -159,13 +175,50 @@ class PgQueueRepository:
             row = cur.fetchone()
             if row is None:
                 return None
-            dct = int(row[2]) if row[2] is not None else None
-            return int(row[0]), int(row[1]), dct
+            parsed = self._parse_topic_row(row)
+            self._topic_row_by_name[topic_name] = parsed
+            return parsed
 
-    def _ensure_mime_registered(self, conn: PGConnection, mime: str) -> int:
+    @staticmethod
+    def _parse_topic_row(row: Tuple[Any, ...]) -> TopicRow:
+        dct = int(row[2]) if row[2] is not None else None
+        return int(row[0]), int(row[1]), dct
+
+    def _get_topic_row(self, conn: PGConnection, topic_name: str) -> TopicRow:
+        row = self.fetch_topic_row(conn, topic_name)
+        assert row is not None
+        return row
+
+    def _refresh_topic_row_cache(self, conn: PGConnection, topic_name: str) -> TopicRow:
         with conn.cursor() as cur:
             cur.execute(
-                f"INSERT INTO {self._content_type} (mime) VALUES (%s) ON CONFLICT (mime) DO NOTHING",
+                f"SELECT id, partition_count, default_content_type_id FROM {self._topic} WHERE topic_name = %s",
+                (topic_name,),
+            )
+            row = cur.fetchone()
+            assert row is not None
+            parsed = self._parse_topic_row(row)
+            self._topic_row_by_name[topic_name] = parsed
+            return parsed
+
+    def _ensure_mime_registered(self, conn: PGConnection, mime: str) -> int:
+        """Resolve MIME to catalog id without burning smallint identity on existing MIME rows."""
+        cached = self._content_type_id_by_mime.get(mime)
+        if cached is not None:
+            return cached
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT id FROM {self._content_type} WHERE mime = %s",
+                (mime,),
+            )
+            row = cur.fetchone()
+            if row is not None:
+                cid = int(row[0])
+                self._content_type_id_by_mime[mime] = cid
+                return cid
+            cur.execute(
+                f"INSERT INTO {self._content_type} (mime) VALUES (%s) "
+                f"ON CONFLICT (mime) DO NOTHING",
                 (mime,),
             )
             cur.execute(
@@ -174,7 +227,9 @@ class PgQueueRepository:
             )
             row = cur.fetchone()
             assert row is not None
-            return int(row[0])
+            cid = int(row[0])
+            self._content_type_id_by_mime[mime] = cid
+            return cid
 
     def ensure_topic(
         self,
@@ -185,6 +240,7 @@ class PgQueueRepository:
         max_rows_per_topic: int,
         max_total_payload_bytes: int,
         default_content_type_mime: Optional[str] = None,
+        aggressive_retention: bool = False,
     ) -> int:
         """Upsert topic catalog row and return ``topic_id``."""
         mime = default_content_type_mime or "application/avro"
@@ -195,8 +251,8 @@ class PgQueueRepository:
                 INSERT INTO {self._topic} AS ptopic
                   (topic_name, partition_count,
                    retention_max_age_seconds, max_rows_per_topic, max_total_payload_bytes,
-                   default_content_type_id)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                   default_content_type_id, aggressive_retention)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (topic_name) DO UPDATE SET
                   partition_count = GREATEST(
                     1,
@@ -214,7 +270,8 @@ class PgQueueRepository:
                   retention_max_age_seconds = EXCLUDED.retention_max_age_seconds,
                   max_rows_per_topic = EXCLUDED.max_rows_per_topic,
                   max_total_payload_bytes = EXCLUDED.max_total_payload_bytes,
-                  default_content_type_id = EXCLUDED.default_content_type_id
+                  default_content_type_id = EXCLUDED.default_content_type_id,
+                  aggressive_retention = EXCLUDED.aggressive_retention
                 """,
                 (
                     topic_name,
@@ -223,15 +280,10 @@ class PgQueueRepository:
                     max_rows_per_topic,
                     max_total_payload_bytes,
                     default_ct_id,
+                    aggressive_retention,
                 ),
             )
-            cur.execute(
-                f"SELECT id FROM {self._topic} WHERE topic_name = %s",
-                (topic_name,),
-            )
-            row = cur.fetchone()
-            assert row is not None
-            return int(row[0])
+        return self._refresh_topic_row_cache(conn, topic_name)[0]
 
     def _compute_stored_content_type_id(
         self,
@@ -250,13 +302,8 @@ class PgQueueRepository:
         self,
         conn: PGConnection,
         *,
-        topic_name: str,
+        topic_row: TopicRow,
         routing_key: str,
-        partition_count: int,
-        retention_max_age_seconds: int,
-        max_rows_per_topic: int,
-        max_total_payload_bytes: int,
-        default_content_type_mime: Optional[str],
         priority: int,
         payload: bytes,
         content_type: Optional[str],
@@ -264,18 +311,7 @@ class PgQueueRepository:
         payload_compression: int = 0,
     ) -> PgQueueMessageHandle:
         """Insert one row inside the caller's open transaction (no commit)."""
-        self.ensure_topic(
-            conn,
-            topic_name,
-            partition_count,
-            retention_max_age_seconds,
-            max_rows_per_topic,
-            max_total_payload_bytes,
-            default_content_type_mime=default_content_type_mime,
-        )
-        row_meta = self.fetch_topic_row(conn, topic_name)
-        assert row_meta is not None
-        topic_id, pc, topic_default_ct_id = row_meta
+        topic_id, pc, topic_default_ct_id = topic_row
         if priority < 0 or priority > 9:
             raise ValueError(f"priority {priority} out of range [0, 9]")
         partition_id = stable_partition_id(routing_key, pc)
@@ -338,6 +374,7 @@ class PgQueueRepository:
         max_rows_per_topic: int,
         max_total_payload_bytes: int,
         default_content_type_mime: Optional[str] = None,
+        aggressive_retention: bool = False,
         priority: int,
         payload: bytes,
         content_type: Optional[str],
@@ -348,15 +385,21 @@ class PgQueueRepository:
         old_autocommit = conn.autocommit
         conn.autocommit = False
         try:
+            self.ensure_topic(
+                conn,
+                topic_name,
+                partition_count,
+                retention_max_age_seconds,
+                max_rows_per_topic,
+                max_total_payload_bytes,
+                default_content_type_mime=default_content_type_mime,
+                aggressive_retention=aggressive_retention,
+            )
+            topic_row = self._get_topic_row(conn, topic_name)
             handle = self._enqueue_message_in_transaction(
                 conn,
-                topic_name=topic_name,
+                topic_row=topic_row,
                 routing_key=routing_key,
-                partition_count=partition_count,
-                retention_max_age_seconds=retention_max_age_seconds,
-                max_rows_per_topic=max_rows_per_topic,
-                max_total_payload_bytes=max_total_payload_bytes,
-                default_content_type_mime=default_content_type_mime,
                 priority=priority,
                 payload=payload,
                 content_type=content_type,
@@ -381,6 +424,7 @@ class PgQueueRepository:
         max_rows_per_topic: int,
         max_total_payload_bytes: int,
         default_content_type_mime: Optional[str] = None,
+        aggressive_retention: bool = False,
     ) -> List[PgQueueMessageHandle]:
         """Enqueue many records in one PostgreSQL transaction (single commit)."""
         if not items:
@@ -390,17 +434,27 @@ class PgQueueRepository:
         conn.autocommit = False
         try:
             handles: List[PgQueueMessageHandle] = []
+            topic_rows_in_batch: Dict[str, TopicRow] = {}
             for it in items:
+                topic_row = topic_rows_in_batch.get(it.topic_name)
+                if topic_row is None:
+                    self.ensure_topic(
+                        conn,
+                        it.topic_name,
+                        partition_count,
+                        retention_max_age_seconds,
+                        max_rows_per_topic,
+                        max_total_payload_bytes,
+                        default_content_type_mime=default_content_type_mime,
+                        aggressive_retention=aggressive_retention,
+                    )
+                    topic_row = self._get_topic_row(conn, it.topic_name)
+                    topic_rows_in_batch[it.topic_name] = topic_row
                 handles.append(
                     self._enqueue_message_in_transaction(
                         conn,
-                        topic_name=it.topic_name,
+                        topic_row=topic_row,
                         routing_key=it.routing_key,
-                        partition_count=partition_count,
-                        retention_max_age_seconds=retention_max_age_seconds,
-                        max_rows_per_topic=max_rows_per_topic,
-                        max_total_payload_bytes=max_total_payload_bytes,
-                        default_content_type_mime=default_content_type_mime,
                         priority=it.priority,
                         payload=it.payload,
                         content_type=it.content_type,
@@ -486,6 +540,29 @@ class PgQueueRepository:
     ) -> int:
         return self._load_committed_offset(conn, consumer_group, topic_id, partition_id)
 
+    def _load_committed_offsets_for_topic(
+        self,
+        conn: PGConnection,
+        consumer_group: str,
+        topic_id: int,
+        partition_count: int,
+    ) -> Dict[int, int]:
+        """All committed offsets for a group/topic; missing partitions default to 0."""
+        out: Dict[int, int] = {p: 0 for p in range(partition_count)}
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT partition_id, offset_value FROM {self._consumer_offset}
+                WHERE consumer_group = %s AND topic_id = %s
+                """,
+                (consumer_group, topic_id),
+            )
+            for row in cur.fetchall():
+                pid = int(row[0])
+                if 0 <= pid < partition_count:
+                    out[pid] = int(row[1])
+        return out
+
     def detect_offset_ahead_of_log(
         self,
         conn: PGConnection,
@@ -496,10 +573,13 @@ class PgQueueRepository:
         topic_name: Optional[str] = None,
     ) -> List[PartitionOffsetSkew]:
         max_seqs = self.partition_max_enqueue_seqs(conn, topic_id, partition_count)
+        committed_by_partition = self._load_committed_offsets_for_topic(
+            conn, consumer_group, topic_id, partition_count
+        )
         skewed: List[PartitionOffsetSkew] = []
         for p in range(partition_count):
             max_seq = max_seqs.get(p, 0)
-            committed = self.get_committed_offset(conn, consumer_group, topic_id, p)
+            committed = committed_by_partition.get(p, 0)
             if committed > max_seq:
                 skewed.append(
                     PartitionOffsetSkew(
@@ -859,6 +939,11 @@ class PgQueueRepository:
             raise
         finally:
             restore_pg_connection_autocommit(conn, old_autocommit)
+
+    def apply_topic_retention(self, conn: PGConnection) -> None:
+        """Run SqlSetup retention (preserves per-partition MAX(enqueue_seq) anchor rows)."""
+        flush_pg_connection(conn)
+        apply_retention(conn, qualified_apply_retention=self._apply_retention)
 
     def register_consumer(
         self,

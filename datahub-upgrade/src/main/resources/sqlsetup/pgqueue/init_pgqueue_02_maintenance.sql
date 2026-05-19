@@ -1,6 +1,8 @@
 -- Topic retention on pgQueue message rows (age / row count / total payload). Deletes apply to rows
--- regardless of consumer-group read progress. Session: SET search_path + tokens
--- __PGQUEUE_PREFIX__, __BATCH_DELETE_LIMIT__, __PGQUEUE_SCHEMA__.
+-- regardless of consumer-group read progress unless the row is the per-partition sequence anchor
+-- (the row with MAX(enqueue_seq) for its topic_id + partition_id), so MAX(enqueue_seq)+1 allocation
+-- remains valid after purge. Session: SET search_path + tokens __PGQUEUE_PREFIX__,
+-- __BATCH_DELETE_LIMIT__, __PGQUEUE_SCHEMA__.
 -- The SET search_path clause on the function body pins the resolution to the application schema
 -- so pg_cron jobs (which run with the postgres role's default search_path) can resolve unqualified
 -- table/sequence references inside the function body.
@@ -29,6 +31,12 @@ BEGIN
             INNER JOIN __PGQUEUE_PREFIX___topic t ON t.id = ms.topic_id
             WHERE t.retention_max_age_seconds > 0
                 AND ms.enqueued_at < now() - (t.retention_max_age_seconds * interval '1 second')
+                AND ms.enqueue_seq < (
+                    SELECT MAX(m_anchor.enqueue_seq)
+                    FROM __PGQUEUE_PREFIX___message m_anchor
+                    WHERE m_anchor.topic_id = ms.topic_id
+                        AND m_anchor.partition_id = ms.partition_id
+                )
             LIMIT batch
         );
 
@@ -55,6 +63,12 @@ BEGIN
             ) cnt ON cnt.topic_id = ms.topic_id
             WHERE t.max_rows_per_topic > 0
                 AND cnt.c > t.max_rows_per_topic
+                AND ms.enqueue_seq < (
+                    SELECT MAX(m_anchor.enqueue_seq)
+                    FROM __PGQUEUE_PREFIX___message m_anchor
+                    WHERE m_anchor.topic_id = ms.topic_id
+                        AND m_anchor.partition_id = ms.partition_id
+                )
             ORDER BY ms.enqueued_at ASC
             LIMIT batch
         );
@@ -82,6 +96,12 @@ BEGIN
             ) tot ON tot.topic_id = ms.topic_id
             WHERE t.max_total_payload_bytes > 0
                 AND tot.s > t.max_total_payload_bytes
+                AND ms.enqueue_seq < (
+                    SELECT MAX(m_anchor.enqueue_seq)
+                    FROM __PGQUEUE_PREFIX___message m_anchor
+                    WHERE m_anchor.topic_id = ms.topic_id
+                        AND m_anchor.partition_id = ms.partition_id
+                )
             ORDER BY ms.enqueued_at ASC
             LIMIT batch
         );
@@ -92,7 +112,8 @@ BEGIN
 
     -- Aggressive retention: when enabled for a topic and at least one consumer is registered,
     -- delete messages where every registered consumer group has a committed offset >= enqueue_seq
-    -- for the message's (topic_id, partition_id). Skip when any registered group is STUCK_AHEAD
+    -- for the message's (topic_id, partition_id). Never delete the per-partition MAX(enqueue_seq)
+    -- anchor row (see header). Skip when any registered group is STUCK_AHEAD
     -- (offset_value > MAX(enqueue_seq) for that topic/partition).
     i := 0;
     LOOP
@@ -139,6 +160,12 @@ BEGIN
                                 AND co.partition_id = ms.partition_id
                                 AND co.offset_value >= ms.enqueue_seq
                         )
+                )
+                AND ms.enqueue_seq < (
+                    SELECT MAX(m_anchor.enqueue_seq)
+                    FROM __PGQUEUE_PREFIX___message m_anchor
+                    WHERE m_anchor.topic_id = ms.topic_id
+                        AND m_anchor.partition_id = ms.partition_id
                 )
             LIMIT batch
         );

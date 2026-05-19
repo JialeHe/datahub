@@ -10,10 +10,13 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertNotNull;
+import static org.testng.Assert.assertTrue;
 
+import com.datahub.util.exception.ModelConversionException;
 import com.linkedin.common.urn.Urn;
 import com.linkedin.common.urn.UrnUtils;
 import com.linkedin.events.metadata.ChangeType;
+import com.linkedin.metadata.EventUtils;
 import com.linkedin.metadata.models.AspectSpec;
 import com.linkedin.metadata.queue.MetadataQueueStore;
 import com.linkedin.metadata.queue.PgQueuePayloadCompression;
@@ -30,12 +33,18 @@ import com.linkedin.mxe.PlatformEvent;
 import com.linkedin.mxe.PlatformEventHeader;
 import com.linkedin.mxe.TopicConvention;
 import io.datahubproject.metadata.context.OperationContext;
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
+import org.apache.avro.Schema;
+import org.apache.avro.generic.GenericData;
+import org.apache.avro.generic.GenericRecord;
 import org.mockito.ArgumentCaptor;
+import org.mockito.MockedStatic;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
@@ -48,6 +57,7 @@ public class PgQueueEventProducerTest {
 
   private static final String DUHE_TOPIC = "DataHubUpgradeHistory_v1";
   private static final String MCL_VERSIONED_TOPIC = "MetadataChangeLog_Versioned_v1";
+  private static final String MCL_TIMESERIES_TOPIC = "MetadataChangeLog_Timeseries_v1";
   private static final String MCP_TOPIC = "MetadataChangeProposal_v1";
   private static final String FMCP_TOPIC = "FailedMetadataChangeProposal_v1";
   private static final String PE_TOPIC = "PlatformEvent_v1";
@@ -386,5 +396,176 @@ public class PgQueueEventProducerTest {
             any(),
             any(),
             eq(PgQueuePayloadCompression.NONE));
+  }
+
+  @Test
+  public void testFlushIsNoOp() {
+    producer.flush();
+  }
+
+  @Test
+  public void testGetMetadataChangeLogTopicNameTimeseries() {
+    AspectSpec aspectSpec = mock(AspectSpec.class);
+    when(aspectSpec.isTimeseries()).thenReturn(true);
+    when(topicConvention.getMetadataChangeLogTimeseriesTopicName())
+        .thenReturn(MCL_TIMESERIES_TOPIC);
+
+    assertEquals(producer.getMetadataChangeLogTopicName(aspectSpec), MCL_TIMESERIES_TOPIC);
+  }
+
+  @Test
+  public void testPublishRawTopicConfluentAvroEnqueuesWhenSchemaPresent() throws Exception {
+    when(schemaRegistryService.getSchemaIdForTopic(MCP_TOPIC))
+        .thenReturn(Optional.of(MCP_SCHEMA_ID));
+    when(queueStore.enqueue(
+            eq(MCP_TOPIC),
+            any(),
+            any(QueueTopicDefaults.class),
+            anyInt(),
+            any(byte[].class),
+            any(),
+            any(),
+            eq(PgQueuePayloadCompression.NONE)))
+        .thenReturn(mock(QueueMessageHandle.class));
+
+    List<Schema.Field> fields =
+        List.of(new Schema.Field("payload", Schema.create(Schema.Type.STRING), null, (Object) ""));
+    Schema schema = Schema.createRecord("RawRecord", null, null, false, fields);
+    GenericRecord record = new GenericData.Record(schema);
+    record.put("payload", "x");
+
+    Future<?> result =
+        producer.publishRawTopicConfluentAvro(MCP_TOPIC, "routing-key", record, "raw");
+
+    assertNotNull(result);
+    assertTrue(result.isDone());
+    verify(queueStore, times(1))
+        .enqueue(
+            eq(MCP_TOPIC),
+            eq("routing-key"),
+            any(),
+            anyInt(),
+            any(),
+            any(),
+            any(),
+            eq(PgQueuePayloadCompression.NONE));
+  }
+
+  @Test
+  public void testProduceMetadataChangeProposalSkipsWhenSchemaIdUnknown() {
+    Urn urn = UrnUtils.getUrn("urn:li:dataset:(urn:li:dataPlatform:hdfs,SampleHdfsDataset,PROD)");
+    when(topicConvention.getMetadataChangeProposalTopicName()).thenReturn(MCP_TOPIC);
+    when(schemaRegistryService.getSchemaIdForTopic(MCP_TOPIC)).thenReturn(Optional.empty());
+
+    MetadataChangeProposal mcp =
+        new MetadataChangeProposal()
+            .setEntityUrn(urn)
+            .setEntityType("dataset")
+            .setAspectName("datasetProperties")
+            .setChangeType(ChangeType.UPSERT);
+
+    producer.produceMetadataChangeProposal(urn, mcp);
+
+    verify(queueStore, never())
+        .enqueue(any(), any(), any(), anyInt(), any(byte[].class), any(), any(), any());
+  }
+
+  @Test
+  public void testProduceFailedMetadataChangeProposalSkipsWhenSchemaIdUnknown() throws Exception {
+    Urn urn = UrnUtils.getUrn("urn:li:dataset:(urn:li:dataPlatform:hdfs,SampleHdfsDataset,PROD)");
+    when(topicConvention.getFailedMetadataChangeProposalTopicName()).thenReturn(FMCP_TOPIC);
+    when(schemaRegistryService.getSchemaIdForTopic(FMCP_TOPIC)).thenReturn(Optional.empty());
+
+    OperationContext opContext = mock(OperationContext.class);
+    when(opContext.traceException(any())).thenReturn("traced error");
+    MetadataChangeProposal mcp =
+        new MetadataChangeProposal()
+            .setEntityUrn(urn)
+            .setEntityType("dataset")
+            .setAspectName("datasetProperties")
+            .setChangeType(ChangeType.UPSERT);
+
+    Future<?> result =
+        producer.produceFailedMetadataChangeProposalAsync(
+            opContext, mcp, Set.of(new RuntimeException("err")));
+
+    assertTrue(result.isDone());
+    verify(queueStore, never())
+        .enqueue(any(), any(), any(), anyInt(), any(byte[].class), any(), any(), any());
+  }
+
+  @Test
+  public void testProducePlatformEventSkipsWhenSchemaIdUnknown() throws Exception {
+    when(topicConvention.getPlatformEventTopicName()).thenReturn(PE_TOPIC);
+    when(schemaRegistryService.getSchemaIdForTopic(PE_TOPIC)).thenReturn(Optional.empty());
+
+    PlatformEvent event = new PlatformEvent();
+    event.setName("EntityChangeEvent_v1");
+    event.setHeader(new PlatformEventHeader().setTimestampMillis(0L));
+    event.setPayload(
+        new GenericPayload()
+            .setValue(com.linkedin.data.ByteString.copy("{}".getBytes()))
+            .setContentType("application/json"));
+
+    Future<?> result = producer.producePlatformEvent("EntityChangeEvent_v1", "key", event);
+
+    assertTrue(result.isDone());
+    verify(queueStore, never())
+        .enqueue(any(), any(), any(), anyInt(), any(byte[].class), any(), any(), any());
+  }
+
+  @Test
+  public void testProduceMetadataChangeLogReturnsFailedFutureOnConversionError() throws Exception {
+    Urn urn = UrnUtils.getUrn("urn:li:dataset:(urn:li:dataPlatform:hdfs,SampleHdfsDataset,PROD)");
+    AspectSpec aspectSpec = mock(AspectSpec.class);
+    when(aspectSpec.isTimeseries()).thenReturn(false);
+    when(topicConvention.getMetadataChangeLogVersionedTopicName()).thenReturn(MCL_VERSIONED_TOPIC);
+
+    MetadataChangeLog mcl =
+        new MetadataChangeLog()
+            .setAspectName("datasetProperties")
+            .setEntityType("dataset")
+            .setChangeType(ChangeType.UPSERT)
+            .setEntityUrn(urn);
+
+    try (MockedStatic<EventUtils> eventUtils = org.mockito.Mockito.mockStatic(EventUtils.class)) {
+      eventUtils
+          .when(() -> EventUtils.pegasusToAvroMCL(mcl))
+          .thenThrow(new IOException("conversion failed"));
+
+      Future<?> result = producer.produceMetadataChangeLog(urn, aspectSpec, mcl);
+
+      assertTrue(result.isDone());
+      try {
+        result.get();
+        org.testng.Assert.fail("Expected ExecutionException");
+      } catch (ExecutionException e) {
+        org.testng.Assert.assertTrue(e.getCause() instanceof ModelConversionException);
+      }
+      verify(queueStore, never())
+          .enqueue(any(), any(), any(), anyInt(), any(byte[].class), any(), any(), any());
+    }
+  }
+
+  @Test
+  public void testProduceMetadataChangeProposalCompletesWhenEnqueueThrows() throws Exception {
+    Urn urn = UrnUtils.getUrn("urn:li:dataset:(urn:li:dataPlatform:hdfs,SampleHdfsDataset,PROD)");
+    when(topicConvention.getMetadataChangeProposalTopicName()).thenReturn(MCP_TOPIC);
+    when(schemaRegistryService.getSchemaIdForTopic(MCP_TOPIC))
+        .thenReturn(Optional.of(MCP_SCHEMA_ID));
+    when(queueStore.enqueue(any(), any(), any(), anyInt(), any(byte[].class), any(), any(), any()))
+        .thenThrow(new IllegalStateException("db down"));
+
+    MetadataChangeProposal mcp =
+        new MetadataChangeProposal()
+            .setEntityUrn(urn)
+            .setEntityType("dataset")
+            .setAspectName("datasetProperties")
+            .setChangeType(ChangeType.UPSERT);
+
+    Future<?> result = producer.produceMetadataChangeProposal(urn, mcp);
+
+    assertTrue(result.isDone());
+    org.testng.Assert.assertNull(result.get());
   }
 }

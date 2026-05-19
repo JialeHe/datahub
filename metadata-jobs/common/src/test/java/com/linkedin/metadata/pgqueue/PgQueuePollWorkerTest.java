@@ -9,6 +9,7 @@ import com.linkedin.metadata.config.kafka.KafkaConfiguration;
 import com.linkedin.metadata.config.postgres.PgQueueSetupOptions;
 import com.linkedin.metadata.config.postgres.PostgresSqlSetupProperties;
 import com.linkedin.metadata.queue.MetadataQueueStore;
+import com.linkedin.metadata.queue.PartitionOffsetSkew;
 import com.linkedin.metadata.queue.PgQueuePayloadCompression;
 import com.linkedin.metadata.queue.QueueMessageHandle;
 import com.linkedin.metadata.queue.QueueReceivedMessage;
@@ -340,7 +341,8 @@ public class PgQueuePollWorkerTest {
     when(store.fetchTopic(TOPIC)).thenReturn(Optional.of(TOPIC_META));
 
     PgQueueBatchFlushHandler flushHandler = mock(PgQueueBatchFlushHandler.class);
-    PgQueueBatchPolicy policy = new PgQueueBatchPolicy(100, Long.MAX_VALUE, 1);
+    // Linger flush runs on an empty poll after maxAgeMs; use a small but reliable window for CI.
+    PgQueueBatchPolicy policy = new PgQueueBatchPolicy(100, Long.MAX_VALUE, 10);
 
     QueueReceivedMessage msg = stubMessage();
 
@@ -351,7 +353,7 @@ public class PgQueuePollWorkerTest {
             10,
             "thread-0",
             10,
-            100,
+            50,
             100,
             (topic, msgs, ctx) -> {},
             policy,
@@ -370,15 +372,19 @@ public class PgQueuePollWorkerTest {
                   int call = receiveCalls.incrementAndGet();
                   if (call == 1) {
                     return List.of(msg);
-                  } else {
-                    worker.stop();
-                    return List.of();
                   }
+                  // Wait for linger expiry before the empty poll that triggers flush.
+                  Thread.sleep(20);
+                  if (call >= 3) {
+                    worker.stop();
+                  }
+                  return List.of();
                 });
 
-    runWorkerAndJoin(worker, 2000);
+    runWorkerAndJoin(worker, 5000);
 
-    verify(flushHandler).flush(eq(TOPIC), argThat(batch -> batch.size() == 1), any());
+    verify(flushHandler, timeout(3000))
+        .flush(eq(TOPIC), argThat(batch -> batch.size() == 1), any());
   }
 
   // --- 8. Error recovery sleep ---
@@ -417,5 +423,166 @@ public class PgQueuePollWorkerTest {
     assertTrue(receiveCalls.get() >= 2, "Worker should have retried after error recovery sleep");
     assertFalse(Thread.currentThread().isInterrupted());
     verify(handler, never()).handleBatch(anyString(), anyList(), any());
+  }
+
+  @Test
+  public void immediateModeWarnStuckAheadDoesNotThrow() throws Exception {
+    PgQueueSetupOptions opts = mockSetupOptions();
+    MetadataQueueStore store = mock(MetadataQueueStore.class);
+    when(store.fetchTopic(TOPIC)).thenReturn(Optional.of(TOPIC_META));
+    when(store.detectOffsetAheadOfLog(eq(GROUP), eq(1L), eq(3)))
+        .thenReturn(
+            List.of(
+                PartitionOffsetSkew.builder()
+                    .consumerGroup(GROUP)
+                    .topicId(1L)
+                    .partitionId(0)
+                    .committedOffset(10L)
+                    .maxSeq(5L)
+                    .aheadBy(5L)
+                    .build()));
+
+    PgQueuePollHandler handler = mock(PgQueuePollHandler.class);
+    PgQueuePollerRegistration reg =
+        new PgQueuePollerRegistration(
+            GROUP, List.of(TOPIC), 10, "thread-0", 100, 100, 100, handler);
+
+    PgQueuePollWorker worker =
+        new PgQueuePollWorker(
+            reg, store, mockPostgresProps(opts), mockConfigProvider(), opts, 0, 1, null);
+
+    when(store.receiveBatchForGroup(
+            anyString(), anyLong(), anyList(), anyString(), any(), anyInt()))
+        .thenAnswer(
+            inv -> {
+              worker.stop();
+              return List.of();
+            });
+
+    runWorkerAndJoin(worker, 2000);
+
+    verify(store).detectOffsetAheadOfLog(GROUP, 1L, 3);
+    verify(handler, never()).handleBatch(anyString(), anyList(), any());
+  }
+
+  @Test
+  public void immediateModeSwallowsUnsupportedOffsetSkewCheck() throws Exception {
+    PgQueueSetupOptions opts = mockSetupOptions();
+    MetadataQueueStore store = mock(MetadataQueueStore.class);
+    when(store.fetchTopic(TOPIC)).thenReturn(Optional.of(TOPIC_META));
+    when(store.detectOffsetAheadOfLog(anyString(), anyLong(), anyInt()))
+        .thenThrow(new UnsupportedOperationException("not pgQueue store"));
+
+    PgQueuePollHandler handler = mock(PgQueuePollHandler.class);
+    PgQueuePollerRegistration reg =
+        new PgQueuePollerRegistration(
+            GROUP, List.of(TOPIC), 10, "thread-0", 100, 100, 100, handler);
+
+    PgQueuePollWorker worker =
+        new PgQueuePollWorker(
+            reg, store, mockPostgresProps(opts), mockConfigProvider(), opts, 0, 1, null);
+
+    when(store.receiveBatchForGroup(
+            anyString(), anyLong(), anyList(), anyString(), any(), anyInt()))
+        .thenAnswer(
+            inv -> {
+              worker.stop();
+              return List.of();
+            });
+
+    runWorkerAndJoin(worker, 2000);
+
+    verify(handler, never()).handleBatch(anyString(), anyList(), any());
+  }
+
+  @Test
+  public void accumulationModeFlushesOnByteThresholdDuringPoll() throws Exception {
+    PgQueueSetupOptions opts = mockSetupOptions();
+    MetadataQueueStore store = mock(MetadataQueueStore.class);
+    when(store.fetchTopic(TOPIC)).thenReturn(Optional.of(TOPIC_META));
+
+    PgQueueBatchFlushHandler flushHandler = mock(PgQueueBatchFlushHandler.class);
+    PgQueueBatchPolicy policy = new PgQueueBatchPolicy(100, 7, 60_000);
+    QueueReceivedMessage msg1 = stubMessage();
+    QueueReceivedMessage msg2 = stubMessage();
+
+    PgQueuePollerRegistration reg =
+        new PgQueuePollerRegistration(
+            GROUP,
+            List.of(TOPIC),
+            10,
+            "thread-0",
+            10,
+            100,
+            100,
+            (topic, msgs, ctx) -> {},
+            policy,
+            flushHandler);
+
+    PgQueuePollWorker worker =
+        new PgQueuePollWorker(
+            reg, store, mockPostgresProps(opts), mockConfigProvider(), opts, 0, 1, null);
+
+    AtomicInteger receiveCalls = new AtomicInteger(0);
+    when(store.receiveBatchForGroup(
+            anyString(), anyLong(), anyList(), anyString(), any(), anyInt()))
+        .thenAnswer(
+            inv -> {
+              int call = receiveCalls.incrementAndGet();
+              if (call == 1) {
+                return List.of(msg1, msg2);
+              }
+              worker.stop();
+              return List.of();
+            });
+
+    runWorkerAndJoin(worker, 2000);
+
+    verify(flushHandler).flush(eq(TOPIC), argThat(batch -> batch.size() == 2), any());
+  }
+
+  @Test
+  public void accumulationModeSwallowsFlushHandlerException() throws Exception {
+    PgQueueSetupOptions opts = mockSetupOptions();
+    MetadataQueueStore store = mock(MetadataQueueStore.class);
+    when(store.fetchTopic(TOPIC)).thenReturn(Optional.of(TOPIC_META));
+
+    PgQueueBatchFlushHandler flushHandler = mock(PgQueueBatchFlushHandler.class);
+    doThrow(new RuntimeException("flush failed"))
+        .when(flushHandler)
+        .flush(anyString(), anyList(), any());
+
+    PgQueueBatchPolicy policy = new PgQueueBatchPolicy(1, Long.MAX_VALUE, 60_000);
+    QueueReceivedMessage msg = stubMessage();
+
+    PgQueuePollerRegistration reg =
+        new PgQueuePollerRegistration(
+            GROUP,
+            List.of(TOPIC),
+            10,
+            "thread-0",
+            10,
+            100,
+            100,
+            (topic, msgs, ctx) -> {},
+            policy,
+            flushHandler);
+
+    PgQueuePollWorker worker =
+        new PgQueuePollWorker(
+            reg, store, mockPostgresProps(opts), mockConfigProvider(), opts, 0, 1, null);
+
+    when(store.receiveBatchForGroup(
+            anyString(), anyLong(), anyList(), anyString(), any(), anyInt()))
+        .thenAnswer(
+            inv -> {
+              worker.stop();
+              return List.of(msg);
+            });
+
+    runWorkerAndJoin(worker, 2000);
+
+    verify(flushHandler).flush(eq(TOPIC), anyList(), any());
+    assertTrue(worker.isStopped());
   }
 }

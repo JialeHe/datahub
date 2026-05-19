@@ -78,6 +78,11 @@ public final class QueueTableNames {
     return schema + "." + prefix + "_consumer_registration";
   }
 
+  @Nonnull
+  public String qualifiedApplyRetention() {
+    return schema + "." + prefix + "_apply_retention";
+  }
+
   /**
    * When true, physical tables match {@link com.linkedin.metadata.queue.ebean.EbeanPgQueueTopic} /
    * {@link com.linkedin.metadata.queue.ebean.EbeanPgQueueConsumerOffset} mapping and Ebean entity

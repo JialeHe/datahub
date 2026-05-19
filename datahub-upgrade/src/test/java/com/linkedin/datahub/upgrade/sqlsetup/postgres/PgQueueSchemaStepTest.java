@@ -62,6 +62,12 @@ public class PgQueueSchemaStepTest {
     assertEquals(PgQueueSchemaStep.sanitizePartmanIntervalLiteral("1'day"), "1''day");
   }
 
+  @Test
+  public void testQuotePgIdentifier() {
+    assertEquals(PgQueueSchemaStep.quotePgIdentifier("queue"), "\"queue\"");
+    assertEquals(PgQueueSchemaStep.quotePgIdentifier("my\"schema"), "\"my\"\"schema\"");
+  }
+
   /**
    * Regression for "relation \"metadata_queue_topic\" does not exist" when the trigger fires from
    * an application JDBC connection that doesn't have the queue schema in its search_path. The
@@ -92,5 +98,27 @@ public class PgQueueSchemaStepTest {
     assertTrue(
         substituted.contains("CHECK (priority BETWEEN 0 AND 9)"),
         "Priority range CHECK constraint missing after substitution: " + substituted);
+  }
+
+  @Test
+  public void testMaintenanceSqlRetainsPartitionSequenceAnchor() throws Exception {
+    String raw =
+        new String(
+                new ClassPathResource("sqlsetup/pgqueue/init_pgqueue_02_maintenance.sql")
+                    .getInputStream()
+                    .readAllBytes(),
+                StandardCharsets.UTF_8)
+            .trim();
+
+    String substituted =
+        raw.replace("__PGQUEUE_PREFIX__", "metadata_queue")
+            .replace("__PGQUEUE_SCHEMA__", PgQueueSchemaStep.quotePgIdentifier("queue"));
+
+    assertTrue(
+        substituted.contains("m_anchor.enqueue_seq"),
+        "Partition sequence anchor exemption missing from maintenance SQL");
+    assertTrue(
+        substituted.contains("Never delete the per-partition MAX(enqueue_seq)"),
+        "Aggressive retention anchor comment missing");
   }
 }

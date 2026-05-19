@@ -3,6 +3,9 @@ package com.linkedin.metadata.queue.postgres;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.linkedin.metadata.EbeanTestUtils;
 import com.linkedin.metadata.PostgresTestUtils;
+import com.linkedin.metadata.config.postgres.DatabaseType;
+import com.linkedin.metadata.config.postgres.PgQueueTopicOverride;
+import com.linkedin.metadata.config.postgres.PostgresSqlSetupProperties;
 import com.linkedin.metadata.queue.ConsumerOffsetResetReport;
 import com.linkedin.metadata.queue.ConsumerOffsetResetSpec;
 import com.linkedin.metadata.queue.ConsumerRegistrationRow;
@@ -13,6 +16,7 @@ import com.linkedin.metadata.queue.PartitionOffsetSkew;
 import com.linkedin.metadata.queue.PgQueuePayloadCodec;
 import com.linkedin.metadata.queue.PgQueuePayloadCompression;
 import com.linkedin.metadata.queue.PriorityBandConfig;
+import com.linkedin.metadata.queue.QueueLogPeekRow;
 import com.linkedin.metadata.queue.QueueMessageHandle;
 import com.linkedin.metadata.queue.QueueMessageHeader;
 import com.linkedin.metadata.queue.QueueReceivedMessage;
@@ -23,12 +27,19 @@ import io.ebean.Database;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.Statement;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testng.Assert;
 import org.testng.annotations.AfterClass;
@@ -186,6 +197,324 @@ public class EbeanPostgresMetadataQueueStoreIT {
     QueueTopicMetadata meta = store.fetchTopic(topic).orElseThrow();
     Assert.assertEquals(meta.id(), id);
     Assert.assertEquals(meta.partitionCount(), 4);
+  }
+
+  @Test
+  public void fetchTopic_missing_returnsEmpty() {
+    Assert.assertTrue(store.fetchTopic("missing_" + UUID.randomUUID()).isEmpty());
+  }
+
+  @Test
+  public void fetchTopic_viaEbeanEntityWhenDefaultPhysicalLayout() throws Exception {
+    QueueTableNames defaultNames =
+        new QueueTableNames(QueueTableNames.DEFAULT_SCHEMA, QueueTableNames.DEFAULT_TABLE_PREFIX);
+    Assert.assertTrue(defaultNames.matchesDefaultEntityPhysicalMapping());
+    try (Connection c = database.dataSource().getConnection()) {
+      c.setAutoCommit(false);
+      applyMinimalPgQueueTables(c, defaultNames);
+      c.commit();
+    }
+    PriorityBandConfig bandConfig =
+        PriorityBandConfig.parse(
+            new ObjectMapper(),
+            "[{\"range\":[0,3],\"weight\":70},{\"range\":[4,6],\"weight\":20},{\"range\":[7,9],\"weight\":10}]");
+    MetadataQueueStore ebeanStore =
+        new EbeanPostgresMetadataQueueStore(database, defaultNames, bandConfig);
+    String topic = "ebean_topic_" + UUID.randomUUID();
+    long id = ebeanStore.ensureTopic(topic, defaults);
+    QueueTopicMetadata meta = ebeanStore.fetchTopic(topic).orElseThrow();
+    Assert.assertEquals(meta.id(), id);
+    Assert.assertTrue(ebeanStore.fetchTopic("missing_" + UUID.randomUUID()).isEmpty());
+  }
+
+  @Test
+  public void storeFromPostgresProperties_resolvesPerTopicDefaults() {
+    PostgresSqlSetupProperties props = pgQueuePropsForNamespace();
+    props.getPgQueue().getTopicDefaults().setPartitionCount(4);
+    props.getPgQueue().setInheritKafkaTopics(false);
+    PgQueueTopicOverride ts = new PgQueueTopicOverride();
+    ts.setTopicName("MetadataChangeLog_Timeseries_v1");
+    ts.setPartitionCount(2);
+    props.getPgQueue().getTopics().put("metadataChangeLogTimeseries", ts);
+    props.validateForUse(DatabaseType.POSTGRES);
+    MetadataQueueStore propStore =
+        new EbeanPostgresMetadataQueueStore(database, props, null, new ObjectMapper());
+
+    String catalogTopic = "MetadataChangeLog_Timeseries_v1";
+    QueueTopicDefaults passed = new QueueTopicDefaults(1, 0, 0L, 0L, false, "application/avro");
+    propStore.ensureTopic(catalogTopic, passed);
+    QueueTopicMetadata meta = propStore.fetchTopic(catalogTopic).orElseThrow();
+    Assert.assertEquals(meta.partitionCount(), 2);
+
+    String other = "OtherTopic_" + UUID.randomUUID();
+    propStore.ensureTopic(other, passed);
+    Assert.assertEquals(propStore.fetchTopic(other).orElseThrow().partitionCount(), 4);
+  }
+
+  @Test
+  public void enqueueBatch_empty_returnsEmpty() {
+    Assert.assertTrue(store.enqueueBatch(List.of(), defaults).isEmpty());
+  }
+
+  @Test
+  public void partitionNextExclusiveSeqs_reflectsEnqueuedMessages() {
+    String topic = "topic_" + UUID.randomUUID();
+    store.ensureTopic(topic, defaults);
+    QueueTopicMetadata meta = store.fetchTopic(topic).orElseThrow();
+    String routingKey = routingKeyForPartition(meta.partitionCount(), 0);
+    store.enqueue(topic, routingKey, defaults, 0, new byte[] {1}, Optional.empty(), List.of());
+    store.enqueue(topic, routingKey, defaults, 0, new byte[] {2}, Optional.empty(), List.of());
+
+    Map<Integer, Long> next = store.partitionNextExclusiveSeqs(meta.id(), meta.partitionCount());
+    int partition = MetadataQueueRouting.stablePartitionId(routingKey, meta.partitionCount());
+    Assert.assertEquals(next.get(partition).longValue(), 3L);
+    Assert.assertEquals(next.get(1).longValue(), 1L);
+  }
+
+  @Test
+  public void minEnqueueSeq_emptyPartition_returnsEmpty() {
+    String topic = "topic_" + UUID.randomUUID();
+    store.ensureTopic(topic, defaults);
+    QueueTopicMetadata meta = store.fetchTopic(topic).orElseThrow();
+    Assert.assertTrue(store.minEnqueueSeq(meta.id(), 0).isEmpty());
+  }
+
+  @Test
+  public void minEnqueueSeq_and_minEnqueueSeqAtOrAfter_withMessages() throws Exception {
+    String topic = "topic_" + UUID.randomUUID();
+    store.ensureTopic(topic, defaults);
+    QueueTopicMetadata meta = store.fetchTopic(topic).orElseThrow();
+    String routingKey = routingKeyForPartition(meta.partitionCount(), 0);
+    int partition = MetadataQueueRouting.stablePartitionId(routingKey, meta.partitionCount());
+
+    QueueMessageHandle first =
+        store.enqueue(topic, routingKey, defaults, 0, new byte[] {1}, Optional.empty(), List.of());
+    QueueMessageHandle second =
+        store.enqueue(topic, routingKey, defaults, 0, new byte[] {2}, Optional.empty(), List.of());
+    Instant cutoffForSecond = second.enqueuedAt();
+    if (!cutoffForSecond.isAfter(first.enqueuedAt())) {
+      cutoffForSecond = first.enqueuedAt().plusNanos(1);
+      setMessageEnqueuedAt(second, cutoffForSecond);
+    }
+
+    OptionalLong min = store.minEnqueueSeq(meta.id(), partition);
+    Assert.assertTrue(min.isPresent());
+    Assert.assertEquals(min.getAsLong(), 1L);
+
+    Assert.assertEquals(
+        store.minEnqueueSeqAtOrAfter(meta.id(), partition, first.enqueuedAt()).getAsLong(), 1L);
+    OptionalLong minAfter = store.minEnqueueSeqAtOrAfter(meta.id(), partition, cutoffForSecond);
+    Assert.assertTrue(minAfter.isPresent());
+    Assert.assertEquals(minAfter.getAsLong(), 2L);
+
+    OptionalLong minFuture =
+        store.minEnqueueSeqAtOrAfter(meta.id(), partition, Instant.now().plusSeconds(3600));
+    Assert.assertTrue(minFuture.isEmpty());
+
+    Assert.assertTrue(
+        store
+            .minEnqueueSeqAtOrAfter(meta.id(), partition, first.enqueuedAt().minusSeconds(1))
+            .isPresent());
+  }
+
+  @Test
+  public void peekTopicLog_invalidArgs_returnsEmpty() {
+    String topic = "topic_" + UUID.randomUUID();
+    store.ensureTopic(topic, defaults);
+    QueueTopicMetadata meta = store.fetchTopic(topic).orElseThrow();
+    Assert.assertTrue(store.peekTopicLog(meta.id(), Map.of(0, 0L), 0).isEmpty());
+    Assert.assertTrue(store.peekTopicLog(meta.id(), Map.of(), 10).isEmpty());
+  }
+
+  @Test
+  public void receiveBatchForGroup_emptyPartitionsOrZeroMax_returnsEmpty() {
+    String topic = "topic_" + UUID.randomUUID();
+    store.ensureTopic(topic, defaults);
+    QueueTopicMetadata meta = store.fetchTopic(topic).orElseThrow();
+    Assert.assertTrue(
+        store
+            .receiveBatchForGroup(
+                "cg-empty", meta.id(), List.of(), "owner", Duration.ofSeconds(30), 10)
+            .isEmpty());
+    Assert.assertTrue(
+        store
+            .receiveBatchForGroup(
+                "cg-empty", meta.id(), List.of(0), "owner", Duration.ofSeconds(30), 0)
+            .isEmpty());
+  }
+
+  @Test
+  public void commitForGroup_emptyHandles_returnsZero() {
+    Assert.assertEquals(store.commitForGroup("cg-empty", List.of(), true), 0);
+  }
+
+  @Test
+  public void extendVisibilityForGroup_extendsActiveLease() throws Exception {
+    String topic = "topic_" + UUID.randomUUID();
+    store.ensureTopic(topic, defaults);
+    QueueTopicMetadata meta = store.fetchTopic(topic).orElseThrow();
+    String routingKey = routingKeyForPartition(meta.partitionCount(), 0);
+    int partition = MetadataQueueRouting.stablePartitionId(routingKey, meta.partitionCount());
+    store.enqueue(topic, routingKey, defaults, 0, new byte[] {1}, Optional.empty(), List.of());
+
+    List<QueueReceivedMessage> locked =
+        store.receiveBatchForGroup(
+            "cg-vis", meta.id(), List.of(partition), "owner-vis", Duration.ofSeconds(2), 10);
+    Assert.assertEquals(locked.size(), 1);
+
+    Instant lockedUntilBefore = readLeaseLockedUntil(locked.get(0).handle(), "cg-vis");
+    Assert.assertEquals(
+        store.extendVisibilityForGroup(
+            "cg-vis", List.of(locked.get(0).handle()), "owner-vis", Duration.ofSeconds(120)),
+        1);
+    Instant lockedUntilAfter = readLeaseLockedUntil(locked.get(0).handle(), "cg-vis");
+    Assert.assertTrue(lockedUntilAfter.isAfter(lockedUntilBefore));
+
+    Assert.assertEquals(
+        store.extendVisibilityForGroup("cg-vis", List.of(), "owner-vis", Duration.ofSeconds(1)), 0);
+    store.commitForGroup("cg-vis", List.of(locked.get(0).handle()), false);
+  }
+
+  @Test(expectedExceptions = IllegalArgumentException.class)
+  public void resetConsumerOffsets_unknownTopic_throws() {
+    store.resetConsumerOffsets(
+        ConsumerOffsetResetSpec.builder().topicName("nonexistent_" + UUID.randomUUID()).build());
+  }
+
+  @Test
+  public void resetConsumerOffsets_notOnlyStuckAhead_resetsRegardless() throws Exception {
+    String topic = "topic_" + UUID.randomUUID();
+    store.ensureTopic(topic, defaults);
+    QueueTopicMetadata meta = store.fetchTopic(topic).orElseThrow();
+    store.enqueue(
+        topic, "urn:li:test:reset-all", defaults, 0, new byte[] {1}, Optional.empty(), List.of());
+    setCommittedOffset("cg-reset-all", meta.id(), 0, 99L);
+
+    ConsumerOffsetResetReport report =
+        store.resetConsumerOffsets(
+            ConsumerOffsetResetSpec.builder()
+                .consumerGroup("cg-reset-all")
+                .topicName(topic)
+                .onlyStuckAhead(false)
+                .build());
+    Assert.assertEquals(report.getPartitionsUpdated(), 1);
+    Assert.assertEquals(report.getResets().get(0).getPreviousOffset(), 99L);
+    Assert.assertEquals(report.getResets().get(0).getNewOffset(), 1L);
+    Assert.assertEquals(store.getCommittedOffset("cg-reset-all", meta.id(), 0), 1L);
+  }
+
+  @Test
+  public void resetConsumerOffsets_nullFilters_resetsAllGroupsOnTopic() throws Exception {
+    String topic = "topic_" + UUID.randomUUID();
+    store.ensureTopic(topic, defaults);
+    QueueTopicMetadata meta = store.fetchTopic(topic).orElseThrow();
+    String routingKey = routingKeyForPartition(meta.partitionCount(), 0);
+    int partition = MetadataQueueRouting.stablePartitionId(routingKey, meta.partitionCount());
+    store.enqueue(topic, routingKey, defaults, 0, new byte[] {1}, Optional.empty(), List.of());
+    setCommittedOffset("cg-a", meta.id(), partition, 40L);
+    setCommittedOffset("cg-b", meta.id(), partition, 50L);
+
+    ConsumerOffsetResetReport report =
+        store.resetConsumerOffsets(
+            ConsumerOffsetResetSpec.builder().topicName(topic).onlyStuckAhead(true).build());
+    Assert.assertEquals(report.getPartitionsUpdated(), 2);
+    Assert.assertEquals(store.getCommittedOffset("cg-a", meta.id(), partition), 1L);
+    Assert.assertEquals(store.getCommittedOffset("cg-b", meta.id(), partition), 1L);
+  }
+
+  @Test
+  public void applyRetention_invokesConfiguredFunction() throws Exception {
+    try (Connection c = database.dataSource().getConnection();
+        Statement st = c.createStatement()) {
+      st.execute(
+          "CREATE OR REPLACE FUNCTION "
+              + names.qualifiedApplyRetention()
+              + "() RETURNS void LANGUAGE plpgsql AS $$ BEGIN END; $$");
+    }
+    store.applyRetention();
+  }
+
+  @Test
+  public void ensureTopic_blankMimeDefaultsToAvro() throws Exception {
+    String topic = "topic_" + UUID.randomUUID();
+    QueueTopicDefaults noMime = new QueueTopicDefaults(4, 0, 0L, 0L, false, null);
+    store.ensureTopic(topic, noMime);
+    try (Connection c = database.dataSource().getConnection();
+        PreparedStatement ps =
+            c.prepareStatement(
+                "SELECT ct.mime FROM "
+                    + names.qualifiedTopic()
+                    + " t JOIN "
+                    + names.qualifiedContentType()
+                    + " ct ON ct.id = t.default_content_type_id WHERE t.topic_name = ?")) {
+      ps.setString(1, topic);
+      try (ResultSet rs = ps.executeQuery()) {
+        Assert.assertTrue(rs.next());
+        Assert.assertEquals(rs.getString(1), "application/avro");
+      }
+    }
+  }
+
+  @Test
+  public void enqueue_matchingTopicDefaultContentType_storesNullContentTypeId() throws Exception {
+    String topic = "topic_" + UUID.randomUUID();
+    store.ensureTopic(topic, defaults);
+    String routingKey = "urn:li:test:ct-null";
+    store.enqueue(
+        topic, routingKey, defaults, 0, new byte[] {1}, Optional.of("application/avro"), List.of());
+    try (Connection c = database.dataSource().getConnection();
+        PreparedStatement ps =
+            c.prepareStatement(
+                "SELECT content_type_id FROM "
+                    + names.qualifiedMessage()
+                    + " WHERE routing_key = ?")) {
+      ps.setString(1, routingKey);
+      try (ResultSet rs = ps.executeQuery()) {
+        Assert.assertTrue(rs.next());
+        Assert.assertTrue(rs.getObject(1) == null);
+      }
+    }
+  }
+
+  @Test
+  public void ensureContentTypeRegistered_uniqueViolationStillResolves() throws Exception {
+    String mime = "application/concurrent-" + UUID.randomUUID();
+    ExecutorService pool = Executors.newFixedThreadPool(2);
+    try {
+      Future<?> first =
+          pool.submit(
+              () ->
+                  store.ensureTopic(
+                      "topic_a_" + UUID.randomUUID(),
+                      new QueueTopicDefaults(4, 0, 0L, 0L, false, mime)));
+      Future<?> second =
+          pool.submit(
+              () ->
+                  store.ensureTopic(
+                      "topic_b_" + UUID.randomUUID(),
+                      new QueueTopicDefaults(4, 0, 0L, 0L, false, mime)));
+      first.get(60, TimeUnit.SECONDS);
+      second.get(60, TimeUnit.SECONDS);
+      Assert.assertEquals(countContentTypeRowsForMime(mime), 1);
+    } finally {
+      pool.shutdownNow();
+    }
+  }
+
+  @Test
+  public void peekTopicLog_returnsRowsWithRoutingKeyAndPriority() {
+    String topic = "topic_" + UUID.randomUUID();
+    store.ensureTopic(topic, defaults);
+    QueueTopicMetadata meta = store.fetchTopic(topic).orElseThrow();
+    String routingKey = "urn:li:test:peek";
+    store.enqueue(topic, routingKey, defaults, 3, new byte[] {7}, Optional.empty(), List.of());
+
+    List<QueueLogPeekRow> rows =
+        store.peekTopicLog(meta.id(), Map.of(0, 0L, 1, 0L, 2, 0L, 3, 0L), 5);
+    Assert.assertEquals(rows.size(), 1);
+    Assert.assertEquals(rows.get(0).priority(), 3);
+    Assert.assertEquals(rows.get(0).routingKey(), routingKey);
+    Assert.assertEquals(rows.get(0).payload(), new byte[] {7});
   }
 
   @Test
@@ -769,6 +1098,141 @@ public class EbeanPostgresMetadataQueueStoreIT {
         store.detectOffsetAheadOfLog("group-two", meta.id(), meta.partitionCount()).isEmpty());
   }
 
+  @Test
+  public void repeatedEnqueueDoesNotBurnContentTypeSequence() throws Exception {
+    String topic = "topic_" + UUID.randomUUID();
+    String routingKey = "urn:li:test:mime-dedup";
+    long seqBefore = contentTypeSequenceLastValue();
+    int typesBefore = countContentTypeRows();
+
+    store.ensureTopic(topic, defaults);
+    for (int i = 0; i < 50; i++) {
+      store.enqueue(
+          topic,
+          routingKey,
+          defaults,
+          0,
+          new byte[] {(byte) i},
+          Optional.of("application/avro"),
+          List.of());
+    }
+
+    Assert.assertEquals(countContentTypeRows(), typesBefore);
+    long seqAfter = contentTypeSequenceLastValue();
+    Assert.assertTrue(
+        seqAfter - seqBefore <= 1,
+        "expected at most one new content_type id, seqBefore="
+            + seqBefore
+            + " seqAfter="
+            + seqAfter);
+  }
+
+  @Test
+  public void retentionPreservesTailThenEnqueueConsumes() throws Exception {
+    String topic = "topic_" + UUID.randomUUID();
+    store.ensureTopic(topic, defaults);
+    QueueTopicMetadata meta = store.fetchTopic(topic).orElseThrow();
+    String routingKey = routingKeyForPartition(meta.partitionCount(), 0);
+    int partition = MetadataQueueRouting.stablePartitionId(routingKey, meta.partitionCount());
+    String group = "cg-tail";
+
+    for (int i = 0; i < 3; i++) {
+      store.enqueue(
+          topic, routingKey, defaults, 0, new byte[] {(byte) i}, Optional.empty(), List.of());
+    }
+
+    List<QueueReceivedMessage> batch =
+        store.receiveBatchForGroup(
+            group, meta.id(), List.of(partition), "owner", Duration.ofSeconds(60), 10);
+    Assert.assertEquals(batch.size(), 3);
+    store.commitForGroup(group, batch.stream().map(QueueReceivedMessage::handle).toList(), true);
+    long committed = store.getCommittedOffset(group, meta.id(), partition);
+    Assert.assertEquals(committed, 3L);
+
+    deleteNonTailMessageRows(meta.id(), partition);
+    Assert.assertEquals(countMessageRows(meta.id(), partition), 1L);
+    Assert.assertEquals(maxEnqueueSeq(meta.id(), partition), 3L);
+
+    byte[] nextPayload = new byte[] {9};
+    store.enqueue(topic, routingKey, defaults, 0, nextPayload, Optional.empty(), List.of());
+
+    List<QueueReceivedMessage> afterPurge =
+        store.receiveBatchForGroup(
+            group, meta.id(), List.of(partition), "owner", Duration.ofSeconds(60), 10);
+    Assert.assertEquals(afterPurge.size(), 1);
+    Assert.assertEquals(afterPurge.get(0).payload(), nextPayload);
+    Assert.assertEquals(afterPurge.get(0).handle().enqueueSeq(), 4L);
+  }
+
+  private PostgresSqlSetupProperties pgQueuePropsForNamespace() {
+    PostgresSqlSetupProperties props = new PostgresSqlSetupProperties();
+    props.setSchema("public");
+    props.getPgQueue().setEnabled(true);
+    props.getPgQueue().setSchema(names.schema());
+    props.getPgQueue().setTablePrefix(names.tablePrefix());
+    PostgresSqlSetupProperties.PgQueue.TopicDefaults d = props.getPgQueue().getTopicDefaults();
+    d.setPartitionCount(4);
+    d.setVisibilityTimeoutSeconds(600);
+    d.setPriorityBands(
+        "[{\"range\":[0,3],\"weight\":70},{\"range\":[4,6],\"weight\":20},{\"range\":[7,9],\"weight\":10}]");
+    d.setRetentionMaxAgeSeconds(604800);
+    d.setMaxRowsPerTopic(0L);
+    d.setMaxTotalPayloadBytesPerTopic(0L);
+    PostgresSqlSetupProperties.PgQueue.Retention r = props.getPgQueue().getRetention();
+    r.setPartmanPartitionInterval("1 day");
+    r.setPartmanPremake(4);
+    props.getPgQueue().getMaintenance().setCronEnabled(false);
+    props.getPgQueue().getMaintenance().setBatchDeleteLimit(5000);
+    props.getPgQueue().setPayloadCompression("SNAPPY");
+    return props;
+  }
+
+  private Instant readLeaseLockedUntil(QueueMessageHandle handle, String consumerGroup)
+      throws Exception {
+    try (Connection c = database.dataSource().getConnection();
+        PreparedStatement ps =
+            c.prepareStatement(
+                "SELECT locked_until FROM "
+                    + names.qualifiedMessageGroupLease()
+                    + " WHERE message_id = ? AND message_enqueued_at = ? AND consumer_group = ?")) {
+      ps.setLong(1, handle.id());
+      ps.setTimestamp(2, java.sql.Timestamp.from(handle.enqueuedAt()));
+      ps.setString(3, consumerGroup);
+      try (ResultSet rs = ps.executeQuery()) {
+        Assert.assertTrue(rs.next());
+        return rs.getTimestamp(1).toInstant();
+      }
+    }
+  }
+
+  private void setMessageEnqueuedAt(QueueMessageHandle handle, Instant enqueuedAt)
+      throws Exception {
+    try (Connection c = database.dataSource().getConnection();
+        PreparedStatement ps =
+            c.prepareStatement(
+                "UPDATE "
+                    + names.qualifiedMessage()
+                    + " SET enqueued_at = ? WHERE id = ? AND enqueued_at = ?")) {
+      ps.setTimestamp(1, java.sql.Timestamp.from(enqueuedAt));
+      ps.setLong(2, handle.id());
+      ps.setTimestamp(3, java.sql.Timestamp.from(handle.enqueuedAt()));
+      Assert.assertEquals(ps.executeUpdate(), 1);
+    }
+  }
+
+  private int countContentTypeRowsForMime(String mime) throws Exception {
+    try (Connection c = database.dataSource().getConnection();
+        PreparedStatement ps =
+            c.prepareStatement(
+                "SELECT COUNT(*) FROM " + names.qualifiedContentType() + " WHERE mime = ?")) {
+      ps.setString(1, mime);
+      try (ResultSet rs = ps.executeQuery()) {
+        rs.next();
+        return rs.getInt(1);
+      }
+    }
+  }
+
   private void setCommittedOffset(String group, long topicId, int partitionId, long offset)
       throws Exception {
     try (Connection c = database.dataSource().getConnection()) {
@@ -785,6 +1249,79 @@ public class EbeanPostgresMetadataQueueStoreIT {
         ps.setInt(3, partitionId);
         ps.setLong(4, offset);
         ps.executeUpdate();
+      }
+    }
+  }
+
+  /** Simulates retention that keeps the per-partition MAX(enqueue_seq) anchor row. */
+  private void deleteNonTailMessageRows(long topicId, int partitionId) throws Exception {
+    try (Connection c = database.dataSource().getConnection()) {
+      try (PreparedStatement ps =
+          c.prepareStatement(
+              "DELETE FROM "
+                  + names.qualifiedMessage()
+                  + " m WHERE m.topic_id = ? AND m.partition_id = ?"
+                  + " AND m.enqueue_seq < ("
+                  + "SELECT MAX(m2.enqueue_seq) FROM "
+                  + names.qualifiedMessage()
+                  + " m2 WHERE m2.topic_id = ? AND m2.partition_id = ?)")) {
+        ps.setLong(1, topicId);
+        ps.setInt(2, partitionId);
+        ps.setLong(3, topicId);
+        ps.setInt(4, partitionId);
+        ps.executeUpdate();
+      }
+    }
+  }
+
+  private long countMessageRows(long topicId, int partitionId) throws Exception {
+    try (Connection c = database.dataSource().getConnection();
+        PreparedStatement ps =
+            c.prepareStatement(
+                "SELECT COUNT(*) FROM "
+                    + names.qualifiedMessage()
+                    + " WHERE topic_id = ? AND partition_id = ?")) {
+      ps.setLong(1, topicId);
+      ps.setInt(2, partitionId);
+      try (var rs = ps.executeQuery()) {
+        rs.next();
+        return rs.getLong(1);
+      }
+    }
+  }
+
+  private long contentTypeSequenceLastValue() throws Exception {
+    String seqName = names.schema() + "." + names.tablePrefix() + "_content_type_id_seq";
+    try (Connection c = database.dataSource().getConnection();
+        PreparedStatement ps = c.prepareStatement("SELECT last_value FROM " + seqName);
+        ResultSet rs = ps.executeQuery()) {
+      rs.next();
+      return rs.getLong(1);
+    }
+  }
+
+  private int countContentTypeRows() throws Exception {
+    try (Connection c = database.dataSource().getConnection();
+        PreparedStatement ps =
+            c.prepareStatement("SELECT COUNT(*) FROM " + names.qualifiedContentType());
+        ResultSet rs = ps.executeQuery()) {
+      rs.next();
+      return rs.getInt(1);
+    }
+  }
+
+  private long maxEnqueueSeq(long topicId, int partitionId) throws Exception {
+    try (Connection c = database.dataSource().getConnection();
+        PreparedStatement ps =
+            c.prepareStatement(
+                "SELECT COALESCE(MAX(enqueue_seq), 0) FROM "
+                    + names.qualifiedMessage()
+                    + " WHERE topic_id = ? AND partition_id = ?")) {
+      ps.setLong(1, topicId);
+      ps.setInt(2, partitionId);
+      try (var rs = ps.executeQuery()) {
+        rs.next();
+        return rs.getLong(1);
       }
     }
   }
